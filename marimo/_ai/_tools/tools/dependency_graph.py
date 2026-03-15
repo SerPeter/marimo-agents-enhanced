@@ -57,14 +57,11 @@ class GetCellDependencyGraphOutput(SuccessResult):
 class GetCellDependencyGraph(
     ToolBase[GetCellDependencyGraphArgs, GetCellDependencyGraphOutput]
 ):
-    """Get the cell dependency graph showing how cells relate through shared variables.
+    """Explore the dataflow graph showing how cells depend on each other through shared variables. Use this before editing cells that define or reference shared variables.
 
     This tool reveals which variables each cell defines and references, parent/child
     relationships between cells, variable ownership, and any dependency issues like
     multiply-defined variables or cycles.
-
-    Use this tool to understand the dataflow structure of a notebook before making
-    changes that involve shared variables.
 
     Args:
         session_id: The session ID of the notebook from get_active_notebooks.

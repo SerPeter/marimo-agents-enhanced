@@ -36,12 +36,7 @@ class LintNotebookOutput(SuccessResult):
 
 
 class LintNotebook(ToolBase[LintNotebookArgs, LintNotebookOutput]):
-    """Lint a marimo notebook to check for issues.
-
-    Uses marimo's internal linting engine to check for:
-    - Breaking issues: Problems that prevent the notebook from running
-    - Runtime issues: Problems that may cause unexpected behavior
-    - Formatting issues: Code style and formatting problems
+    """Lint a marimo notebook for structural and formatting issues. Use this after EVERY edit to catch breaking issues, runtime problems, and formatting concerns before they cause errors.
 
     Args:
         session_id: The session ID of the notebook to lint.
@@ -52,18 +47,20 @@ class LintNotebook(ToolBase[LintNotebookArgs, LintNotebookOutput]):
 
     guidelines = ToolGuidelines(
         when_to_use=[
-            "ALWAYS use this tool after making ANY EDITS, CELLS, OR CHANGES to a marimo notebook to verify you didn't introduce any issues",
-            "ALWAYS use this tool when you want to lint a marimo notebook instead of using your own default linting tool",
+            "ALWAYS use this after making ANY edits to a marimo notebook to verify you didn't introduce issues",
+            "ALWAYS use this instead of your own default linting tool for marimo notebooks",
             "When the user asks to check or validate their notebook",
         ],
         prerequisites=[
-            "You must have a valid session id from an active notebook",
+            "You must have a valid session id from get_active_notebooks",
         ],
         avoid_if=[
-            "You just made changes to fix lint issues - explain what you fixed instead of immediately linting again",
+            "You just made changes to fix lint issues — explain what you fixed instead of immediately re-linting",
         ],
         additional_info=(
-            "This tool provides static analysis only and does not execute code. "
+            "Checks for breaking issues (parse errors, variable collisions, cycles), "
+            "runtime issues (branch expressions, self-imports), and formatting issues. "
+            "This is read-only static analysis — it does not execute code. "
             "Some issues may require running the notebook to fully diagnose."
         ),
     )

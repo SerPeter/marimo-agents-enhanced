@@ -9,13 +9,13 @@ You can run tools like [claude code](https://www.anthropic.com/claude-code) or [
 To help your agent, you might want to take the snippet below as starting context for your `CLAUDE.md`/`AGENTS.md` file. This snippet should be seen as a starting point and we recommend adding extra context yourself. Things like "prefer polars over pandas" to indicate your preferred libraries and tools.
 
 ```console
-curl https://docs.marimo.io/CLAUDE.md > CLAUDE.md
+curl https://docs.marimo.io/AGENTS.md > AGENTS.md
 ```
 
-/// details | Example CLAUDE.md file
+/// details | Example AGENTS.md file
 
 ```markdown
---8<-- "docs/_static/CLAUDE.md"
+--8<-- "docs/_static/AGENTS.md"
 ```
 
 ///

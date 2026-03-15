@@ -46,6 +46,28 @@ Marimo's reactivity means:
 - You cannot access a UI element's value in the same cell where it's defined
 - Cells prefixed with an underscore (e.g. _my_var) are local to the cell and cannot be accessed by other cells
 
+## Common Pitfalls
+
+- **Display vs export**: Bare expression = displayed. `return` tuple = exported. Never `return mo.md()`.
+- **`_`-prefix scoping**: `_`-prefixed variables are cell-private — they cannot be exported or consumed cross-cell.
+- **MultipleDefinitionError**: Each non-underscore variable name can only be defined in ONE cell. Duplicates cause MultipleDefinitionError.
+- **UI element `.value` in same cell**: UI element `.value` cannot be accessed in the same cell where the element is defined. Define the element in one cell, read `.value` in another.
+- **Mermaid diagrams**: Use `mo.mermaid()` for diagrams, not fenced mermaid blocks inside `mo.md()`.
+- **No `print()`**: Don't use `print()` for display — use `mo.md()`, `mo.Html()`, or bare expressions instead.
+- **Circular dependencies**: Reorganize code to remove cycles in the dependency graph.
+
+## MCP Tool Workflow
+
+When working with marimo notebooks via MCP tools, follow this sequence:
+
+1. `get_marimo_rules` — understand marimo's rules (do this once per session)
+2. `get_active_notebooks` — get session IDs for running notebooks
+3. `get_lightweight_cell_map` — see all cells, find the ones you need
+4. `get_cell_runtime_data` / `get_cell_outputs` — inspect specific cells
+5. Edit the notebook file directly (use the file path from step 2)
+6. `lint_notebook` — ALWAYS lint after edits
+7. `get_notebook_errors` — check for runtime errors
+
 ## Best Practices
 
 <data_handling>
@@ -80,26 +102,11 @@ Marimo's reactivity means:
 - Don't add comments in cells that use mo.sql()
 </sql>
 
-## MCP Tool Workflow
-
-When working with marimo notebooks via MCP tools, follow this sequence:
-
-1. `get_marimo_rules` — understand marimo's rules (do this once per session)
-2. `get_active_notebooks` — get session IDs for running notebooks
-3. `get_lightweight_cell_map` — see all cells, find the ones you need
-4. `get_cell_runtime_data` / `get_cell_outputs` — inspect specific cells
-5. Edit the notebook file directly (use the file path from step 2)
-6. `lint_notebook` — ALWAYS lint after edits
-7. `get_notebook_errors` — check for runtime errors
-
-## Common Pitfalls
-
-- Bare expression = displayed. `return` tuple = exported. Never `return mo.md()`.
-- `_`-prefixed variables are cell-private — cannot be exported or consumed cross-cell.
-- Each non-underscore variable name can only be defined in ONE cell. Duplicates cause MultipleDefinitionError.
-- UI element `.value` cannot be accessed in the same cell where the element is defined.
-- `mo.mermaid()` for diagrams, not fenced blocks in `mo.md()`.
-- Don't use `print()` — use `mo.md()` instead.
+For detailed guidance on specific topics, call `get_marimo_rules` with a topic parameter:
+- `visualization` — matplotlib, plotly, altair patterns and chart sizing
+- `ui_elements` — full widget reference, reactivity patterns, batch, mo.stop + run_button
+- `sql` — mo.sql() patterns, DuckDB integration
+- `data_handling` — polars patterns, data validation, large data handling
 
 ## Troubleshooting
 
@@ -150,7 +157,7 @@ automatically resolve common formatting issues, and detect common pitfalls.
 
 ## Examples
 
-<example title="Markdown ccell">
+<example title="Markdown cell">
 ```
 @app.cell
 def _():
@@ -303,11 +310,11 @@ def _():
 @app.cell
 def _():
     # Load dataset
-    weather = pl.read_csv("<https://raw.githubusercontent.com/vega/vega-datasets/refs/heads/main/data/weather.csv>")
+    weather = pl.read_csv("https://raw.githubusercontent.com/vega/vega-datasets/refs/heads/main/data/weather.csv")
     weather_dates = weather.with_columns(
         pl.col("date").str.strptime(pl.Date, format="%Y-%m-%d")
     )
-    _chart = (
+    weather_chart = (
         alt.Chart(weather_dates)
         .mark_point()
         .encode(
@@ -320,8 +327,8 @@ def _():
 
 @app.cell
 def _():
-    chart = mo.ui.altair_chart(_chart)
-chart
+    chart = mo.ui.altair_chart(weather_chart)
+    chart
     return
 
 @app.cell
@@ -351,11 +358,11 @@ def _():
 @app.cell
 def _():
     if first_button.value:
-        print("You chose option 1!")
+        mo.md("You chose option 1!")
     elif second_button.value:
-        print("You chose option 2!")
+        mo.md("You chose option 2!")
     else:
-        print("Click a button!")
+        mo.md("Click a button!")
     return
 
 ```
@@ -372,7 +379,7 @@ def _():
 
 @app.cell
 def _():
-    weather = pl.read_csv('<https://raw.githubusercontent.com/vega/vega-datasets/refs/heads/main/data/weather.csv>')
+    weather = pl.read_csv('https://raw.githubusercontent.com/vega/vega-datasets/refs/heads/main/data/weather.csv')
     return
 
 @app.cell

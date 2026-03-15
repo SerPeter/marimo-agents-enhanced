@@ -39,18 +39,22 @@ class GetActiveNotebooksOutput(SuccessResult):
 
 
 class GetActiveNotebooks(ToolBase[EmptyArgs, GetActiveNotebooksOutput]):
-    """List currently active marimo notebooks and a summary block.
+    """List active marimo notebook sessions. Use this first to get session IDs required by all other tools.
 
     Returns:
-        A success result containing summary statistics and notebook details.
+        A success result containing summary statistics and notebook details
+        including session IDs and file paths.
     """
 
     guidelines = ToolGuidelines(
         when_to_use=[
-            "At the start of marimo notebook interactions to get session IDs",
-            "When receiving session-related errors",
+            "ALWAYS call this first — you need session IDs for all other marimo tools",
+            "When receiving session-related errors or invalid session ID responses",
         ],
-        additional_info="Use the file paths returned by this tool to directly edit a notebook.",
+        additional_info=(
+            "Returns session IDs and file paths for all running notebooks. "
+            "Use the file paths to directly edit notebook files."
+        ),
     )
 
     def handle(self, args: EmptyArgs) -> GetActiveNotebooksOutput:

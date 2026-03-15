@@ -28,8 +28,7 @@ class GetNotebookErrorsOutput(SuccessResult):
 class GetNotebookErrors(
     ToolBase[GetNotebookErrorsArgs, GetNotebookErrorsOutput]
 ):
-    """
-    Get all errors in the current notebook session, organized by cell.
+    """Get all errors in a notebook, organized by cell. Use this after edits or when debugging to get the full error picture.
 
     Args:
         session_id: The session ID of the notebook.
@@ -40,12 +39,17 @@ class GetNotebookErrors(
 
     guidelines = ToolGuidelines(
         when_to_use=[
+            "After running or editing cells to check for errors",
             "When the user reports errors or issues in their notebook",
-            "Before debugging or fixing broken cells",
+            "Before debugging — get the full error picture first",
         ],
         prerequisites=[
-            "You must have a valid session id from an active notebook",
+            "You must have a valid session id from get_active_notebooks",
         ],
+        additional_info=(
+            "Returns errors organized by cell. After identifying cells with errors, "
+            "use get_cell_runtime_data to inspect the full code and variables of those cells."
+        ),
     )
 
     def handle(self, args: GetNotebookErrorsArgs) -> GetNotebookErrorsOutput:

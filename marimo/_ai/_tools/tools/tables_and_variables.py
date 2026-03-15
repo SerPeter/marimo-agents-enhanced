@@ -50,8 +50,7 @@ class TablesAndVariablesOutput(SuccessResult):
 class GetTablesAndVariables(
     ToolBase[TablesAndVariablesArgs, TablesAndVariablesOutput]
 ):
-    """
-    Get tables and variables information in the session.
+    """Inspect in-memory DataFrames and Python variables. Use this to understand available data before suggesting operations.
 
     When provided with a list of variable names, it will return information about the variables and tables mentioned.
     If an empty list is provided, it will return information about all tables and variables.

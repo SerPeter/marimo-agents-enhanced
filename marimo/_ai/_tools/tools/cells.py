@@ -127,10 +127,7 @@ class GetCellOutputOutput(SuccessResult):
 class GetLightweightCellMap(
     ToolBase[GetLightweightCellMapArgs, GetLightweightCellMapOutput]
 ):
-    """Get a lightweight map of cells showing the first few lines of each cell.
-
-    This tool provides an overview of notebook structure for initial navigation,
-    showing a preview of each cell's content without full code or outputs.
+    """Get an overview of all cells in a notebook. Use this to find cells by their code preview and get cell IDs for targeted inspection.
 
     Each cell includes a runtime_state field with one of the following values:
     - "idle": cell has executed and is quiescent (includes cells with errors)
@@ -149,11 +146,12 @@ class GetLightweightCellMap(
 
     guidelines = ToolGuidelines(
         when_to_use=[
-            "To get an overview of notebook structure and all cell IDs",
+            "After get_active_notebooks — use this to see all cells and find specific ones",
+            "To get an overview of notebook structure and identify cell IDs",
             "When navigating a notebook before making targeted changes",
         ],
         prerequisites=[
-            "You must have a valid session id from an active notebook",
+            "You must have a valid session id from get_active_notebooks",
         ],
     )
 
@@ -263,11 +261,7 @@ class GetLightweightCellMap(
 class GetCellRuntimeData(
     ToolBase[GetCellRuntimeDataArgs, GetCellRuntimeDataOutput]
 ):
-    """Get runtime data for one or more cells including code, errors, and variables.
-
-    This tool provides detailed runtime information for the given cells,
-    including source code, any execution errors, and the variables
-    defined or modified in each cell.
+    """Inspect one or more cells' full code, errors, and variables. Use this after identifying cells of interest from the cell map.
 
     Each cell's metadata includes a runtime_state field with one of the following values:
     - "idle": cell has executed and is quiescent (includes cells with errors)
@@ -291,12 +285,13 @@ class GetCellRuntimeData(
 
     guidelines = ToolGuidelines(
         when_to_use=[
-            "When inspecting one or more cells' code, errors, or variables",
-            "After identifying cells of interest from the cell map",
+            "To inspect a cell's full code, errors, and variable definitions",
+            "After identifying cells of interest from get_lightweight_cell_map",
+            "When debugging a specific cell's behavior or errors",
         ],
         prerequisites=[
-            "You must have a valid session id from an active notebook",
-            "You must have valid cell ids from an active notebook",
+            "You must have a valid session id from get_active_notebooks",
+            "You must have cell ids from get_lightweight_cell_map",
         ],
     )
 
@@ -404,7 +399,7 @@ class GetCellRuntimeData(
 
 
 class GetCellOutputs(ToolBase[GetCellOutputArgs, GetCellOutputOutput]):
-    """Get cell execution outputs including visual display and console streams.
+    """Get what cells displayed — visual output (HTML, charts, tables) and console streams (stdout/stderr). Use this to see cell results without re-running.
 
     Args:
         session_id: The session ID of the notebook from get_active_notebooks
@@ -417,13 +412,18 @@ class GetCellOutputs(ToolBase[GetCellOutputArgs, GetCellOutputOutput]):
 
     guidelines = ToolGuidelines(
         when_to_use=[
-            "When you need to see what one or more cells displayed or printed",
-            "To review charts, visualizations, markdown, HTML, or console output from cells",
+            "When you need to see what a cell displayed — charts, tables, markdown, HTML",
+            "To review console output (stdout/stderr) from cell execution",
         ],
         prerequisites=[
-            "You must have a valid session id from an active notebook",
-            "You must have valid cell ids from an active notebook",
+            "You must have a valid session id from get_active_notebooks",
+            "You must have cell ids from get_lightweight_cell_map",
         ],
+        additional_info=(
+            "Returns visual output with mimetype and console streams. "
+            "Large HTML/SVG outputs may be truncated. "
+            "For data inspection, prefer get_tables_and_variables instead."
+        ),
     )
 
     def handle(self, args: GetCellOutputArgs) -> GetCellOutputOutput:
