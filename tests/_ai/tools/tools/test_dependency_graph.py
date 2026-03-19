@@ -147,6 +147,9 @@ def test_full_graph_basic():
     assert result.multiply_defined == []
     assert result.cycles == []
 
+    # Topological order matches the chain
+    assert result.topological_order == ["c1", "c2", "c3"]
+
 
 def test_cell_id_with_depth_1():
     """Centered on c2 with depth=1 should include c1, c2, c3 but not c0."""
@@ -184,6 +187,9 @@ def test_cell_id_with_depth_1():
 
     # variable_owners is still global
     assert "w" in result.variable_owners
+
+    # Topological order of the depth-filtered subgraph
+    assert result.topological_order == ["c1", "c2", "c3"]
 
 
 def test_cell_id_with_depth_none():
@@ -343,6 +349,7 @@ def test_empty_graph():
     )
 
     assert result.cells == []
+    assert result.topological_order == []
     assert result.variable_owners == {}
     assert result.multiply_defined == []
     assert result.cycles == []
@@ -385,3 +392,73 @@ def test_variable_datatype_none_when_not_executed():
         GetCellDependencyGraphArgs(session_id=SessionId("s1"))
     )
     assert result.cells[0].defs[0].datatype is None
+
+
+def test_topological_order_diamond():
+    """Diamond graph: c1→c2, c1→c3, c2→c4, c3→c4 — valid topological order."""
+    tool = _make_tool_with_graph(
+        cell_impls={
+            "c1": _make_cell_impl(defs={"a"}, refs=set()),
+            "c2": _make_cell_impl(defs={"b"}, refs={"a"}),
+            "c3": _make_cell_impl(defs={"c"}, refs={"a"}),
+            "c4": _make_cell_impl(defs={"d"}, refs={"b", "c"}),
+        },
+        parents={
+            "c1": set(),
+            "c2": {"c1"},
+            "c3": {"c1"},
+            "c4": {"c2", "c3"},
+        },
+        children={
+            "c1": {"c2", "c3"},
+            "c2": {"c4"},
+            "c3": {"c4"},
+            "c4": set(),
+        },
+        definitions={"a": {"c1"}, "b": {"c2"}, "c": {"c3"}, "d": {"c4"}},
+        cell_data_list=[
+            _make_cell_data("c1"),
+            _make_cell_data("c2"),
+            _make_cell_data("c3"),
+            _make_cell_data("c4"),
+        ],
+    )
+
+    result = tool.handle(
+        GetCellDependencyGraphArgs(session_id=SessionId("s1"))
+    )
+
+    topo = result.topological_order
+    assert len(topo) == 4
+    # c1 must come before c2 and c3; c2 and c3 must come before c4
+    assert topo.index("c1") < topo.index("c2")
+    assert topo.index("c1") < topo.index("c3")
+    assert topo.index("c2") < topo.index("c4")
+    assert topo.index("c3") < topo.index("c4")
+
+
+def test_topological_order_independent_cells():
+    """Independent cells with no dependencies — all appear in topological order."""
+    tool = _make_tool_with_graph(
+        cell_impls={
+            "c1": _make_cell_impl(defs={"x"}, refs=set()),
+            "c2": _make_cell_impl(defs={"y"}, refs=set()),
+            "c3": _make_cell_impl(defs={"z"}, refs=set()),
+        },
+        parents={"c1": set(), "c2": set(), "c3": set()},
+        children={"c1": set(), "c2": set(), "c3": set()},
+        definitions={"x": {"c1"}, "y": {"c2"}, "z": {"c3"}},
+        cell_data_list=[
+            _make_cell_data("c1"),
+            _make_cell_data("c2"),
+            _make_cell_data("c3"),
+        ],
+    )
+
+    result = tool.handle(
+        GetCellDependencyGraphArgs(session_id=SessionId("s1"))
+    )
+
+    # All cells present; registration order is the tiebreaker
+    assert set(result.topological_order) == {"c1", "c2", "c3"}
+    assert result.topological_order == ["c1", "c2", "c3"]

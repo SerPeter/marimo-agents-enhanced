@@ -12,6 +12,7 @@ from marimo._ast.errors import (
     MultipleDefinitionError,
     UnparsableError,
 )
+from marimo._runtime.dataflow import topological_sort
 from marimo._runtime.dataflow.graph import DirectedGraph
 from marimo._types.ids import CellId_t, SessionId
 
@@ -49,6 +50,7 @@ class CycleInfo:
 @dataclass
 class GetCellDependencyGraphOutput(SuccessResult):
     cells: list[CellDependencyInfo] = field(default_factory=list)
+    topological_order: list[str] = field(default_factory=list)
     variable_owners: dict[str, list[str]] = field(default_factory=dict)
     multiply_defined: list[str] = field(default_factory=list)
     cycles: list[CycleInfo] = field(default_factory=list)
@@ -72,8 +74,10 @@ class GetCellDependencyGraph(
             Defaults to None (full transitive closure).
 
     Returns:
-        A success result containing cell dependency info, variable ownership map,
-        multiply-defined variables, and cycle information.
+        A success result containing cell dependency info, topological execution
+        order, variable ownership map, multiply-defined variables, and cycle
+        information. The topological_order lists cell IDs in valid execution
+        order; cells involved in cycles are omitted from this list.
     """
 
     guidelines = ToolGuidelines(
@@ -206,8 +210,15 @@ class GetCellDependencyGraph(
                 )
             )
 
+        # Topological order of included cells (execution order).
+        # Returns only non-cyclic cells when cycles exist.
+        topo_order: list[str] = list(
+            topological_sort(graph, included_cell_ids)
+        )
+
         return GetCellDependencyGraphOutput(
             cells=cells,
+            topological_order=topo_order,
             variable_owners=variable_owners,
             multiply_defined=multiply_defined,
             cycles=cycles,
