@@ -165,6 +165,10 @@ class SessionView:
         self.last_executed_code: dict[CellId_t, str] = {}
         # Map of cell id to the last cell execution time
         self.last_execution_time: dict[CellId_t, float] = {}
+        # Map of cell id to the number of times the cell has been executed
+        self.execution_count: dict[CellId_t, int] = {}
+        # Any stale code that was read from a file-watcher
+        self.stale_code: Optional[UpdateCellCodesNotification] = None
         # Aggregated model state — one snapshot per live model.
         # Updates merge in; close removes the entry.
         self.model_states: dict[WidgetModelId, ModelReplayState] = {}
@@ -523,6 +527,9 @@ class SessionView:
             start = start if start else 0
             time_elapsed = time.time() - start
             time_elapsed = round(time_elapsed * 1000)
+            self.execution_count[cell_id] = (
+                self.execution_count.get(cell_id, 0) + 1
+            )
 
         self.last_execution_time[cell_id] = time_elapsed
 

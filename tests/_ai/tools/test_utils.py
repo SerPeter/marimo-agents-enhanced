@@ -15,6 +15,7 @@ class MockSessionView:
     last_execution_time: dict | None = None
     variable_values: dict | None = None
     data_connectors: Any = None
+    execution_count: dict | None = None
 
     def __post_init__(self) -> None:
         if self.cell_notifications is None:
@@ -23,6 +24,8 @@ class MockSessionView:
             self.last_execution_time = {}
         if self.variable_values is None:
             self.variable_values = {}
+        if self.execution_count is None:
+            self.execution_count = {}
 
 
 @dataclass

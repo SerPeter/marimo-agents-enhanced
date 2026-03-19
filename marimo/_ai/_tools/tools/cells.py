@@ -50,6 +50,9 @@ class LightweightCellInfo:
     has_output: bool = False
     has_console_output: bool = False
     has_errors: bool = False
+    stale_inputs: Optional[bool] = None
+    execution_time: Optional[float] = None
+    execution_count: int = 0
 
 
 @dataclass
@@ -70,6 +73,10 @@ class CellRuntimeMetadata:
     # Duration of the last execution in milliseconds.
     # Only populated when runtime_state is "idle"; null otherwise.
     execution_time: Optional[float] = None
+    # Whether the cell's inputs are stale (upstream dependency changed).
+    stale_inputs: Optional[bool] = None
+    # Number of times this cell has been executed in the current session.
+    execution_count: int = 0
 
 
 CellVariables = dict[str, VariableValue]
@@ -183,6 +190,7 @@ class GetLightweightCellMap(
             has_output = False
             has_console_output = False
             has_errors = False
+            stale_inputs: Optional[bool] = None
             cell_notif = session_view.cell_notifications.get(cell_data.cell_id)
             if cell_notif is not None:
                 if cell_notif.status is not None:
@@ -197,6 +205,17 @@ class GetLightweightCellMap(
                     and cell_notif.output.data is not None
                 )
                 has_console_output = bool(cell_notif.console)
+                stale_inputs = cell_notif.stale_inputs
+
+            # Execution diagnostics
+            execution_time: Optional[float] = None
+            if runtime_state == "idle":
+                execution_time = session_view.last_execution_time.get(
+                    cell_data.cell_id
+                )
+            execution_count = session_view.execution_count.get(
+                cell_data.cell_id, 0
+            )
 
             # Add cell to cell map
             cells.append(
@@ -209,6 +228,9 @@ class GetLightweightCellMap(
                     has_output=has_output,
                     has_console_output=has_console_output,
                     has_errors=has_errors,
+                    stale_inputs=stale_inputs,
+                    execution_time=execution_time,
+                    execution_count=execution_count,
                 )
             )
 
@@ -359,8 +381,11 @@ class GetCellRuntimeData(
         cell_notif = session_view.cell_notifications.get(cell_id)
 
         runtime_state = None
-        if cell_notif and cell_notif.status is not None:
-            runtime_state = cell_notif.status
+        stale_inputs = None
+        if cell_notif:
+            if cell_notif.status is not None:
+                runtime_state = cell_notif.status
+            stale_inputs = cell_notif.stale_inputs
 
         # Only return execution time when the cell is idle — that's when
         # the value is a duration in milliseconds.  While the cell is
@@ -370,8 +395,13 @@ class GetCellRuntimeData(
         if runtime_state == "idle":
             execution_time = session_view.last_execution_time.get(cell_id)
 
+        execution_count = session_view.execution_count.get(cell_id, 0)
+
         return CellRuntimeMetadata(
-            runtime_state=runtime_state, execution_time=execution_time
+            runtime_state=runtime_state,
+            execution_time=execution_time,
+            stale_inputs=stale_inputs,
+            execution_count=execution_count,
         )
 
     def _get_cell_variables(

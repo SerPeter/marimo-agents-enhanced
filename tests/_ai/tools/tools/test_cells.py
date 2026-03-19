@@ -28,6 +28,7 @@ class MockCellNotification:
     output: object | None = None
     console: object | None = None
     status: object | None = None
+    stale_inputs: object | None = None
 
 
 @dataclass
@@ -487,3 +488,130 @@ def test_get_cell_outputs_invalid_cell():
     with pytest.raises(ToolExecutionError) as exc_info:
         tool.handle(args)
     assert exc_info.value.code == "CELL_NOT_FOUND"
+
+
+def test_get_cell_metadata_with_stale_inputs():
+    """Test that stale_inputs from cell notification is surfaced."""
+    tool = GetCellRuntimeData(ToolContext())
+    cell_notification = MockCellNotification(status="idle", stale_inputs=True)
+    session = MockSession(
+        _session_view=MockSessionView(
+            cell_notifications={"c1": cell_notification},
+            last_execution_time={"c1": 10.0},
+        )
+    )
+
+    result = tool._get_cell_metadata(session, CellId_t("c1"))
+    assert result.stale_inputs is True
+    assert result.execution_time == 10.0
+
+
+def test_get_cell_metadata_stale_inputs_none_when_absent():
+    """Test that stale_inputs is None when not set in notification."""
+    tool = GetCellRuntimeData(ToolContext())
+    cell_notification = MockCellNotification(status="idle")
+    session = MockSession(
+        _session_view=MockSessionView(
+            cell_notifications={"c1": cell_notification},
+        )
+    )
+
+    result = tool._get_cell_metadata(session, CellId_t("c1"))
+    assert result.stale_inputs is None
+
+
+def test_get_cell_metadata_with_execution_count():
+    """Test that execution_count from session view is surfaced."""
+    tool = GetCellRuntimeData(ToolContext())
+    cell_notification = MockCellNotification(status="idle")
+    session = MockSession(
+        _session_view=MockSessionView(
+            cell_notifications={"c1": cell_notification},
+            execution_count={"c1": 5},
+        )
+    )
+
+    result = tool._get_cell_metadata(session, CellId_t("c1"))
+    assert result.execution_count == 5
+
+
+def test_get_cell_metadata_execution_count_default():
+    """Test that execution_count defaults to 0 for unexecuted cells."""
+    tool = GetCellRuntimeData(ToolContext())
+    session = MockSession(_session_view=MockSessionView())
+
+    result = tool._get_cell_metadata(session, CellId_t("missing"))
+    assert result.execution_count == 0
+
+
+def test_lightweight_cell_map_diagnostics():
+    """Test that LightweightCellInfo includes stale_inputs,
+    execution_time, and execution_count."""
+    tool = GetLightweightCellMap(ToolContext())
+
+    cell_data = Mock()
+    cell_data.cell_id = "c1"
+    cell_data.code = "x = 1"
+    cell_data.cell = None
+
+    mock_cell_manager = Mock()
+    mock_cell_manager.cell_data.return_value = [cell_data]
+
+    notif = MockCellNotification(status="idle", stale_inputs=True)
+
+    mock_session = Mock()
+    mock_session.app_file_manager.app.cell_manager = mock_cell_manager
+    mock_session.app_file_manager.filename = "test.py"
+    mock_session.session_view = MockSessionView(
+        cell_notifications={"c1": notif},
+        last_execution_time={"c1": 42.5},
+        execution_count={"c1": 3},
+    )
+
+    context = Mock(spec=ToolContext)
+    context.get_session.return_value = mock_session
+    tool.context = context
+
+    args = GetLightweightCellMapArgs(
+        session_id=SessionId("test"), preview_lines=3
+    )
+    result = tool.handle(args)
+
+    assert len(result.cells) == 1
+    cell = result.cells[0]
+    assert cell.stale_inputs is True
+    assert cell.execution_time == 42.5
+    assert cell.execution_count == 3
+
+
+def test_lightweight_cell_map_no_diagnostics():
+    """Test defaults when no notifications exist for a cell."""
+    tool = GetLightweightCellMap(ToolContext())
+
+    cell_data = Mock()
+    cell_data.cell_id = "c1"
+    cell_data.code = "x = 1"
+    cell_data.cell = None
+
+    mock_cell_manager = Mock()
+    mock_cell_manager.cell_data.return_value = [cell_data]
+
+    mock_session = Mock()
+    mock_session.app_file_manager.app.cell_manager = mock_cell_manager
+    mock_session.app_file_manager.filename = "test.py"
+    mock_session.session_view = MockSessionView()
+
+    context = Mock(spec=ToolContext)
+    context.get_session.return_value = mock_session
+    tool.context = context
+
+    args = GetLightweightCellMapArgs(
+        session_id=SessionId("test"), preview_lines=3
+    )
+    result = tool.handle(args)
+
+    assert len(result.cells) == 1
+    cell = result.cells[0]
+    assert cell.stale_inputs is None
+    assert cell.execution_time is None
+    assert cell.execution_count == 0
