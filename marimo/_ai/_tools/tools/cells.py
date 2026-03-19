@@ -160,6 +160,10 @@ class GetLightweightCellMap(
         prerequisites=[
             "You must have a valid session id from get_active_notebooks",
         ],
+        additional_info=(
+            "The notebook's table of contents. Shows code preview, cell type, "
+            "runtime state, and error/output flags per cell. Start here before drilling in."
+        ),
     )
 
     def handle(
@@ -315,6 +319,15 @@ class GetCellRuntimeData(
             "You must have a valid session id from get_active_notebooks",
             "You must have cell ids from get_lightweight_cell_map",
         ],
+        avoid_if=[
+            "You only need a notebook overview — use get_lightweight_cell_map",
+            "You only need displayed output — use get_cell_outputs",
+        ],
+        additional_info=(
+            "Returns full code, errors with tracebacks, runtime metadata "
+            "(state, execution time, stale inputs), and variables with values and types. "
+            "Empty cell_ids returns all cells."
+        ),
     )
 
     def handle(self, args: GetCellRuntimeDataArgs) -> GetCellRuntimeDataOutput:

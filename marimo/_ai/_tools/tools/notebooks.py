@@ -51,6 +51,9 @@ class GetActiveNotebooks(ToolBase[EmptyArgs, GetActiveNotebooksOutput]):
             "ALWAYS call this first — you need session IDs for all other marimo tools",
             "When receiving session-related errors or invalid session ID responses",
         ],
+        avoid_if=[
+            "You already have a valid session ID from this conversation",
+        ],
         additional_info=(
             "Returns session IDs and file paths for all running notebooks. "
             "Use the file paths to directly edit notebook files."

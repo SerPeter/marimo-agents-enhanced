@@ -68,6 +68,26 @@ When working with marimo notebooks via MCP tools, follow this sequence:
 6. `lint_notebook` — ALWAYS lint after edits
 7. `get_notebook_errors` — check for runtime errors
 
+### Decision Tree
+
+- Need session IDs? → `get_active_notebooks`
+- Need notebook overview? → `get_lightweight_cell_map`
+- Need full cell code/variables? → `get_cell_runtime_data`
+- Need cell display output? → `get_cell_outputs`
+- Need DataFrame/variable info? → `get_tables_and_variables`
+- Need SQL schema? → `get_database_tables`
+- Need cell dependencies? → `get_cell_dependency_graph`
+- Need to check errors? → `get_notebook_errors`
+- Need to validate edits? → `lint_notebook`
+
+### Common Agent Mistakes
+
+1. **Skipping `get_active_notebooks`** — all other tools need a session ID from it
+2. **Not linting after edits** — always call `lint_notebook` after modifying the file
+3. **Using `get_cell_runtime_data` without `get_lightweight_cell_map` first** — find cells before inspecting them
+4. **Confusing `get_database_tables` and `get_tables_and_variables`** — databases vs. in-memory DataFrames
+5. **Ignoring `stale_inputs`** — if true, cell output may be outdated
+
 ## Best Practices
 
 <data_handling>

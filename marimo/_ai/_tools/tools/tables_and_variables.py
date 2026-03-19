@@ -70,6 +70,10 @@ class GetTablesAndVariables(
         avoid_if=[
             "the user is asking about database tables or data sources, use the get_database_tables tool instead",
         ],
+        additional_info=(
+            "Returns DataFrame schemas (columns, types, row counts) and variable values with types. "
+            "For SQL connection schemas, use get_database_tables instead."
+        ),
     )
 
     def handle(self, args: TablesAndVariablesArgs) -> TablesAndVariablesOutput:

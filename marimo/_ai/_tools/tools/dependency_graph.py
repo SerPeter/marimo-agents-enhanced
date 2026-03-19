@@ -93,6 +93,10 @@ class GetCellDependencyGraph(
         prerequisites=[
             "You must have a valid session id from an active notebook",
         ],
+        additional_info=(
+            "Pass cell_id + depth to focus on a neighborhood. Omit both for full graph. "
+            "topological_order gives valid execution order; cyclic cells are excluded."
+        ),
     )
 
     def handle(

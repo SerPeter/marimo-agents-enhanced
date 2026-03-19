@@ -4,8 +4,10 @@
 from marimo._mcp.server._prompts.base import PromptBase
 from marimo._mcp.server._prompts.prompts.errors import ErrorsSummary
 from marimo._mcp.server._prompts.prompts.notebooks import ActiveNotebooks
+from marimo._mcp.server._prompts.prompts.workflow import WorkflowGuidance
 
 SUPPORTED_MCP_PROMPTS: list[type[PromptBase]] = [
     ActiveNotebooks,
     ErrorsSummary,
+    WorkflowGuidance,
 ]

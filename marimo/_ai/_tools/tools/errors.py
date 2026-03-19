@@ -46,6 +46,10 @@ class GetNotebookErrors(
         prerequisites=[
             "You must have a valid session id from get_active_notebooks",
         ],
+        avoid_if=[
+            "You need cell code or variables — use get_cell_runtime_data instead",
+            "You need visual output — use get_cell_outputs instead",
+        ],
         additional_info=(
             "Returns errors organized by cell. After identifying cells with errors, "
             "use get_cell_runtime_data to inspect the full code and variables of those cells."
