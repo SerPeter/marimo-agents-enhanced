@@ -90,6 +90,7 @@ def _make_tool_with_graph(
 
     context = Mock(spec=ToolContext)
     context.get_session.return_value = mock_session
+    context.resolve_session.return_value = mock_session
 
     tool = GetCellDependencyGraph(ToolContext())
     tool.context = context

@@ -163,6 +163,7 @@ def test_get_tables_no_query(
         return sample_session
 
     tool.context.get_session = mock_get_session
+    tool.context.resolve_session = lambda sid, _fp=None: mock_get_session(sid)
 
     args = GetDatabaseTablesArgs(
         session_id="test_session",
@@ -192,6 +193,7 @@ def test_get_tables_with_simple_query(
         return multi_table_session
 
     tool.context.get_session = mock_get_session
+    tool.context.resolve_session = lambda sid, _fp=None: mock_get_session(sid)
 
     args = GetDatabaseTablesArgs(
         session_id="test_session",
@@ -219,6 +221,7 @@ def test_get_tables_with_regex_query(
         return multi_table_session
 
     tool.context.get_session = mock_get_session
+    tool.context.resolve_session = lambda sid, _fp=None: mock_get_session(sid)
 
     args = GetDatabaseTablesArgs(
         session_id="test_session",
@@ -244,6 +247,7 @@ def test_get_tables_with_schema_match(
         return multi_table_session
 
     tool.context.get_session = mock_get_session
+    tool.context.resolve_session = lambda sid, _fp=None: mock_get_session(sid)
 
     args = GetDatabaseTablesArgs(
         session_id="test_session",
@@ -274,6 +278,7 @@ def test_get_tables_empty_connections(tool: GetDatabaseTables):
         return empty_session
 
     tool.context.get_session = mock_get_session
+    tool.context.resolve_session = lambda sid, _fp=None: mock_get_session(sid)
 
     args = GetDatabaseTablesArgs(
         session_id="test_session",
@@ -295,6 +300,7 @@ def test_get_tables_no_matches(
         return sample_session
 
     tool.context.get_session = mock_get_session
+    tool.context.resolve_session = lambda sid, _fp=None: mock_get_session(sid)
 
     args = GetDatabaseTablesArgs(
         session_id="test_session",
@@ -317,6 +323,7 @@ def test_table_details_structure(
         return sample_session
 
     tool.context.get_session = mock_get_session
+    tool.context.resolve_session = lambda sid, _fp=None: mock_get_session(sid)
 
     args = GetDatabaseTablesArgs(
         session_id="test_session",
@@ -383,6 +390,7 @@ def test_multiple_connections(tool: GetDatabaseTables):
         return multi_conn_session
 
     tool.context.get_session = mock_get_session
+    tool.context.resolve_session = lambda sid, _fp=None: mock_get_session(sid)
 
     args = GetDatabaseTablesArgs(
         session_id="test_session",
@@ -451,6 +459,7 @@ def test_query_matches_multiple_levels(tool: GetDatabaseTables):
         return session
 
     tool.context.get_session = mock_get_session
+    tool.context.resolve_session = lambda sid, _fp=None: mock_get_session(sid)
 
     args = GetDatabaseTablesArgs(
         session_id="test_session",

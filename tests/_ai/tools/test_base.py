@@ -167,6 +167,7 @@ def test_get_notebook_errors_orders_by_cell_manager():
     )
 
     context.get_session = Mock(return_value=session)
+    context.resolve_session = Mock(return_value=session)
 
     errors = context.get_notebook_errors(
         SessionId("test"), include_stderr=False

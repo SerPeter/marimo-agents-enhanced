@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 from marimo._ai._tools.base import ToolBase
 from marimo._ai._tools.types import SuccessResult, ToolGuidelines
@@ -24,7 +25,8 @@ class DiagnosticSummary:
 class LintNotebookArgs:
     """Arguments for linting a notebook."""
 
-    session_id: SessionId
+    session_id: Optional[SessionId] = None
+    file_path: Optional[str] = None
 
 
 @dataclass
@@ -69,7 +71,7 @@ class LintNotebook(ToolBase[LintNotebookArgs, LintNotebookOutput]):
     )
 
     async def handle(self, args: LintNotebookArgs) -> LintNotebookOutput:  # type: ignore[override]
-        session = self.context.get_session(args.session_id)
+        session = self.context.resolve_session(args.session_id, args.file_path)
         notebook_ir = session.app_file_manager.app.to_ir()
 
         # TODO: Use lint config from session.config_manager once the AI

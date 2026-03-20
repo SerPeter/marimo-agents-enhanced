@@ -62,6 +62,12 @@ def tool() -> GetNotebookErrors:
 def mock_context() -> Mock:
     """Create a mock ToolContext."""
     context = Mock(spec=ToolContext)
+    # resolve_session_and_id returns (session, session_id) — return
+    # the session_id that was passed in so tests can verify forwarding.
+    context.resolve_session_and_id.side_effect = lambda sid, _fp=None: (
+        Mock(),
+        sid or SessionId("default"),
+    )
     return context
 
 

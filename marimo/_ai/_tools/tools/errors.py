@@ -14,7 +14,8 @@ from marimo._types.ids import SessionId
 
 @dataclass
 class GetNotebookErrorsArgs:
-    session_id: SessionId
+    session_id: SessionId | None = None
+    file_path: str | None = None
 
 
 @dataclass
@@ -50,7 +51,9 @@ class GetNotebookErrors(
 
     def handle(self, args: GetNotebookErrorsArgs) -> GetNotebookErrorsOutput:
         context = self.context
-        session_id = args.session_id
+        _, session_id = context.resolve_session_and_id(
+            args.session_id, args.file_path
+        )
         notebook_errors = context.get_notebook_errors(
             session_id, include_stderr=True
         )

@@ -14,8 +14,9 @@ from marimo._types.ids import SessionId
 
 @dataclass
 class TablesAndVariablesArgs:
-    session_id: SessionId
-    variable_names: list[str]
+    session_id: Optional[SessionId] = None
+    file_path: Optional[str] = None
+    variable_names: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -74,7 +75,7 @@ class GetTablesAndVariables(
     )
 
     def handle(self, args: TablesAndVariablesArgs) -> TablesAndVariablesOutput:
-        session = self.context.get_session(args.session_id)
+        session = self.context.resolve_session(args.session_id, args.file_path)
         return self._get_tables_and_variables(session, args.variable_names)
 
     def _get_tables_and_variables(

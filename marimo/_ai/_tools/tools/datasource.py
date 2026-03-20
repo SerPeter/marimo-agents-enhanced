@@ -22,7 +22,8 @@ if TYPE_CHECKING:
 
 @dataclass
 class GetDatabaseTablesArgs:
-    session_id: SessionId
+    session_id: Optional[SessionId] = None
+    file_path: Optional[str] = None
     query: Optional[str] = None
 
 
@@ -69,8 +70,7 @@ class GetDatabaseTables(
     )
 
     def handle(self, args: GetDatabaseTablesArgs) -> GetDatabaseTablesOutput:
-        session_id = args.session_id
-        session = self.context.get_session(session_id)
+        session = self.context.resolve_session(args.session_id, args.file_path)
 
         return self._get_tables(session, args.query)
 

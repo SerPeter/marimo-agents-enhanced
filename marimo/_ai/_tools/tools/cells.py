@@ -36,7 +36,8 @@ class SupportedCellType(str, Enum):
 
 @dataclass
 class GetLightweightCellMapArgs:
-    session_id: SessionId
+    session_id: Optional[SessionId] = None
+    file_path: Optional[str] = None
     preview_lines: int = 3  # random default value
 
 
@@ -87,7 +88,8 @@ class GetCellRuntimeDataData:
 
 @dataclass
 class GetCellRuntimeDataArgs:
-    session_id: SessionId
+    session_id: Optional[SessionId] = None
+    file_path: Optional[str] = None
     cell_ids: list[CellId_t] = field(default_factory=list)
 
 
@@ -115,7 +117,8 @@ class CellOutputData:
 
 @dataclass
 class GetCellOutputArgs:
-    session_id: SessionId
+    session_id: Optional[SessionId] = None
+    file_path: Optional[str] = None
     cell_ids: list[CellId_t] = field(default_factory=list)
 
 
@@ -160,9 +163,10 @@ class GetLightweightCellMap(
     def handle(
         self, args: GetLightweightCellMapArgs
     ) -> GetLightweightCellMapOutput:
-        session_id = args.session_id
         context = self.context
-        session = context.get_session(session_id)
+        session, session_id = context.resolve_session_and_id(
+            args.session_id, args.file_path
+        )
         cell_manager = session.app_file_manager.app.cell_manager
         session_view = session.session_view
         notebook_filename = (
@@ -216,7 +220,7 @@ class GetLightweightCellMap(
 
         return GetLightweightCellMapOutput(
             status="success",
-            session_id=args.session_id,
+            session_id=session_id,
             notebook_name=notebook_filename,
             cells=cells,
             total_cells=len(cells),
@@ -301,9 +305,10 @@ class GetCellRuntimeData(
     )
 
     def handle(self, args: GetCellRuntimeDataArgs) -> GetCellRuntimeDataOutput:
-        session_id = args.session_id
         context = self.context
-        session = context.get_session(session_id)
+        session, session_id = context.resolve_session_and_id(
+            args.session_id, args.file_path
+        )
 
         # Empty cell_ids means "return all cells"
         cell_ids = args.cell_ids
@@ -428,7 +433,9 @@ class GetCellOutputs(ToolBase[GetCellOutputArgs, GetCellOutputOutput]):
 
     def handle(self, args: GetCellOutputArgs) -> GetCellOutputOutput:
         context = self.context
-        session = context.get_session(args.session_id)
+        session, session_id = context.resolve_session_and_id(
+            args.session_id, args.file_path
+        )
         session_view = session.session_view
 
         # Empty cell_ids means "return all cells"
@@ -443,7 +450,7 @@ class GetCellOutputs(ToolBase[GetCellOutputArgs, GetCellOutputOutput]):
 
             if cell_notif is None:
                 raise ToolExecutionError(
-                    f"Cell {cell_id} not found in session {args.session_id}",
+                    f"Cell {cell_id} not found in session {session_id}",
                     code="CELL_NOT_FOUND",
                     is_retryable=False,
                     suggested_fix="Use get_lightweight_cell_map to find valid cell IDs",

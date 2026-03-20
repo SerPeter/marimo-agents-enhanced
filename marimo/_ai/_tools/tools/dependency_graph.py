@@ -18,7 +18,8 @@ from marimo._types.ids import CellId_t, SessionId
 
 @dataclass
 class GetCellDependencyGraphArgs:
-    session_id: SessionId
+    session_id: SessionId | None = None
+    file_path: str | None = None
     cell_id: CellId_t | None = None
     depth: int | None = None
 
@@ -97,7 +98,7 @@ class GetCellDependencyGraph(
     def handle(
         self, args: GetCellDependencyGraphArgs
     ) -> GetCellDependencyGraphOutput:
-        session = self.context.get_session(args.session_id)
+        session = self.context.resolve_session(args.session_id, args.file_path)
         variable_values = session.session_view.variable_values
         app = session.app_file_manager.app
         cell_manager = app.cell_manager

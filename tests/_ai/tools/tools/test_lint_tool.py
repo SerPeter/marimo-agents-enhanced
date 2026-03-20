@@ -39,6 +39,7 @@ async def test_lint_notebook_no_issues() -> None:
     # Mock ToolContext.get_session
     context = Mock(spec=ToolContext)
     context.get_session.return_value = session
+    context.resolve_session.return_value = session
     tool.context = context  # type: ignore[assignment]
 
     # Mock RuleEngine to return no diagnostics
@@ -74,6 +75,7 @@ async def test_lint_notebook_with_issues() -> None:
     # Mock ToolContext.get_session
     context = Mock(spec=ToolContext)
     context.get_session.return_value = session
+    context.resolve_session.return_value = session
     tool.context = context  # type: ignore[assignment]
 
     # Create mock diagnostics

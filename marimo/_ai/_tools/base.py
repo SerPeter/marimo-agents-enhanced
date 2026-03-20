@@ -92,6 +92,76 @@ class ToolContext:
             )
         return session
 
+    def resolve_session(
+        self,
+        session_id: Optional[SessionId] = None,
+        file_path: Optional[str] = None,
+    ) -> Session:
+        """Resolve a session from session_id or file_path.
+
+        If both are provided, session_id takes precedence.
+        """
+        if session_id:
+            return self.get_session(session_id)
+        if file_path:
+            return self._resolve_by_file_path(file_path)
+        raise ToolExecutionError(
+            "Either session_id or file_path is required",
+            code="MISSING_SESSION_IDENTIFIER",
+            is_retryable=False,
+            suggested_fix="Use get_active_notebooks to find valid session IDs or file paths.",
+        )
+
+    def resolve_session_and_id(
+        self,
+        session_id: Optional[SessionId] = None,
+        file_path: Optional[str] = None,
+    ) -> tuple[Session, SessionId]:
+        """Resolve a session and its ID from session_id or file_path."""
+        session = self.resolve_session(session_id, file_path)
+        if session_id:
+            return session, session_id
+        # Reverse-lookup the session ID from the repository
+        repo = self.session_manager._repository
+        found_id = repo.get_session_id(session)
+        if found_id is None:
+            raise ToolExecutionError(
+                "Could not determine session ID",
+                code="SESSION_ID_LOOKUP_FAILED",
+                is_retryable=False,
+                suggested_fix="Use get_active_notebooks to find valid session IDs.",
+            )
+        return session, found_id
+
+    def _resolve_by_file_path(self, file_path: str) -> Session:
+        """Resolve a single session by file path."""
+        repo = self.session_manager._repository
+        sessions = repo.get_by_file_path(file_path)
+        # Filter to active sessions (OPEN or ORPHANED)
+        active = [
+            s
+            for s in sessions
+            if s.connection_state()
+            in (ConnectionState.OPEN, ConnectionState.ORPHANED)
+        ]
+        if len(active) == 0:
+            raise ToolExecutionError(
+                f"No active session for file: {file_path}",
+                code="SESSION_NOT_FOUND",
+                is_retryable=False,
+                suggested_fix="Use get_active_notebooks to list active sessions, or use manage_session to start one.",
+                meta={"file_path": file_path},
+            )
+        if len(active) > 1:
+            raise ToolExecutionError(
+                f"Multiple active sessions for file: {file_path}. Use session_id instead.",
+                code="AMBIGUOUS_FILE_PATH",
+                is_retryable=False,
+                suggested_fix="Use session_id to specify which session.",
+                meta={"file_path": file_path, "count": len(active)},
+            )
+        return active[0]
+
     def get_cell_notification(
         self, session_id: SessionId, cell_id: CellId_t
     ) -> CellNotification:

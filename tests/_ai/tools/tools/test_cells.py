@@ -146,6 +146,10 @@ def test_get_cell_runtime_data_invalid_cell():
 
     context = Mock(spec=ToolContext)
     context.get_session.return_value = mock_session
+    context.resolve_session_and_id.return_value = (
+        mock_session,
+        SessionId("test"),
+    )
     tool.context = context
 
     args = GetCellRuntimeDataArgs(
@@ -183,6 +187,10 @@ def test_get_cell_runtime_data_empty_cell_ids():
 
     context = Mock(spec=ToolContext)
     context.get_session.return_value = mock_session
+    context.resolve_session_and_id.return_value = (
+        mock_session,
+        SessionId("test"),
+    )
     context.get_cell_errors.return_value = []
     tool.context = context
 
@@ -220,6 +228,10 @@ def test_get_cell_outputs_empty_cell_ids():
 
     context = Mock(spec=ToolContext)
     context.get_session.return_value = mock_session
+    context.resolve_session_and_id.return_value = (
+        mock_session,
+        SessionId("test"),
+    )
     context.get_cell_console_outputs.return_value = MarimoCellConsoleOutputs()
     tool.context = context
 
@@ -345,6 +357,10 @@ def test_lightweight_cell_map_includes_runtime_info():
 
     context = Mock(spec=ToolContext)
     context.get_session.return_value = mock_session
+    context.resolve_session_and_id.return_value = (
+        mock_session,
+        SessionId("test"),
+    )
     tool.context = context
 
     args = GetLightweightCellMapArgs(
@@ -413,6 +429,10 @@ def test_get_cell_runtime_data_batched():
 
     context = Mock(spec=ToolContext)
     context.get_session.return_value = mock_session
+    context.resolve_session_and_id.return_value = (
+        mock_session,
+        SessionId("test"),
+    )
     context.get_cell_errors.return_value = []
     tool.context = context
 
@@ -451,6 +471,10 @@ def test_get_cell_outputs_batched():
 
     context = Mock(spec=ToolContext)
     context.get_session.return_value = mock_session
+    context.resolve_session_and_id.return_value = (
+        mock_session,
+        SessionId("test"),
+    )
     context.get_cell_console_outputs.return_value = MarimoCellConsoleOutputs()
     tool.context = context
 
@@ -477,6 +501,10 @@ def test_get_cell_outputs_invalid_cell():
 
     context = Mock(spec=ToolContext)
     context.get_session.return_value = mock_session
+    context.resolve_session_and_id.return_value = (
+        mock_session,
+        SessionId("test"),
+    )
     tool.context = context
 
     args = GetCellOutputArgs(
