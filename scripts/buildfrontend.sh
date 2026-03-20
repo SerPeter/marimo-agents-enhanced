@@ -20,7 +20,8 @@ if $cmd; then
   rm -rf marimo/_static/files/wasm-intro.py
   echo "Copying agent rules..."
   cp docs/_static/AGENTS.md marimo/_static/AGENTS.md
-  cp docs/_static/CLAUDE.md marimo/_static/CLAUDE.md
+  # Legacy alias so older builds that look for CLAUDE.md still find rules
+  cp docs/_static/AGENTS.md marimo/_static/CLAUDE.md
   cp -R docs/_static/llm_rules marimo/_static/llm_rules
   echo "Compilation succeeded.\n"
 else

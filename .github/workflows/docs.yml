@@ -63,10 +63,10 @@ jobs:
         env:
           OUTPUT_FILE: .vercel/output/static/llms.txt
 
-      - name: 📚 AGENTS.md and CLAUDE.md
+      - name: 📚 AGENTS.md (+ CLAUDE.md legacy alias)
         run: |
           cp docs/_static/AGENTS.md .vercel/output/static/AGENTS.md
-          cp docs/_static/CLAUDE.md .vercel/output/static/CLAUDE.md
+          cp docs/_static/AGENTS.md .vercel/output/static/CLAUDE.md
 
       - name: 🚀 Deploy to Vercel
         if: github.ref == 'refs/heads/main'

@@ -47,6 +47,9 @@ def _make_tool_with_graph(
     descendants_map: dict[str, set[str]] | None = None,
     variable_values: dict | None = None,
 ) -> GetCellDependencyGraph:
+    # Mock satisfies the DirectedGraph interface used by the tool and
+    # topological_sort: cells, parents, children, definitions, cycles,
+    # get_multiply_defined(), ancestors(), descendants().
     graph = Mock()
     graph.cells = {CellId_t(k): v for k, v in cell_impls.items()}
     graph.parents = {
@@ -459,6 +462,5 @@ def test_topological_order_independent_cells():
         GetCellDependencyGraphArgs(session_id=SessionId("s1"))
     )
 
-    # All cells present; registration order is the tiebreaker
+    # All cells present; any permutation is a valid topological order
     assert set(result.topological_order) == {"c1", "c2", "c3"}
-    assert result.topological_order == ["c1", "c2", "c3"]

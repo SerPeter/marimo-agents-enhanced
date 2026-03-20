@@ -14,9 +14,9 @@ LOGGER = _loggers.marimo_logger()
 
 # We ship the rules with the package in _static/AGENTS.md
 # If the file doesn't exist (development or edge cases), we fallback to fetching from the URL
-MARIMO_RULES_URL = "https://docs.marimo.io/CLAUDE.md"
+MARIMO_RULES_URL = "https://docs.marimo.io/AGENTS.md"
 MARIMO_RULES_PATH = marimo_package_path() / "_static" / "AGENTS.md"
-# Legacy path for backward compatibility with older builds
+# Legacy path for backward compatibility with older builds that only ship CLAUDE.md
 MARIMO_LEGACY_RULES_PATH = marimo_package_path() / "_static" / "CLAUDE.md"
 
 # Topic-specific rule files shipped alongside the main rules
@@ -95,30 +95,37 @@ class GetMarimoRules(ToolBase[GetMarimoRulesArgs, GetMarimoRulesOutput]):
         """Load topic-specific rules from the llm_rules directory."""
         topic_path = LLM_RULES_DIR / f"{topic}.md"
 
-        if topic_path.exists():
-            try:
-                rules_content = topic_path.read_text(encoding="utf-8")
-                return GetMarimoRulesOutput(
-                    rules_content=rules_content,
-                    source_url="bundled",
-                    next_steps=[
-                        f"Apply the {topic} guidelines when working with this area",
-                    ],
-                )
-            except Exception as e:
-                LOGGER.warning(
-                    "Failed to read topic rules from %s: %s",
-                    topic_path,
-                    str(e),
-                )
+        if not topic_path.exists():
+            return GetMarimoRulesOutput(
+                status="error",
+                message=f"Topic rules file not found for '{topic}'",
+                next_steps=[
+                    "Use the core rules (call with no topic) as a fallback",
+                ],
+            )
 
-        return GetMarimoRulesOutput(
-            status="error",
-            message=f"Topic rules file not found for '{topic}'",
-            next_steps=[
-                "Use the core rules (call with no topic) as a fallback",
-            ],
-        )
+        try:
+            rules_content = topic_path.read_text(encoding="utf-8")
+            return GetMarimoRulesOutput(
+                rules_content=rules_content,
+                source_url="bundled",
+                next_steps=[
+                    f"Apply the {topic} guidelines when working with this area",
+                ],
+            )
+        except Exception as e:
+            LOGGER.warning(
+                "Failed to read topic rules from %s: %s",
+                topic_path,
+                str(e),
+            )
+            return GetMarimoRulesOutput(
+                status="error",
+                message=f"Failed to read topic rules for '{topic}': {e}",
+                next_steps=[
+                    "Use the core rules (call with no topic) as a fallback",
+                ],
+            )
 
     def _load_core_rules(self) -> GetMarimoRulesOutput:
         """Load core rules from bundled AGENTS.md, legacy CLAUDE.md, or URL fallback."""

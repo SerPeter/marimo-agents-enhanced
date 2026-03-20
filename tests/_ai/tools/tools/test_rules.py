@@ -132,7 +132,7 @@ def test_get_rules_fallback_to_url(tool: GetMarimoRules) -> None:
 
     assert result.status == "success"
     assert result.rules_content == "# Marimo Rules\n\nURL content"
-    assert result.source_url == "https://docs.marimo.io/CLAUDE.md"
+    assert result.source_url == "https://docs.marimo.io/AGENTS.md"
     mock_response.raise_for_status.assert_called_once()
 
 
@@ -160,7 +160,7 @@ def test_get_rules_http_error(tool: GetMarimoRules) -> None:
     assert result.rules_content is None
     assert "Failed to fetch marimo rules" in result.message
     assert "404 Not Found" in result.message
-    assert result.source_url == "https://docs.marimo.io/CLAUDE.md"
+    assert result.source_url == "https://docs.marimo.io/AGENTS.md"
     assert len(result.next_steps) == 3
     assert "Check internet connectivity" in result.next_steps[0]
 
@@ -259,3 +259,20 @@ def test_get_rules_topic_file_not_found(tool: GetMarimoRules) -> None:
 
     assert result.status == "error"
     assert "not found" in result.message
+
+
+def test_get_rules_topic_file_read_error(tool: GetMarimoRules) -> None:
+    """Test error when topic file exists but can't be read."""
+    mock_topic_path = Mock(spec=Path)
+    mock_topic_path.exists.return_value = True
+    mock_topic_path.read_text.side_effect = OSError("Permission denied")
+
+    mock_llm_dir = Mock(spec=Path)
+    mock_llm_dir.__truediv__ = Mock(return_value=mock_topic_path)
+
+    with patch("marimo._ai._tools.tools.rules.LLM_RULES_DIR", mock_llm_dir):
+        result = tool.handle(GetMarimoRulesArgs(topic="visualization"))
+
+    assert result.status == "error"
+    assert "Failed to read" in result.message
+    assert "visualization" in result.message

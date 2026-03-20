@@ -13,6 +13,11 @@ def test_workflow_guidance_includes_all_tools():
 
     prompt = WorkflowGuidance(context=context)
     messages = prompt.handle()
+
+    # Structural assertions
+    assert len(messages) == 1
+    assert messages[0].role == "user"
+
     text = "\n".join(
         msg.content.text  # type: ignore[attr-defined]
         for msg in messages
