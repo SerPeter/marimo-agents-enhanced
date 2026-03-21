@@ -175,5 +175,50 @@ def test_get_notebook_errors_respects_session_id(mock_context: Mock) -> None:
 
     # Verify the session_id was passed correctly with include_stderr=True
     mock_context.get_notebook_errors.assert_called_once_with(
-        session_id, include_stderr=True
+        session_id, include_stderr=True, cell_ids=None
+    )
+
+
+def test_get_notebook_errors_passes_cell_ids(mock_context: Mock) -> None:
+    """Test that cell_ids are passed through to get_notebook_errors."""
+    session_id = SessionId("s1")
+    cell_ids = [CellId_t("c1"), CellId_t("c2")]
+    mock_context.get_notebook_errors.return_value = [
+        MarimoCellErrors(
+            cell_id=CellId_t("c1"),
+            errors=[
+                MarimoErrorDetail(type="Error", message="test", traceback=[])
+            ],
+        )
+    ]
+
+    tool = GetNotebookErrors(ToolContext())
+    tool.context = mock_context
+
+    result = tool.handle(
+        GetNotebookErrorsArgs(session_id=session_id, cell_ids=cell_ids)
+    )
+
+    mock_context.get_notebook_errors.assert_called_once_with(
+        session_id, include_stderr=True, cell_ids=cell_ids
+    )
+    assert result.has_errors is True
+    assert result.total_errors == 1
+
+
+def test_get_notebook_errors_empty_cell_ids_returns_all(
+    mock_context: Mock,
+) -> None:
+    """Test that empty cell_ids list means no filter (returns all)."""
+    session_id = SessionId("s1")
+    mock_context.get_notebook_errors.return_value = []
+
+    tool = GetNotebookErrors(ToolContext())
+    tool.context = mock_context
+
+    tool.handle(GetNotebookErrorsArgs(session_id=session_id, cell_ids=[]))
+
+    # Empty list should be converted to None (no filter)
+    mock_context.get_notebook_errors.assert_called_once_with(
+        session_id, include_stderr=True, cell_ids=None
     )

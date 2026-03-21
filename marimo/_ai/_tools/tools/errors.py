@@ -9,13 +9,14 @@ from marimo._ai._tools.types import (
     SuccessResult,
     ToolGuidelines,
 )
-from marimo._types.ids import SessionId
+from marimo._types.ids import CellId_t, SessionId
 
 
 @dataclass
 class GetNotebookErrorsArgs:
     session_id: SessionId | None = None
     file_path: str | None = None
+    cell_ids: list[CellId_t] = field(default_factory=list)
 
 
 @dataclass
@@ -34,6 +35,8 @@ class GetNotebookErrors(
 
     Args:
         session_id: The session ID of the notebook.
+        cell_ids: Optional list of cell IDs to filter errors for.
+            If empty, returns errors for all cells.
 
     Returns:
         A success result containing notebook errors organized by cell.
@@ -55,7 +58,9 @@ class GetNotebookErrors(
             args.session_id, args.file_path
         )
         notebook_errors = context.get_notebook_errors(
-            session_id, include_stderr=True
+            session_id,
+            include_stderr=True,
+            cell_ids=args.cell_ids or None,
         )
 
         total_errors = sum(len(c.errors) for c in notebook_errors)
