@@ -249,18 +249,24 @@ def test_get_visual_output_with_html():
     output = MockOutput(data="<div>test</div>", mimetype="text/html")
     cell_notification = MockCellNotification(output=output)
 
-    visual_output, mimetype = tool._get_visual_output(cell_notification)  # type: ignore[arg-type]
+    visual_output, mimetype, masked = tool._get_visual_output(
+        cell_notification
+    )  # type: ignore[arg-type]
     assert visual_output == "<div>test</div>"
     assert mimetype == "text/html"
+    assert masked is False
 
 
 def test_get_visual_output_no_output():
     tool = GetCellOutputs(ToolContext())
     cell_notification = MockCellNotification(output=None)
 
-    visual_output, mimetype = tool._get_visual_output(cell_notification)  # type: ignore[arg-type]
+    visual_output, mimetype, masked = tool._get_visual_output(
+        cell_notification
+    )  # type: ignore[arg-type]
     assert visual_output is None
     assert mimetype is None
+    assert masked is False
 
 
 def test_get_visual_output_with_error():
@@ -276,12 +282,61 @@ def test_get_visual_output_with_error():
     )
     cell_notification = MockCellNotification(output=output)
 
-    visual_output, mimetype = tool._get_visual_output(cell_notification)  # type: ignore[arg-type]
+    visual_output, mimetype, masked = tool._get_visual_output(
+        cell_notification
+    )  # type: ignore[arg-type]
     assert mimetype == "application/json"
+    assert masked is False
     parsed = json.loads(visual_output)
     assert len(parsed) == 1
     assert parsed[0]["type"] == "NameError"
     assert parsed[0]["message"] == "name 'x' is not defined"
+
+
+def test_get_visual_output_large_html_masked():
+    """Test that large HTML output is converted to markdown."""
+    tool = GetCellOutputs(ToolContext())
+    large_html = "<div>" + "x" * 6000 + "</div>"
+    output = MockOutput(data=large_html, mimetype="text/html")
+    cell_notification = MockCellNotification(output=output)
+
+    visual_output, mimetype, masked = tool._get_visual_output(
+        cell_notification
+    )  # type: ignore[arg-type]
+    assert masked is True
+    assert visual_output.startswith("[Parsed from HTML output]")
+    assert mimetype == "text/html"
+
+
+def test_get_cell_outputs_sets_masked_flag():
+    """Test that GetCellOutputs propagates the masked flag."""
+    tool = GetCellOutputs(ToolContext())
+
+    large_html = "<div>" + "x" * 6000 + "</div>"
+    notif = MockCellNotification(
+        output=MockOutput(data=large_html, mimetype="text/html"),
+        console=None,
+    )
+
+    mock_session = Mock()
+    mock_session.session_view = MockSessionView(
+        cell_notifications={"c1": notif}
+    )
+
+    context = Mock(spec=ToolContext)
+    context.resolve_session_and_id.return_value = (
+        mock_session,
+        SessionId("test"),
+    )
+    context.get_cell_console_outputs.return_value = MarimoCellConsoleOutputs()
+    tool.context = context
+
+    args = GetCellOutputArgs(
+        session_id=SessionId("test"),
+        cell_ids=[CellId_t("c1")],
+    )
+    result = tool.handle(args)
+    assert result.cells[0].visual_output.masked is True
 
 
 def test_lightweight_cell_map_includes_runtime_info():
