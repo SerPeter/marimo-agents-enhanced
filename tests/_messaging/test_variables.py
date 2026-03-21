@@ -7,7 +7,9 @@ import pytest
 
 from marimo._dependencies.dependencies import DependencyManager
 from marimo._messaging.variables import (
+    _compute_variable_meta,
     _format_variable_value,
+    _safe_repr,
     _stringify_variable_value,
     create_variable_value,
     get_variable_preview,
@@ -447,3 +449,226 @@ class TestCreateVariableValue:
         assert vv_false.name == "f"
         assert vv_false.value == "False"
         assert vv_false.datatype == "bool"
+
+    def test_list_has_meta(self) -> None:
+        """Test that lists get structured meta."""
+        vv = create_variable_value("lst", list(range(100)))
+        assert vv.meta is not None
+        assert vv.meta["type"] == "list"
+        assert vv.meta["length"] == 100
+        assert len(vv.meta["sample"]) == 10
+
+    def test_simple_int_no_meta(self) -> None:
+        """Test that simple ints don't get meta."""
+        vv = create_variable_value("x", 42)
+        assert vv.meta is None
+
+    def test_dict_has_meta(self) -> None:
+        """Test that dicts get structured meta."""
+        vv = create_variable_value("d", {f"k{i}": i for i in range(50)})
+        assert vv.meta is not None
+        assert vv.meta["type"] == "dict"
+        assert vv.meta["length"] == 50
+        assert len(vv.meta["keys_sample"]) == 10
+
+    def test_bytes_meta_masked(self) -> None:
+        """Test that large bytes get masked meta."""
+        vv = create_variable_value("b", b"\x00" * 500)
+        assert vv.meta is not None
+        assert vv.meta["type"] == "bytes"
+        assert vv.meta["length"] == 500
+        assert vv.meta["masked"] is True
+        assert "preview" in vv.meta
+
+    def test_bytes_meta_small(self) -> None:
+        """Test that small bytes don't get masked."""
+        vv = create_variable_value("b", b"\x00" * 50)
+        assert vv.meta is not None
+        assert vv.meta["type"] == "bytes"
+        assert vv.meta["length"] == 50
+        assert vv.meta["masked"] is False
+
+
+class TestSafeRepr:
+    """Test _safe_repr function."""
+
+    def test_short_value(self) -> None:
+        assert _safe_repr(42) == "42"
+
+    def test_long_value_truncated(self) -> None:
+        result = _safe_repr("a" * 200, max_len=50)
+        assert len(result) == 50
+
+    def test_broken_repr(self) -> None:
+        class Broken:
+            def __repr__(self) -> str:
+                raise RuntimeError("boom")
+
+        result = _safe_repr(Broken())
+        assert result == "<Broken>"
+
+
+class TestComputeVariableMeta:
+    """Test _compute_variable_meta function."""
+
+    def test_none_returns_none(self) -> None:
+        assert _compute_variable_meta(None) is None
+
+    def test_int_returns_none(self) -> None:
+        assert _compute_variable_meta(42) is None
+
+    def test_bool_returns_none(self) -> None:
+        assert _compute_variable_meta(True) is None
+
+    def test_short_string_returns_none(self) -> None:
+        assert _compute_variable_meta("hello") is None
+
+    def test_long_string(self) -> None:
+        meta = _compute_variable_meta("x" * 300)
+        assert meta is not None
+        assert meta["type"] == "str"
+        assert meta["length"] == 300
+        assert meta["truncated"] is True
+
+    def test_list(self) -> None:
+        meta = _compute_variable_meta(list(range(500)))
+        assert meta is not None
+        assert meta["type"] == "list"
+        assert meta["length"] == 500
+        assert len(meta["sample"]) == 10
+        assert meta["sample"][0] == "0"
+
+    def test_small_list(self) -> None:
+        meta = _compute_variable_meta([1, 2, 3])
+        assert meta is not None
+        assert meta["type"] == "list"
+        assert meta["length"] == 3
+        assert len(meta["sample"]) == 3
+
+    def test_tuple(self) -> None:
+        meta = _compute_variable_meta(tuple(range(20)))
+        assert meta is not None
+        assert meta["type"] == "tuple"
+        assert meta["length"] == 20
+        assert len(meta["sample"]) == 10
+
+    def test_dict(self) -> None:
+        d = {f"key_{i}": i * 10 for i in range(50)}
+        meta = _compute_variable_meta(d)
+        assert meta is not None
+        assert meta["type"] == "dict"
+        assert meta["length"] == 50
+        assert len(meta["keys_sample"]) == 10
+        assert len(meta["values_sample"]) == 10
+
+    def test_set(self) -> None:
+        meta = _compute_variable_meta(set(range(100)))
+        assert meta is not None
+        assert meta["type"] == "set"
+        assert meta["length"] == 100
+        assert len(meta["sample"]) == 10
+
+    def test_bytes_large_masked(self) -> None:
+        meta = _compute_variable_meta(b"\xab" * 200)
+        assert meta is not None
+        assert meta["type"] == "bytes"
+        assert meta["length"] == 200
+        assert meta["masked"] is True
+        assert meta["preview"] == ("ab" * 20)
+
+    def test_bytes_small_not_masked(self) -> None:
+        meta = _compute_variable_meta(b"\x01\x02\x03")
+        assert meta is not None
+        assert meta["type"] == "bytes"
+        assert meta["length"] == 3
+        assert meta["masked"] is False
+
+    def test_broken_object_returns_none(self) -> None:
+        class Broken:
+            def __repr__(self) -> str:
+                raise RuntimeError("boom")
+
+            def __len__(self) -> int:
+                raise RuntimeError("boom")
+
+        assert _compute_variable_meta(Broken()) is None
+
+    @pytest.mark.skipif(
+        not DependencyManager.numpy.has(),
+        reason="Numpy is not installed",
+    )
+    def test_ndarray(self) -> None:
+        import numpy as np
+
+        arr = np.arange(100, dtype=np.float64).reshape(10, 10)
+        meta = _compute_variable_meta(arr)
+        assert meta is not None
+        assert meta["type"] == "ndarray"
+        assert meta["shape"] == [10, 10]
+        assert meta["dtype"] == "float64"
+        assert "stats" in meta
+        assert len(meta["sample"]) == 10
+
+    @pytest.mark.skipif(
+        not DependencyManager.numpy.has(),
+        reason="Numpy is not installed",
+    )
+    def test_ndarray_string_dtype_no_stats(self) -> None:
+        import numpy as np
+
+        arr = np.array(["a", "b", "c"])
+        meta = _compute_variable_meta(arr)
+        assert meta is not None
+        assert meta["type"] == "ndarray"
+        assert "stats" not in meta
+
+    @pytest.mark.skipif(
+        not DependencyManager.pandas.has(),
+        reason="Pandas is not installed",
+    )
+    def test_pandas_dataframe(self) -> None:
+        import pandas as pd
+
+        df = pd.DataFrame(
+            {"A": range(100), "B": [f"val_{i}" for i in range(100)]}
+        )
+        meta = _compute_variable_meta(df)
+        assert meta is not None
+        assert meta["type"] == "dataframe"
+        assert meta["shape"] == [100, 2]
+        assert len(meta["columns"]) == 2
+        assert meta["columns"][0]["name"] == "A"
+        assert "head" in meta
+        assert len(meta["head"]) == 10
+
+    @pytest.mark.skipif(
+        not DependencyManager.polars.has(),
+        reason="Polars is not installed",
+    )
+    def test_polars_dataframe(self) -> None:
+        import polars as pl
+
+        df = pl.DataFrame(
+            {"X": range(50), "Y": [f"row_{i}" for i in range(50)]}
+        )
+        meta = _compute_variable_meta(df)
+        assert meta is not None
+        assert meta["type"] == "dataframe"
+        assert meta["shape"] == [50, 2]
+        assert len(meta["columns"]) == 2
+        assert "head" in meta
+        assert len(meta["head"]) == 10
+
+    @pytest.mark.skipif(
+        not DependencyManager.pandas.has(),
+        reason="Pandas is not installed",
+    )
+    def test_pandas_null_counts(self) -> None:
+        import pandas as pd
+
+        df = pd.DataFrame({"A": [1, None, 3], "B": [None, None, "x"]})
+        meta = _compute_variable_meta(df)
+        assert meta is not None
+        assert "null_counts" in meta
+        assert meta["null_counts"]["A"] == 1
+        assert meta["null_counts"]["B"] == 2

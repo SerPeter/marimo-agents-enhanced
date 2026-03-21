@@ -6,9 +6,12 @@ import pytest
 
 from marimo._ai._tools.base import ToolContext
 from marimo._ai._tools.tools.tables_and_variables import (
+    _MAX_COLUMNS,
+    _MAX_SAMPLE_VALUES,
     DataTableMetadata,
     GetTablesAndVariables,
     TablesAndVariablesOutput,
+    VariableSummary,
 )
 from marimo._data.models import DataTableColumn
 from marimo._messaging.notification import VariableValue
@@ -92,7 +95,12 @@ def sample_variables() -> dict[str, VariableValue]:
         "x": VariableValue("x", "42", "integer"),
         "y": VariableValue("y", "hello", "string"),
         "df": VariableValue("df", None, "DataFrame"),
-        "my_list": VariableValue("my_list", "[1, 2, 3]", "list"),
+        "my_list": VariableValue(
+            "my_list",
+            "[1, 2, 3]",
+            "list",
+            meta={"type": "list", "length": 3, "sample": ["1", "2", "3"]},
+        ),
     }
 
 
@@ -132,16 +140,23 @@ def test_get_tables_and_variables_empty_list(
     assert users_table.indexes == ["idx_name"]
     assert len(users_table.columns) == 3
 
-    # Check variables
+    # Check variables return VariableSummary
     assert "x" in result.variables
     assert "y" in result.variables
     assert "df" in result.variables
     assert "my_list" in result.variables
 
     x_var = result.variables["x"]
+    assert isinstance(x_var, VariableSummary)
     assert x_var.name == "x"
-    assert x_var.value == "42"
+    assert x_var.preview == "42"
     assert x_var.datatype == "integer"
+    assert x_var.meta is None
+
+    # Check that meta is passed through
+    list_var = result.variables["my_list"]
+    assert list_var.meta is not None
+    assert list_var.meta["type"] == "list"
 
 
 def test_get_tables_and_variables_specific_variables(
@@ -208,6 +223,7 @@ def test_data_table_metadata_structure(
     assert users_table.num_columns == 3
     assert users_table.primary_keys == ["id"]
     assert users_table.indexes == ["idx_name"]
+    assert users_table.columns_truncated is False
 
     # Check column structure
     assert len(users_table.columns) == 3
@@ -277,7 +293,7 @@ def test_variable_with_none_value(tool: GetTablesAndVariables):
 
     none_var = result.variables["none_var"]
     assert none_var.name == "none_var"
-    assert none_var.value is None
+    assert none_var.preview is None
     assert none_var.datatype == "NoneType"
 
 
@@ -298,3 +314,57 @@ def test_filtering_logic_separate_tables_and_variables(
 
     assert len(result.tables) == 0
     assert len(result.variables) == 2
+
+
+def test_column_sample_values_capped(tool: GetTablesAndVariables):
+    """Test that sample_values per column are capped."""
+    many_samples = list(range(20))
+    table = MockDataset(
+        name="wide",
+        source="test",
+        num_rows=100,
+        num_columns=1,
+        columns=[
+            DataTableColumn("col", "integer", "INTEGER", many_samples),
+        ],
+    )
+
+    session = MockSession(
+        MockSessionView(
+            datasets=MockDatasets(tables=[table]),
+            variable_values={},
+        )
+    )
+
+    result = tool._get_tables_and_variables(session, ["wide"])
+    col = result.tables["wide"].columns[0]
+    assert len(col.sample_values) == _MAX_SAMPLE_VALUES
+
+
+def test_columns_truncated_for_wide_table(tool: GetTablesAndVariables):
+    """Test that tables with many columns are truncated."""
+    columns = [
+        DataTableColumn(f"col_{i}", "integer", "INTEGER", [i])
+        for i in range(_MAX_COLUMNS + 10)
+    ]
+    table = MockDataset(
+        name="very_wide",
+        source="test",
+        num_rows=100,
+        num_columns=len(columns),
+        columns=columns,
+    )
+
+    session = MockSession(
+        MockSessionView(
+            datasets=MockDatasets(tables=[table]),
+            variable_values={},
+        )
+    )
+
+    result = tool._get_tables_and_variables(session, ["very_wide"])
+    meta = result.tables["very_wide"]
+    assert len(meta.columns) == _MAX_COLUMNS
+    assert meta.columns_truncated is True
+    # num_columns still reports the real count
+    assert meta.num_columns == _MAX_COLUMNS + 10
