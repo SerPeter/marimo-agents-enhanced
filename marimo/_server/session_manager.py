@@ -253,12 +253,20 @@ class SessionManager:
         reload_strategy = create_reload_strategy(
             self.mode, self._config_manager
         )
-        return FileChangeCoordinator(reload_strategy)
+        return FileChangeCoordinator(
+            reload_strategy,
+            debounce_seconds=3.0 if self.watch else None,
+        )
 
     async def _handle_file_change(
         self, file_path: Path, session: Session
     ) -> None:
-        await self._file_change_coordinator.handle_change(file_path, session)
+        try:
+            await self._file_change_coordinator.handle_change(
+                file_path, session
+            )
+        except asyncio.CancelledError:
+            pass  # Superseded by a newer file change
 
     async def rename_session(
         self, session_id: SessionId, new_path: str
