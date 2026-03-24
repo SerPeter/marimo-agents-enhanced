@@ -14,6 +14,7 @@ from marimo._lint.rules.breaking import (
     UnparsableRule,
 )
 from marimo._lint.rules.formatting import GeneralFormattingRule
+from marimo._lint.rules.runtime import NestedOutputRule, UnusedOutputRule
 from marimo._schemas.serialization import (
     AppInstantiation,
     CellDef,
@@ -181,6 +182,381 @@ class TestLintRules:
         assert len(errors) == 1
         assert errors[0].code == "MB001"
         assert errors[0].severity == Severity.BREAKING
+
+
+class TestUnusedOutputRule:
+    """Test MR003: unused marimo output calls."""
+
+    async def test_flags_mo_md_not_last(self):
+        notebook = NotebookSerializationV1(
+            app=AppInstantiation(),
+            cells=[
+                CellDef(
+                    code='mo.md("# Title")\nx = 1\nx',
+                    name="c",
+                    lineno=1,
+                    col_offset=0,
+                ),
+            ],
+        )
+        rule = UnusedOutputRule()
+        ctx = LintContext(notebook)
+        rule_ctx = RuleContext(ctx, rule)
+        await rule.check(rule_ctx)
+        errors = await ctx.get_diagnostics()
+        assert len(errors) == 1
+        assert errors[0].code == "MR003"
+
+    async def test_flags_mo_ui_not_last(self):
+        notebook = NotebookSerializationV1(
+            app=AppInstantiation(),
+            cells=[
+                CellDef(
+                    code="mo.ui.slider(1, 10)\nresult = compute()\nresult",
+                    name="c",
+                    lineno=1,
+                    col_offset=0,
+                ),
+            ],
+        )
+        rule = UnusedOutputRule()
+        ctx = LintContext(notebook)
+        rule_ctx = RuleContext(ctx, rule)
+        await rule.check(rule_ctx)
+        errors = await ctx.get_diagnostics()
+        assert len(errors) == 1
+        assert errors[0].code == "MR003"
+
+    async def test_ok_last_expression(self):
+        notebook = NotebookSerializationV1(
+            app=AppInstantiation(),
+            cells=[
+                CellDef(
+                    code='x = 1\nmo.md("# Title")',
+                    name="c",
+                    lineno=1,
+                    col_offset=0,
+                ),
+            ],
+        )
+        rule = UnusedOutputRule()
+        ctx = LintContext(notebook)
+        rule_ctx = RuleContext(ctx, rule)
+        await rule.check(rule_ctx)
+        errors = await ctx.get_diagnostics()
+        assert len(errors) == 0
+
+    async def test_ok_assigned(self):
+        notebook = NotebookSerializationV1(
+            app=AppInstantiation(),
+            cells=[
+                CellDef(
+                    code='header = mo.md("# Title")\nx = 1',
+                    name="c",
+                    lineno=1,
+                    col_offset=0,
+                ),
+            ],
+        )
+        rule = UnusedOutputRule()
+        ctx = LintContext(notebook)
+        rule_ctx = RuleContext(ctx, rule)
+        await rule.check(rule_ctx)
+        errors = await ctx.get_diagnostics()
+        assert len(errors) == 0
+
+    async def test_ok_mo_stop(self):
+        notebook = NotebookSerializationV1(
+            app=AppInstantiation(),
+            cells=[
+                CellDef(
+                    code="mo.stop(not ok)\nx = 1",
+                    name="c",
+                    lineno=1,
+                    col_offset=0,
+                ),
+            ],
+        )
+        rule = UnusedOutputRule()
+        ctx = LintContext(notebook)
+        rule_ctx = RuleContext(ctx, rule)
+        await rule.check(rule_ctx)
+        errors = await ctx.get_diagnostics()
+        assert len(errors) == 0
+
+    async def test_ok_mo_output_append(self):
+        notebook = NotebookSerializationV1(
+            app=AppInstantiation(),
+            cells=[
+                CellDef(
+                    code="mo.output.append(item)\nx = 1",
+                    name="c",
+                    lineno=1,
+                    col_offset=0,
+                ),
+            ],
+        )
+        rule = UnusedOutputRule()
+        ctx = LintContext(notebook)
+        rule_ctx = RuleContext(ctx, rule)
+        await rule.check(rule_ctx)
+        errors = await ctx.get_diagnostics()
+        assert len(errors) == 0
+
+    async def test_ok_single_expression(self):
+        """Single expression cell — nothing to flag."""
+        notebook = NotebookSerializationV1(
+            app=AppInstantiation(),
+            cells=[
+                CellDef(
+                    code='mo.md("only")',
+                    name="c",
+                    lineno=1,
+                    col_offset=0,
+                ),
+            ],
+        )
+        rule = UnusedOutputRule()
+        ctx = LintContext(notebook)
+        rule_ctx = RuleContext(ctx, rule)
+        await rule.check(rule_ctx)
+        errors = await ctx.get_diagnostics()
+        assert len(errors) == 0
+
+    async def test_multiple_discarded(self):
+        """Multiple discarded mo.* calls should each be flagged."""
+        notebook = NotebookSerializationV1(
+            app=AppInstantiation(),
+            cells=[
+                CellDef(
+                    code='mo.md("a")\nmo.md("b")\nmo.md("c")',
+                    name="c",
+                    lineno=1,
+                    col_offset=0,
+                ),
+            ],
+        )
+        rule = UnusedOutputRule()
+        ctx = LintContext(notebook)
+        rule_ctx = RuleContext(ctx, rule)
+        await rule.check(rule_ctx)
+        errors = await ctx.get_diagnostics()
+        assert len(errors) == 2  # first two flagged, last is valid
+
+
+class TestNestedOutputRule:
+    """Test MR004: nested marimo output calls."""
+
+    async def test_flags_mo_md_in_if(self):
+        notebook = NotebookSerializationV1(
+            app=AppInstantiation(),
+            cells=[
+                CellDef(
+                    code='if condition:\n    mo.md("Hello")',
+                    name="c",
+                    lineno=1,
+                    col_offset=0,
+                ),
+            ],
+        )
+        rule = NestedOutputRule()
+        ctx = LintContext(notebook)
+        rule_ctx = RuleContext(ctx, rule)
+        await rule.check(rule_ctx)
+        errors = await ctx.get_diagnostics()
+        assert len(errors) == 1
+        assert errors[0].code == "MR004"
+
+    async def test_flags_mo_ui_in_for(self):
+        notebook = NotebookSerializationV1(
+            app=AppInstantiation(),
+            cells=[
+                CellDef(
+                    code="for i in range(10):\n    mo.ui.slider(i, 100)",
+                    name="c",
+                    lineno=1,
+                    col_offset=0,
+                ),
+            ],
+        )
+        rule = NestedOutputRule()
+        ctx = LintContext(notebook)
+        rule_ctx = RuleContext(ctx, rule)
+        await rule.check(rule_ctx)
+        errors = await ctx.get_diagnostics()
+        assert len(errors) == 1
+
+    async def test_flags_mo_md_in_def(self):
+        notebook = NotebookSerializationV1(
+            app=AppInstantiation(),
+            cells=[
+                CellDef(
+                    code='def helper():\n    mo.md("Inside")',
+                    name="c",
+                    lineno=1,
+                    col_offset=0,
+                ),
+            ],
+        )
+        rule = NestedOutputRule()
+        ctx = LintContext(notebook)
+        rule_ctx = RuleContext(ctx, rule)
+        await rule.check(rule_ctx)
+        errors = await ctx.get_diagnostics()
+        assert len(errors) == 1
+
+    async def test_flags_deeply_nested(self):
+        notebook = NotebookSerializationV1(
+            app=AppInstantiation(),
+            cells=[
+                CellDef(
+                    code='if a:\n    for x in items:\n        mo.md("deep")',
+                    name="c",
+                    lineno=1,
+                    col_offset=0,
+                ),
+            ],
+        )
+        rule = NestedOutputRule()
+        ctx = LintContext(notebook)
+        rule_ctx = RuleContext(ctx, rule)
+        await rule.check(rule_ctx)
+        errors = await ctx.get_diagnostics()
+        assert len(errors) == 1
+
+    async def test_ok_assigned_in_if(self):
+        notebook = NotebookSerializationV1(
+            app=AppInstantiation(),
+            cells=[
+                CellDef(
+                    code='if condition:\n    result = mo.md("Hello")',
+                    name="c",
+                    lineno=1,
+                    col_offset=0,
+                ),
+            ],
+        )
+        rule = NestedOutputRule()
+        ctx = LintContext(notebook)
+        rule_ctx = RuleContext(ctx, rule)
+        await rule.check(rule_ctx)
+        errors = await ctx.get_diagnostics()
+        assert len(errors) == 0
+
+    async def test_ok_returned(self):
+        notebook = NotebookSerializationV1(
+            app=AppInstantiation(),
+            cells=[
+                CellDef(
+                    code='def helper():\n    return mo.md("Inside")',
+                    name="c",
+                    lineno=1,
+                    col_offset=0,
+                ),
+            ],
+        )
+        rule = NestedOutputRule()
+        ctx = LintContext(notebook)
+        rule_ctx = RuleContext(ctx, rule)
+        await rule.check(rule_ctx)
+        errors = await ctx.get_diagnostics()
+        assert len(errors) == 0
+
+    async def test_ok_mo_stop_nested(self):
+        notebook = NotebookSerializationV1(
+            app=AppInstantiation(),
+            cells=[
+                CellDef(
+                    code='if not authorized:\n    mo.stop(mo.md("No"))',
+                    name="c",
+                    lineno=1,
+                    col_offset=0,
+                ),
+            ],
+        )
+        rule = NestedOutputRule()
+        ctx = LintContext(notebook)
+        rule_ctx = RuleContext(ctx, rule)
+        await rule.check(rule_ctx)
+        errors = await ctx.get_diagnostics()
+        assert len(errors) == 0
+
+    async def test_ok_top_level(self):
+        """Top-level mo.* calls are MR003's domain, not MR004."""
+        notebook = NotebookSerializationV1(
+            app=AppInstantiation(),
+            cells=[
+                CellDef(
+                    code='mo.md("# Title")\nx = 1',
+                    name="c",
+                    lineno=1,
+                    col_offset=0,
+                ),
+            ],
+        )
+        rule = NestedOutputRule()
+        ctx = LintContext(notebook)
+        rule_ctx = RuleContext(ctx, rule)
+        await rule.check(rule_ctx)
+        errors = await ctx.get_diagnostics()
+        assert len(errors) == 0
+
+    async def test_flags_in_while(self):
+        notebook = NotebookSerializationV1(
+            app=AppInstantiation(),
+            cells=[
+                CellDef(
+                    code='while True:\n    mo.md("loop")\n    break',
+                    name="c",
+                    lineno=1,
+                    col_offset=0,
+                ),
+            ],
+        )
+        rule = NestedOutputRule()
+        ctx = LintContext(notebook)
+        rule_ctx = RuleContext(ctx, rule)
+        await rule.check(rule_ctx)
+        errors = await ctx.get_diagnostics()
+        assert len(errors) == 1
+
+    async def test_flags_in_with(self):
+        notebook = NotebookSerializationV1(
+            app=AppInstantiation(),
+            cells=[
+                CellDef(
+                    code='with ctx:\n    mo.md("inside with")',
+                    name="c",
+                    lineno=1,
+                    col_offset=0,
+                ),
+            ],
+        )
+        rule = NestedOutputRule()
+        ctx = LintContext(notebook)
+        rule_ctx = RuleContext(ctx, rule)
+        await rule.check(rule_ctx)
+        errors = await ctx.get_diagnostics()
+        assert len(errors) == 1
+
+    async def test_flags_in_try(self):
+        notebook = NotebookSerializationV1(
+            app=AppInstantiation(),
+            cells=[
+                CellDef(
+                    code='try:\n    mo.md("try")\nexcept Exception:\n    pass',
+                    name="c",
+                    lineno=1,
+                    col_offset=0,
+                ),
+            ],
+        )
+        rule = NestedOutputRule()
+        ctx = LintContext(notebook)
+        rule_ctx = RuleContext(ctx, rule)
+        await rule.check(rule_ctx)
+        errors = await ctx.get_diagnostics()
+        assert len(errors) == 1
 
 
 class TestRuleEngine:

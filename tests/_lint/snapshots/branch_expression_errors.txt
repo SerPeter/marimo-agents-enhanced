@@ -25,3 +25,52 @@ error[branch-expression]: The match statement has branches ending with expressio
   55 |     match len(x):
      |     ^
   56 |         case 1:
+
+error[nested-marimo-output]: This marimo output call is inside a control flow block and its result is not assigned to a variable. The output will be created but not displayed. Assign it to a variable or return it.
+ --> tests/_lint/test_files/branch_expression.py:15:5
+  15 |         invalid = True
+  16 |         mo.md("Your name is very long.")
+     |        ^
+  17 |     else:
+
+error[nested-marimo-output]: This marimo output call is inside a control flow block and its result is not assigned to a variable. The output will be created but not displayed. Assign it to a variable or return it.
+ --> tests/_lint/test_files/branch_expression.py:18:5
+  18 |         invalid = False
+  19 |         mo.md(f"Nice to meet you {x}")
+     |        ^
+  20 |     return invalid, x
+
+error[nested-marimo-output]: This marimo output call is inside a control flow block and its result is not assigned to a variable. The output will be created but not displayed. Assign it to a variable or return it.
+ --> tests/_lint/test_files/branch_expression.py:26:5
+  26 |     if not invalid:
+  27 |         mo.md(f"User: {x}")
+     |        ^
+  28 |     elif len(x) < 30:
+
+error[nested-marimo-output]: This marimo output call is inside a control flow block and its result is not assigned to a variable. The output will be created but not displayed. Assign it to a variable or return it.
+ --> tests/_lint/test_files/branch_expression.py:28:5
+  28 |     elif len(x) < 30:
+  29 |         mo.md(f"Invalid: {x}")
+     |        ^
+  30 |     else:
+
+error[nested-marimo-output]: This marimo output call is inside a control flow block and its result is not assigned to a variable. The output will be created but not displayed. Assign it to a variable or return it.
+ --> tests/_lint/test_files/branch_expression.py:30:5
+  30 |     else:
+  31 |         mo.md(f"Very Invalid: {x}")
+     |        ^
+  32 |     return
+
+error[nested-marimo-output]: This marimo output call is inside a control flow block and its result is not assigned to a variable. The output will be created but not displayed. Assign it to a variable or return it.
+ --> tests/_lint/test_files/branch_expression.py:38:5
+  38 |     if invalid:
+  39 |         mo.md("Run the cell again to try again")
+     |        ^
+  40 |     return
+
+error[nested-marimo-output]: This marimo output call is inside a control flow block and its result is not assigned to a variable. The output will be created but not displayed. Assign it to a variable or return it.
+ --> tests/_lint/test_files/branch_expression.py:47:9
+  47 |         if x == "name":
+  48 |             mo.md("Your name probably isn't name")
+     |            ^
+  49 |     return
