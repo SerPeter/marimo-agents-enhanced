@@ -171,6 +171,9 @@ class RuntimeConfig(TypedDict):
        The default is None.
     - `default_csv_encoding`: the default encoding for CSV exports.
         The default is `"utf-8"`.
+    - `watch_debounce_seconds`: time in seconds to wait after the last file
+        change before triggering a reload in watch mode. Batches rapid saves
+        into a single reload. The default is `3.0`.
     """
 
     auto_instantiate: bool
@@ -186,6 +189,7 @@ class RuntimeConfig(TypedDict):
     default_sql_output: SqlOutputType
     default_auto_download: NotRequired[list[ExportType]]
     default_csv_encoding: NotRequired[str]
+    watch_debounce_seconds: NotRequired[float]
 
 
 @mddoc
@@ -732,6 +736,7 @@ DEFAULT_CONFIG: MarimoConfig = {
         ),
         "default_sql_output": "auto",
         "default_csv_encoding": "utf-8",
+        "watch_debounce_seconds": 3.0,
     },
     "save": {
         "autosave": "after_delay",

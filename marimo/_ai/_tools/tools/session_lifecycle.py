@@ -99,7 +99,7 @@ class ManageSession(ToolBase[ManageSessionArgs, ManageSessionOutput]):
         manager = self.context.session_manager
 
         # Check for existing active session for this file
-        existing = manager._repository.get_by_file_path(abs_path)
+        existing = manager.get_sessions_by_file_path(abs_path)
         active = [
             s
             for s in existing
@@ -108,7 +108,7 @@ class ManageSession(ToolBase[ManageSessionArgs, ManageSessionOutput]):
         ]
         if active:
             # Return existing session instead of creating a duplicate
-            existing_id = manager._repository.get_session_id(active[0])
+            existing_id = manager.get_session_id_for_session(active[0])
             return ManageSessionOutput(
                 session_id=existing_id,
                 file_path=abs_path,

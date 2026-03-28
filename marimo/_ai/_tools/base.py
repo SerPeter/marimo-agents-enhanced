@@ -155,9 +155,8 @@ class ToolContext:
         session = self.resolve_session(session_id, file_path)
         if session_id:
             return session, session_id
-        # Reverse-lookup the session ID from the repository
-        repo = self.session_manager._repository
-        found_id = repo.get_session_id(session)
+        # Reverse-lookup the session ID from the session manager
+        found_id = self.session_manager.get_session_id_for_session(session)
         if found_id is None:
             raise ToolExecutionError(
                 "Could not determine session ID",
@@ -169,8 +168,7 @@ class ToolContext:
 
     def _resolve_by_file_path(self, file_path: str) -> Session:
         """Resolve a single session by file path."""
-        repo = self.session_manager._repository
-        sessions = repo.get_by_file_path(file_path)
+        sessions = self.session_manager.get_sessions_by_file_path(file_path)
         # Filter to active sessions (OPEN or ORPHANED)
         active = [
             s

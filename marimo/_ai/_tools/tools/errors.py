@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 from marimo._ai._tools.base import ToolBase
 from marimo._ai._tools.types import (
@@ -14,8 +15,8 @@ from marimo._types.ids import CellId_t, SessionId
 
 @dataclass
 class GetNotebookErrorsArgs:
-    session_id: SessionId | None = None
-    file_path: str | None = None
+    session_id: Optional[SessionId] = None
+    file_path: Optional[str] = None
     cell_ids: list[CellId_t] = field(default_factory=list)
 
 
