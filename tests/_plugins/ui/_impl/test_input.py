@@ -618,6 +618,28 @@ def test_button() -> None:
     assert button.value == 2
 
 
+def test_button_auto_run() -> None:
+    # Default: no auto-run
+    b = ui.button()
+    assert b._component_args["auto-run"] is False
+
+    # True normalizes to "once"
+    b = ui.button(auto_run=True)
+    assert b._component_args["auto-run"] == "once"
+
+    # Explicit "once"
+    b = ui.button(auto_run="once")
+    assert b._component_args["auto-run"] == "once"
+
+    # Explicit "always"
+    b = ui.button(auto_run="always")
+    assert b._component_args["auto-run"] == "always"
+
+    # False stays False
+    b = ui.button(auto_run=False)
+    assert b._component_args["auto-run"] is False
+
+
 def test_on_change() -> None:
     state = []
     button = ui.checkbox(on_change=lambda v: state.append(v))
