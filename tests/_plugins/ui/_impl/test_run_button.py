@@ -11,6 +11,24 @@ def test_run_button_initial_value():
     assert not run_button.value
 
 
+def test_run_button_auto_run():
+    # Default: no auto-run
+    b = ui.run_button()
+    assert b._component_args["auto-run"] is False
+
+    # True normalizes to "once"
+    b = ui.run_button(auto_run=True)
+    assert b._component_args["auto-run"] == "once"
+
+    # Explicit "once"
+    b = ui.run_button(auto_run="once")
+    assert b._component_args["auto-run"] == "once"
+
+    # Explicit "always"
+    b = ui.run_button(auto_run="always")
+    assert b._component_args["auto-run"] == "always"
+
+
 async def test_run_button_set_to_true_on_click(
     any_kernel: Kernel, exec_req: ExecReqProvider
 ):

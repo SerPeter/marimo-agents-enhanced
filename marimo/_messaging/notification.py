@@ -458,6 +458,7 @@ class VariableValue(BaseStruct):
     name: str
     value: Optional[str]
     datatype: Optional[str]
+    meta: Optional[dict[str, Any]] = None
 
 
 class VariablesNotification(Notification, tag="variables"):

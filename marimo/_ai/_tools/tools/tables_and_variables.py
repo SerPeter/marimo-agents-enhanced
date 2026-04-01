@@ -2,20 +2,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from marimo._ai._tools.base import ToolBase
 from marimo._ai._tools.types import SuccessResult, ToolGuidelines
 from marimo._data.models import DataTableColumn
-from marimo._messaging.notification import VariableValue
 from marimo._session import Session
 from marimo._types.ids import SessionId
+
+_MAX_SAMPLE_VALUES = 5
+_MAX_COLUMNS = 50
 
 
 @dataclass
 class TablesAndVariablesArgs:
-    session_id: SessionId
-    variable_names: list[str]
+    session_id: Optional[SessionId] = None
+    file_path: Optional[str] = None
+    variable_names: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -30,6 +33,7 @@ class DataTableMetadata:
     columns: list[DataTableColumn] - The columns in the data table.
     primary_keys: Optional[list[str]] - The primary keys of the data table.
     indexes: Optional[list[str]] - The indexes of the data table.
+    columns_truncated: bool - Whether the columns list was truncated.
     """
 
     source: str
@@ -39,12 +43,23 @@ class DataTableMetadata:
     engine: Optional[str]
     primary_keys: Optional[list[str]]
     indexes: Optional[list[str]]
+    columns_truncated: bool = False
+
+
+@dataclass
+class VariableSummary:
+    """Structured variable summary for MCP tool output."""
+
+    name: str
+    datatype: str
+    preview: Optional[str] = None
+    meta: Optional[dict[str, Any]] = None
 
 
 @dataclass
 class TablesAndVariablesOutput(SuccessResult):
     tables: dict[str, DataTableMetadata] = field(default_factory=dict)
-    variables: dict[str, VariableValue] = field(default_factory=dict)
+    variables: dict[str, VariableSummary] = field(default_factory=dict)
 
 
 class GetTablesAndVariables(
@@ -56,7 +71,7 @@ class GetTablesAndVariables(
     If an empty list is provided, it will return information about all tables and variables.
 
     Returns:
-        A success result containing tables (columns, primary keys, indexes, engine, etc.) and variables (value, data type).
+        A success result containing tables (columns, primary keys, indexes, engine, etc.) and variables with structured summaries.
     """
 
     guidelines = ToolGuidelines(
@@ -77,7 +92,7 @@ class GetTablesAndVariables(
     )
 
     def handle(self, args: TablesAndVariablesArgs) -> TablesAndVariablesOutput:
-        session = self.context.get_session(args.session_id)
+        session = self.context.resolve_session(args.session_id, args.file_path)
         return self._get_tables_and_variables(session, args.variable_names)
 
     def _get_tables_and_variables(
@@ -106,23 +121,36 @@ class GetTablesAndVariables(
 
         data_tables: dict[str, DataTableMetadata] = {}
         for table in filtered_tables:
+            all_columns = table.columns
+            truncated = len(all_columns) > _MAX_COLUMNS
+            capped_columns = [
+                DataTableColumn(
+                    name=col.name,
+                    type=col.type,
+                    external_type=col.external_type,
+                    sample_values=col.sample_values[:_MAX_SAMPLE_VALUES],
+                )
+                for col in all_columns[:_MAX_COLUMNS]
+            ]
             data_tables[table.name] = DataTableMetadata(
                 source=table.source,
                 num_rows=table.num_rows,
                 num_columns=table.num_columns,
-                columns=table.columns,
+                columns=capped_columns,
                 primary_keys=table.primary_keys,
                 indexes=table.indexes,
                 engine=table.engine,
+                columns_truncated=truncated,
             )
 
-        notebook_variables: dict[str, VariableValue] = {}
+        notebook_variables: dict[str, VariableSummary] = {}
         for variable_name in filtered_variables:
             value = variables[variable_name]
-            notebook_variables[variable_name] = VariableValue(
+            notebook_variables[variable_name] = VariableSummary(
                 name=variable_name,
-                value=value.value,
-                datatype=value.datatype,
+                datatype=value.datatype or "unknown",
+                preview=value.value,
+                meta=value.meta,
             )
 
         return TablesAndVariablesOutput(

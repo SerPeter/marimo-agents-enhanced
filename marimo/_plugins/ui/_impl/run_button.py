@@ -1,7 +1,7 @@
 # Copyright 2026 Marimo. All rights reserved.
 from __future__ import annotations
 
-from typing import Any, Callable, Final, Literal, Optional
+from typing import Any, Callable, Final, Literal, Optional, Union
 
 from marimo._output.rich_help import mddoc
 from marimo._plugins.ui._core.ui_element import UIElement
@@ -46,6 +46,12 @@ class run_button(UIElement[Any, Any]):
             Defaults to "neutral".
         disabled (bool, optional): Whether the button is disabled. Defaults to False.
         tooltip (str, optional): A tooltip to display for the button. Defaults to None.
+        auto_run (bool | Literal["once", "always"], optional): Automatically fire the
+            button without user interaction. ``False`` (default) disables auto-run.
+            ``True`` or ``"once"`` fires the button on the first notebook load only
+            (cell re-executions within the same session will not re-fire). ``"always"``
+            fires the button every time the containing cell executes, including when
+            upstream dependencies change. Defaults to False.
         label (str, optional): Markdown label for the element. Defaults to "click to run".
         on_change (Callable[[Any], None], optional): Optional callback to run when this
             element's value changes.
@@ -64,12 +70,17 @@ class run_button(UIElement[Any, Any]):
         disabled: bool = False,
         tooltip: Optional[str] = None,
         *,
+        auto_run: Union[bool, Literal["once", "always"]] = False,
         label: str = "click to run",
         on_change: Optional[Callable[[Any], None]] = None,
         full_width: bool = False,
         keyboard_shortcut: Optional[str] = None,
     ) -> None:
         self._initial_value = False
+        # Normalize True → "once" for the frontend
+        auto_run_normalized: Union[bool, str] = (
+            "once" if auto_run is True else auto_run
+        )
         super().__init__(
             component_name=button._name,
             # frontend's value is a counter
@@ -81,6 +92,7 @@ class run_button(UIElement[Any, Any]):
                 "tooltip": tooltip,
                 "full-width": full_width,
                 "keyboard-shortcut": keyboard_shortcut,
+                "auto-run": auto_run_normalized,
             },
             on_change=on_change,
         )

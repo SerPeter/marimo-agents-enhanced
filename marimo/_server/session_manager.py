@@ -253,12 +253,27 @@ class SessionManager:
         reload_strategy = create_reload_strategy(
             self.mode, self._config_manager
         )
-        return FileChangeCoordinator(reload_strategy)
+        debounce = (
+            self._config_manager.get_config()["runtime"].get(
+                "watch_debounce_seconds", 3.0
+            )
+            if self.watch
+            else None
+        )
+        return FileChangeCoordinator(
+            reload_strategy,
+            debounce_seconds=debounce,
+        )
 
     async def _handle_file_change(
         self, file_path: Path, session: Session
     ) -> None:
-        await self._file_change_coordinator.handle_change(file_path, session)
+        try:
+            await self._file_change_coordinator.handle_change(
+                file_path, session
+            )
+        except asyncio.CancelledError:
+            pass  # Superseded by a newer file change
 
     async def rename_session(
         self, session_id: SessionId, new_path: str
@@ -417,6 +432,16 @@ class SessionManager:
     def should_send_code_to_frontend(self) -> bool:
         """Returns True if the server can send messages to the frontend."""
         return self.mode == SessionMode.EDIT or self.include_code
+
+    def get_sessions_by_file_path(self, file_path: str) -> list[Session]:
+        """Get all sessions associated with a file path."""
+        return self._repository.get_by_file_path(file_path)
+
+    def get_session_id_for_session(
+        self, session: Session
+    ) -> Optional[SessionId]:
+        """Get the session ID for a session object."""
+        return self._repository.get_session_id(session)
 
     def get_active_connection_count(self) -> int:
         """Get the number of sessions with active connections."""

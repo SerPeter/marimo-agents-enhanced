@@ -187,29 +187,37 @@ class FileChangeCoordinator:
     """Coordinates file change handling with proper locking and strategies.
 
     This class handles the complexities of file watching, including
-    preventing duplicate reloads and delegating to mode-specific strategies.
+    preventing duplicate reloads, debouncing rapid changes, and delegating
+    to mode-specific strategies.
     """
 
     def __init__(
         self,
         reload_strategy: ReloadStrategy,
+        debounce_seconds: Optional[float] = None,
     ) -> None:
         """Initialize the file change coordinator.
 
         Args:
             reload_strategy: Strategy for handling reloads
+            debounce_seconds: Time to wait after the last file change before
+                triggering a reload. ``None`` or ``0`` disables debouncing.
         """
         self._reload_strategy = reload_strategy
+        self._debounce_seconds = debounce_seconds or 0
         # Track ongoing file change operations to prevent duplicates
         self._file_change_locks: dict[str, asyncio.Lock] = {}
+        # Pending debounce tasks per file path
+        self._pending_tasks: dict[str, asyncio.Task[FileChangeResult]] = {}
 
     async def handle_change(
         self, file_path: Path, session: Session
     ) -> FileChangeResult:
         """Handle a file change for a session.
 
-        This method reloads the notebook and sends appropriate operations
-        to the frontend when a marimo file is modified.
+        When debouncing is enabled, rapid successive calls for the same file
+        will cancel pending timers so that only the last change triggers a
+        reload after the quiet period expires.
 
         Args:
             file_path: The path to the file that changed
@@ -219,13 +227,38 @@ class FileChangeCoordinator:
             FileChangeResult indicating success or failure
         """
         abs_file_path = await async_path.abspath(file_path)
+        key = str(abs_file_path)
 
-        # Use a lock to prevent concurrent processing of the same file
-        if str(abs_file_path) not in self._file_change_locks:
-            self._file_change_locks[str(abs_file_path)] = asyncio.Lock()
+        if not self._debounce_seconds:
+            return await self._execute_change(key, session)
 
-        async with self._file_change_locks[str(abs_file_path)]:
-            return self._handle_file_change_locked(abs_file_path, session)
+        # Cancel any pending debounce for this file
+        existing = self._pending_tasks.get(key)
+        if existing and not existing.done():
+            existing.cancel()
+
+        task: asyncio.Task[FileChangeResult] = asyncio.create_task(
+            self._debounced_change(key, session)
+        )
+        self._pending_tasks[key] = task
+        return await task
+
+    async def _debounced_change(
+        self, key: str, session: Session
+    ) -> FileChangeResult:
+        """Wait for the debounce period then execute the change."""
+        await asyncio.sleep(self._debounce_seconds)
+        return await self._execute_change(key, session)
+
+    async def _execute_change(
+        self, key: str, session: Session
+    ) -> FileChangeResult:
+        """Execute the file change with proper locking."""
+        if key not in self._file_change_locks:
+            self._file_change_locks[key] = asyncio.Lock()
+
+        async with self._file_change_locks[key]:
+            return self._handle_file_change_locked(key, session)
 
     def _handle_file_change_locked(
         self, file_path: str, session: Session

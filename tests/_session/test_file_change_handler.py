@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from textwrap import dedent
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
@@ -30,6 +31,7 @@ from marimo._server.models.models import SaveNotebookRequest
 from marimo._session.file_change_handler import (
     EditModeReloadStrategy,
     FileChangeCoordinator,
+    FileChangeResult,
     RunModeReloadStrategy,
 )
 from marimo._session.notebook import AppFileManager
@@ -684,4 +686,198 @@ async def test_file_change_coordinator_config_only_change(
     assert result.handled
     assert result.error is None
     assert len(result.changed_cell_ids) == 1
+    strategy.handle_reload.assert_called_once()
+
+
+# -- Debounce tests ----------------------------------------------------------
+
+
+async def test_debounce_batches_rapid_changes(
+    tmp_path: Path, mock_session: MagicMock
+) -> None:
+    """Rapid successive changes should only trigger one reload."""
+    content = dedent(
+        """\
+        import marimo
+        app = marimo.App()
+
+        @app.cell
+        def cell1():
+            x = 1
+            return x
+        """
+    )
+    test_file = tmp_path / "test.py"
+    test_file.write_text(content)
+
+    app_file_manager = AppFileManager(filename=str(test_file))
+    mock_session.app_file_manager = app_file_manager
+
+    strategy = MagicMock()
+    coordinator = FileChangeCoordinator(strategy, debounce_seconds=0.1)
+
+    # Fire 5 rapid changes — only the last should trigger reload
+    tasks = []
+    for i in range(5):
+        test_file.write_text(
+            dedent(
+                f"""\
+                import marimo
+                app = marimo.App()
+
+                @app.cell
+                def cell1():
+                    x = {i}
+                    return x
+                """
+            )
+        )
+        tasks.append(coordinator.handle_change(test_file, mock_session))
+
+    # The first 4 tasks should be cancelled, only the last succeeds
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    cancelled = sum(
+        1 for r in results if isinstance(r, asyncio.CancelledError)
+    )
+    succeeded = [r for r in results if isinstance(r, FileChangeResult)]
+
+    assert cancelled == 4
+    assert len(succeeded) == 1
+    assert succeeded[0].handled
+    strategy.handle_reload.assert_called_once()
+
+
+async def test_debounce_fires_after_quiet_period(
+    tmp_path: Path, mock_session: MagicMock
+) -> None:
+    """A single change should fire after the debounce period."""
+    content = dedent(
+        """\
+        import marimo
+        app = marimo.App()
+
+        @app.cell
+        def cell1():
+            x = 1
+            return x
+        """
+    )
+    test_file = tmp_path / "test.py"
+    test_file.write_text(content)
+
+    app_file_manager = AppFileManager(filename=str(test_file))
+    mock_session.app_file_manager = app_file_manager
+
+    strategy = MagicMock()
+    coordinator = FileChangeCoordinator(strategy, debounce_seconds=0.05)
+
+    test_file.write_text(
+        dedent(
+            """\
+            import marimo
+            app = marimo.App()
+
+            @app.cell
+            def cell1():
+                x = 99
+                return x
+            """
+        )
+    )
+
+    result = await coordinator.handle_change(test_file, mock_session)
+
+    assert result.handled
+    strategy.handle_reload.assert_called_once()
+
+
+async def test_debounce_disabled_with_zero(
+    tmp_path: Path, mock_session: MagicMock
+) -> None:
+    """debounce_seconds=0 should execute immediately without tasks."""
+    content = dedent(
+        """\
+        import marimo
+        app = marimo.App()
+
+        @app.cell
+        def cell1():
+            x = 1
+            return x
+        """
+    )
+    test_file = tmp_path / "test.py"
+    test_file.write_text(content)
+
+    app_file_manager = AppFileManager(filename=str(test_file))
+    mock_session.app_file_manager = app_file_manager
+
+    strategy = MagicMock()
+    coordinator = FileChangeCoordinator(strategy, debounce_seconds=0)
+
+    test_file.write_text(
+        dedent(
+            """\
+            import marimo
+            app = marimo.App()
+
+            @app.cell
+            def cell1():
+                x = 2
+                return x
+            """
+        )
+    )
+
+    result = await coordinator.handle_change(test_file, mock_session)
+
+    assert result.handled
+    # No pending tasks should have been created
+    assert len(coordinator._pending_tasks) == 0
+    strategy.handle_reload.assert_called_once()
+
+
+async def test_debounce_disabled_with_none(
+    tmp_path: Path, mock_session: MagicMock
+) -> None:
+    """debounce_seconds=None (default) should execute immediately."""
+    content = dedent(
+        """\
+        import marimo
+        app = marimo.App()
+
+        @app.cell
+        def cell1():
+            x = 1
+            return x
+        """
+    )
+    test_file = tmp_path / "test.py"
+    test_file.write_text(content)
+
+    app_file_manager = AppFileManager(filename=str(test_file))
+    mock_session.app_file_manager = app_file_manager
+
+    strategy = MagicMock()
+    coordinator = FileChangeCoordinator(strategy)
+
+    test_file.write_text(
+        dedent(
+            """\
+            import marimo
+            app = marimo.App()
+
+            @app.cell
+            def cell1():
+                x = 2
+                return x
+            """
+        )
+    )
+
+    result = await coordinator.handle_change(test_file, mock_session)
+
+    assert result.handled
+    assert len(coordinator._pending_tasks) == 0
     strategy.handle_reload.assert_called_once()

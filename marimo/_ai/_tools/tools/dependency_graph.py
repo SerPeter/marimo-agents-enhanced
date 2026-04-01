@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Optional
 
 from marimo._ai._tools.base import ToolBase
 from marimo._ai._tools.types import SuccessResult, ToolGuidelines
@@ -19,7 +20,8 @@ from marimo._types.ids import CellId_t, SessionId
 
 @dataclass
 class GetCellDependencyGraphArgs:
-    session_id: SessionId
+    session_id: Optional[SessionId] = None
+    file_path: Optional[str] = None
     cell_id: CellId_t | None = None
     depth: int | None = None
 
@@ -102,7 +104,7 @@ class GetCellDependencyGraph(
     def handle(
         self, args: GetCellDependencyGraphArgs
     ) -> GetCellDependencyGraphOutput:
-        session = self.context.get_session(args.session_id)
+        session = self.context.resolve_session(args.session_id, args.file_path)
         variable_values = session.session_view.variable_values
         app = session.app_file_manager.app
         cell_manager = app.cell_manager

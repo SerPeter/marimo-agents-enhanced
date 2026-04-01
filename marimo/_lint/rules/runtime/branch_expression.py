@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from marimo._ast.parse import ast_parse
 from marimo._lint.diagnostic import Diagnostic, Severity
 from marimo._lint.rules.base import LintRule
+from marimo._lint.rules.runtime._marimo_call_utils import is_marimo_output_call
 
 if TYPE_CHECKING:
     from marimo._lint.context import RuleContext
@@ -224,36 +225,10 @@ class BranchExpressionRule(LintRule):
             func = expr.func
 
             # Marimo output calls should be flagged (mo.md, mo.ui.*, etc.)
-            return self._is_marimo_output_call(func)
+            return is_marimo_output_call(func)
 
         # All other expressions (constants, names, attributes, operations) are flagged
         return True
-
-    def _is_marimo_output_call(self, func: ast.expr) -> bool:
-        """Check if a call is a marimo output function (mo.md, mo.ui.*, etc.).
-
-        Excludes control flow and side-effect calls like mo.stop() and mo.output.*.
-        """
-        if isinstance(func, ast.Attribute):
-            # Direct mo.* calls (mo.md, mo.Html, etc.)
-            if isinstance(func.value, ast.Name) and func.value.id == "mo":
-                # Exclude mo.stop()
-                if func.attr == "stop":
-                    return False
-                return True
-
-            # mo.ui.* or other nested mo.* calls
-            if isinstance(func.value, ast.Attribute):
-                if (
-                    isinstance(func.value.value, ast.Name)
-                    and func.value.value.id == "mo"
-                ):
-                    # Exclude mo.output.* calls (append, replace, clear)
-                    if func.value.attr == "output":
-                        return False
-                    return True
-
-        return False
 
     async def _report_diagnostic(
         self, node: ast.stmt, cell: CellDef, ctx: RuleContext, stmt_type: str

@@ -1,7 +1,9 @@
 # Copyright 2026 Marimo. All rights reserved.
 from __future__ import annotations
 
+import html
 import inspect
+import re
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import (
@@ -11,6 +13,7 @@ from typing import (
     Generic,
     Optional,
     TypeVar,
+    Union,
     cast,
     get_args,
     get_origin,
@@ -27,7 +30,7 @@ from marimo._ai._tools.types import (
 from marimo._ai._tools.utils.exceptions import ToolExecutionError
 from marimo._ai._tools.utils.output_cleaning import clean_output
 from marimo._config.config import CopilotMode
-from marimo._messaging.cell_output import CellChannel
+from marimo._messaging.cell_output import CellChannel, CellOutput
 from marimo._messaging.notification import CellNotification
 from marimo._server.ai.tools.types import (
     FunctionArgs,
@@ -42,6 +45,37 @@ from marimo._utils.dataclass_to_openapi import PythonTypeToOpenAPI
 from marimo._utils.parse_dataclass import parse_raw
 
 LOGGER = _loggers.marimo_logger()
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _extract_traceback_lines(
+    console: Union[list[CellOutput], CellOutput, None],
+) -> list[str]:
+    """Extract plain-text traceback lines from console outputs.
+
+    Identifies traceback entries by their mimetype
+    (``application/vnd.marimo+traceback``) and strips HTML tags
+    added by Pygments highlighting.
+    """
+    if console is None:
+        return []
+    outputs: list[CellOutput] = (
+        console if isinstance(console, list) else [console]
+    )
+    lines: list[str] = []
+    for output in outputs:
+        if output is None:  # type: ignore[comparison-overlap]
+            continue
+        if (
+            output.channel == CellChannel.STDERR
+            and "traceback" in output.mimetype
+        ):
+            plain = _HTML_TAG_RE.sub("", str(output.data))
+            plain = html.unescape(plain)
+            lines.extend(plain.strip().splitlines())
+    return lines
+
 
 ArgsT = TypeVar("ArgsT")
 OutT = TypeVar("OutT")
@@ -92,6 +126,74 @@ class ToolContext:
             )
         return session
 
+    def resolve_session(
+        self,
+        session_id: Optional[SessionId] = None,
+        file_path: Optional[str] = None,
+    ) -> Session:
+        """Resolve a session from session_id or file_path.
+
+        If both are provided, session_id takes precedence.
+        """
+        if session_id:
+            return self.get_session(session_id)
+        if file_path:
+            return self._resolve_by_file_path(file_path)
+        raise ToolExecutionError(
+            "Either session_id or file_path is required",
+            code="MISSING_SESSION_IDENTIFIER",
+            is_retryable=False,
+            suggested_fix="Use get_active_notebooks to find valid session IDs or file paths.",
+        )
+
+    def resolve_session_and_id(
+        self,
+        session_id: Optional[SessionId] = None,
+        file_path: Optional[str] = None,
+    ) -> tuple[Session, SessionId]:
+        """Resolve a session and its ID from session_id or file_path."""
+        session = self.resolve_session(session_id, file_path)
+        if session_id:
+            return session, session_id
+        # Reverse-lookup the session ID from the session manager
+        found_id = self.session_manager.get_session_id_for_session(session)
+        if found_id is None:
+            raise ToolExecutionError(
+                "Could not determine session ID",
+                code="SESSION_ID_LOOKUP_FAILED",
+                is_retryable=False,
+                suggested_fix="Use get_active_notebooks to find valid session IDs.",
+            )
+        return session, found_id
+
+    def _resolve_by_file_path(self, file_path: str) -> Session:
+        """Resolve a single session by file path."""
+        sessions = self.session_manager.get_sessions_by_file_path(file_path)
+        # Filter to active sessions (OPEN or ORPHANED)
+        active = [
+            s
+            for s in sessions
+            if s.connection_state()
+            in (ConnectionState.OPEN, ConnectionState.ORPHANED)
+        ]
+        if len(active) == 0:
+            raise ToolExecutionError(
+                f"No active session for file: {file_path}",
+                code="SESSION_NOT_FOUND",
+                is_retryable=False,
+                suggested_fix="Use get_active_notebooks to list active sessions, or use manage_session to start one.",
+                meta={"file_path": file_path},
+            )
+        if len(active) > 1:
+            raise ToolExecutionError(
+                f"Multiple active sessions for file: {file_path}. Use session_id instead.",
+                code="AMBIGUOUS_FILE_PATH",
+                is_retryable=False,
+                suggested_fix="Use session_id to specify which session.",
+                meta={"file_path": file_path, "count": len(active)},
+            )
+        return active[0]
+
     def get_cell_notification(
         self, session_id: SessionId, cell_id: CellId_t
     ) -> CellNotification:
@@ -139,20 +241,27 @@ class ToolContext:
         return files[::-1]
 
     def get_notebook_errors(
-        self, session_id: SessionId, include_stderr: bool
+        self,
+        session_id: SessionId,
+        include_stderr: bool,
+        cell_ids: Optional[list[CellId_t]] = None,
     ) -> list[MarimoCellErrors]:
         """
         Get all errors in the current notebook session, organized by cell.
 
-        Optionally include stderr messages foreach cell.
+        Optionally include stderr messages for each cell.
+        If ``cell_ids`` is provided, only errors for those cells are returned.
         """
         session = self.get_session(session_id)
         session_view = session.session_view
         cell_errors_map: dict[CellId_t, MarimoCellErrors] = {}
         notebook_errors: list[MarimoCellErrors] = []
         stderr: list[str] = []
+        cell_ids_set = set(cell_ids) if cell_ids else None
 
         for cell_id, cell_notif in session_view.cell_notifications.items():
+            if cell_ids_set is not None and cell_id not in cell_ids_set:
+                continue
             errors = self.get_cell_errors(
                 session_id,
                 cell_id,
@@ -184,6 +293,10 @@ class ToolContext:
     ) -> list[MarimoErrorDetail]:
         """
         Get all errors for a given cell.
+
+        Populates the ``traceback`` field from console traceback outputs
+        when available (the runtime writes tracebacks to stderr with a
+        special mimetype rather than storing them in the error struct).
         """
         errors: list[MarimoErrorDetail] = []
         cell_notif = maybe_cell_notif or self.get_cell_notification(
@@ -202,15 +315,19 @@ class ToolContext:
             # no errors
             return errors
 
+        # Extract plain-text traceback from console outputs
+        traceback_lines = _extract_traceback_lines(cell_notif.console)
+
         for err in items:
             # TODO: filter out noisy useless errors
             # like "An ancestor raised an exception..."
             if isinstance(err, dict):
+                tb = err.get("traceback", []) or traceback_lines
                 errors.append(
                     MarimoErrorDetail(
                         type=err.get("type", "UnknownError"),
                         message=err.get("msg", str(err)),
-                        traceback=err.get("traceback", []),
+                        traceback=tb,
                     )
                 )
             else:
@@ -221,7 +338,7 @@ class ToolContext:
                     describe_fn() if callable(describe_fn) else str(err)
                 )
                 message: str = str(message_val)
-                tb: list[str] = getattr(err, "traceback", []) or []
+                tb = getattr(err, "traceback", []) or traceback_lines
                 errors.append(
                     MarimoErrorDetail(
                         type=err_type,

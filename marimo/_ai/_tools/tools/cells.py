@@ -14,6 +14,7 @@ from marimo._ai._tools.types import (
     ToolGuidelines,
 )
 from marimo._ai._tools.utils.exceptions import ToolExecutionError
+from marimo._ai._tools.utils.output_cleaning import mask_visual_output
 from marimo._ast.models import CellData
 from marimo._messaging.cell_output import CellChannel
 from marimo._messaging.errors import Error
@@ -36,7 +37,8 @@ class SupportedCellType(str, Enum):
 
 @dataclass
 class GetLightweightCellMapArgs:
-    session_id: SessionId
+    session_id: Optional[SessionId] = None
+    file_path: Optional[str] = None
     preview_lines: int = 3  # random default value
 
 
@@ -94,7 +96,8 @@ class GetCellRuntimeDataData:
 
 @dataclass
 class GetCellRuntimeDataArgs:
-    session_id: SessionId
+    session_id: Optional[SessionId] = None
+    file_path: Optional[str] = None
     cell_ids: list[CellId_t] = field(default_factory=list)
 
 
@@ -109,6 +112,7 @@ class CellVisualOutput:
 
     visual_output: Optional[str] = None
     visual_mimetype: Optional[str] = None
+    masked: bool = False
 
 
 @dataclass
@@ -122,7 +126,8 @@ class CellOutputData:
 
 @dataclass
 class GetCellOutputArgs:
-    session_id: SessionId
+    session_id: Optional[SessionId] = None
+    file_path: Optional[str] = None
     cell_ids: list[CellId_t] = field(default_factory=list)
 
 
@@ -169,9 +174,10 @@ class GetLightweightCellMap(
     def handle(
         self, args: GetLightweightCellMapArgs
     ) -> GetLightweightCellMapOutput:
-        session_id = args.session_id
         context = self.context
-        session = context.get_session(session_id)
+        session, session_id = context.resolve_session_and_id(
+            args.session_id, args.file_path
+        )
         cell_manager = session.app_file_manager.app.cell_manager
         session_view = session.session_view
         notebook_filename = (
@@ -240,7 +246,7 @@ class GetLightweightCellMap(
 
         return GetLightweightCellMapOutput(
             status="success",
-            session_id=args.session_id,
+            session_id=session_id,
             notebook_name=notebook_filename,
             cells=cells,
             total_cells=len(cells),
@@ -331,9 +337,10 @@ class GetCellRuntimeData(
     )
 
     def handle(self, args: GetCellRuntimeDataArgs) -> GetCellRuntimeDataOutput:
-        session_id = args.session_id
         context = self.context
-        session = context.get_session(session_id)
+        session, session_id = context.resolve_session_and_id(
+            args.session_id, args.file_path
+        )
 
         # Empty cell_ids means "return all cells"
         cell_ids = args.cell_ids
@@ -471,7 +478,9 @@ class GetCellOutputs(ToolBase[GetCellOutputArgs, GetCellOutputOutput]):
 
     def handle(self, args: GetCellOutputArgs) -> GetCellOutputOutput:
         context = self.context
-        session = context.get_session(args.session_id)
+        session, session_id = context.resolve_session_and_id(
+            args.session_id, args.file_path
+        )
         session_view = session.session_view
 
         # Empty cell_ids means "return all cells"
@@ -486,13 +495,13 @@ class GetCellOutputs(ToolBase[GetCellOutputArgs, GetCellOutputOutput]):
 
             if cell_notif is None:
                 raise ToolExecutionError(
-                    f"Cell {cell_id} not found in session {args.session_id}",
+                    f"Cell {cell_id} not found in session {session_id}",
                     code="CELL_NOT_FOUND",
                     is_retryable=False,
                     suggested_fix="Use get_lightweight_cell_map to find valid cell IDs",
                 )
 
-            visual_output, visual_mimetype = self._get_visual_output(
+            visual_output, visual_mimetype, masked = self._get_visual_output(
                 cell_notif
             )
             console_outputs = context.get_cell_console_outputs(cell_notif)
@@ -503,6 +512,7 @@ class GetCellOutputs(ToolBase[GetCellOutputArgs, GetCellOutputOutput]):
                     visual_output=CellVisualOutput(
                         visual_output=visual_output,
                         visual_mimetype=visual_mimetype,
+                        masked=masked,
                     ),
                     console_outputs=console_outputs,
                 )
@@ -518,9 +528,10 @@ class GetCellOutputs(ToolBase[GetCellOutputArgs, GetCellOutputOutput]):
 
     def _get_visual_output(
         self, cell_notif: CellNotification
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[str], bool]:
         visual_output = None
         visual_mimetype = None
+        masked = False
         if cell_notif.output:
             if cell_notif.output.channel == CellChannel.MARIMO_ERROR:
                 visual_output = self._get_error_output_data(
@@ -531,7 +542,11 @@ class GetCellOutputs(ToolBase[GetCellOutputArgs, GetCellOutputOutput]):
                 data = cell_notif.output.data
                 visual_output = self._get_str_output_data(data)
                 visual_mimetype = cell_notif.output.mimetype
-        return visual_output, visual_mimetype
+                if visual_output and visual_mimetype:
+                    visual_output, masked = mask_visual_output(
+                        visual_output, visual_mimetype
+                    )
+        return visual_output, visual_mimetype, masked
 
     def _get_error_output_data(
         self, data: str | list[Error] | dict[str, Any]
