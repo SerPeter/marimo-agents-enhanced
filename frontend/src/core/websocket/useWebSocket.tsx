@@ -30,6 +30,8 @@ function createConnectionTransport(
   // Create a connection transport using the ReconnectingWebSocket from partysocket
   // This handles reconnecting when the connection is lost.
   const urlProvider = options.url; // We don't call the URL provider now since it may change (i.e. if the runtime redirects)
+  // Cast needed: ReconnectingWebSocket types readyState as `number`
+  // but IConnectionTransport expects `0 | 1 | 2 | 3`
   return new ReconnectingWebSocket(urlProvider, undefined, {
     // We don't want Infinity retries
     maxRetries: 10,
@@ -38,7 +40,7 @@ function createConnectionTransport(
     // long timeout -- the server can become slow when many notebooks
     // are open.
     connectionTimeout: 10_000,
-  });
+  }) as unknown as IConnectionTransport;
 }
 
 /**
@@ -47,7 +49,7 @@ function createConnectionTransport(
 export function useConnectionTransport(options: UseConnectionTransportOptions) {
   const { onOpen, onMessage, onClose, onError, waitToConnect } = options;
 
-  // eslint-disable-next-line react/hook-use-state
+  // oxlint-disable-next-line react/hook-use-state
   const [transport] = useState<IConnectionTransport>(() => {
     const socket = createConnectionTransport(options);
 
@@ -81,7 +83,7 @@ export function useConnectionTransport(options: UseConnectionTransportOptions) {
       transport.removeEventListener("error", onError);
       transport.removeEventListener("message", onMessage);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [transport]);
 
   return transport;

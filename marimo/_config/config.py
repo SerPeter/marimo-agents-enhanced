@@ -174,6 +174,9 @@ class RuntimeConfig(TypedDict):
     - `watch_debounce_seconds`: time in seconds to wait after the last file
         change before triggering a reload in watch mode. Batches rapid saves
         into a single reload. The default is `3.0`.
+    - `show_tracebacks`: if `True`, show detailed error tracebacks in run mode.
+        When enabled, exceptions will display a clickable toast that opens a modal with the full traceback.
+        The default is `False`.
     """
 
     auto_instantiate: bool
@@ -190,6 +193,7 @@ class RuntimeConfig(TypedDict):
     default_auto_download: NotRequired[list[ExportType]]
     default_csv_encoding: NotRequired[str]
     watch_debounce_seconds: NotRequired[float]
+    show_tracebacks: NotRequired[bool]
 
 
 @mddoc
@@ -603,10 +607,6 @@ class ExperimentalConfig(TypedDict, total=False):
 # But maintain type safety for known flags
 ExperimentalConfigType = dict[str, Any]
 
-# Default for experimental.storage_inspector when not set by user.
-# Must match frontend default in feature-flag.tsx.
-STORAGE_INSPECTOR_DEFAULT = True
-
 
 @mddoc
 @dataclass
@@ -737,6 +737,7 @@ DEFAULT_CONFIG: MarimoConfig = {
         "default_sql_output": "auto",
         "default_csv_encoding": "utf-8",
         "watch_debounce_seconds": 3.0,
+        "show_tracebacks": False,
     },
     "save": {
         "autosave": "after_delay",

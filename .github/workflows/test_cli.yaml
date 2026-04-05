@@ -16,6 +16,7 @@ env:
   TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
   TURBO_TEAM: marimo
   MARIMO_SKIP_UPDATE_CHECK: 1
+  UV_EXCLUDE_NEWER: "7 days"
 jobs:
   changes:
     runs-on: ubuntu-latest
@@ -101,7 +102,7 @@ jobs:
       - name: 📦 Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Download wheel
         uses: actions/download-artifact@v4

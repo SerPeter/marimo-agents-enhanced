@@ -86,6 +86,17 @@ export class CopilotLanguageServerClient extends LanguageServerClient {
     });
   }
 
+  /**
+   * Re-run the LSP initialize handshake and send configuration.
+   * Called by the transport's onReconnect callback after reconnecting.
+   */
+  async reInitialize(): Promise<void> {
+    logger.log("#reInitialize: Re-initializing LSP connection");
+    this.initializePromise = this.initialize();
+    await this.initializePromise;
+    await this.sendConfiguration();
+  }
+
   private async sendConfiguration() {
     const settings = this.copilotSettings;
     // Skip if no settings are provided
@@ -110,7 +121,7 @@ export class CopilotLanguageServerClient extends LanguageServerClient {
     ).request(method, params);
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  // oxlint-disable-next-line typescript/no-explicit-any
   override async notify(method: any, params: any): Promise<any> {
     logger.debug("#notify", method, params);
     return super.notify(method, params);
