@@ -7,7 +7,7 @@ from functools import partial
 from inspect import cleandoc
 from pathlib import Path
 from textwrap import dedent
-from typing import Any, Optional
+from typing import Any
 from unittest.mock import patch
 
 import codegen_data.test_main as mod
@@ -53,8 +53,8 @@ def sanitized_version(output: str) -> str:
 
 def wrap_generate_filecontents(
     codes: list[str],
-    names: Optional[list[str]] = None,
-    cell_configs: Optional[list[CellConfig]] = None,
+    names: list[str] | None = None,
+    cell_configs: list[CellConfig] | None = None,
     **kwargs: Any,
 ) -> str:
     """
@@ -1462,9 +1462,9 @@ def test_recover(tmp_path: Path) -> None:
     recovered = codegen.recover(tempfile_name)
 
     codes = [
-        "\n".join(['"santa"', "", '"clause"', "", "", ""]),
+        '"santa"\n\n"clause"\n\n\n',
         "",
-        "\n".join(["", "123"]),
+        "\n123",
     ]
     names = ["a", "b", "c"]
 
@@ -1518,12 +1518,12 @@ def test_is_internal_cell_name() -> None:
 def test_format_tuple_elements() -> None:
     kv_case = codegen.format_tuple_elements(
         "@app.fn(...)",
-        tuple(["a", "b", "c"]),
+        ("a", "b", "c"),
     )
     assert kv_case == "@app.fn(a, b, c)"
 
     indent_case = codegen.format_tuple_elements(
-        "def fn(...):", tuple(["a", "b", "c"]), indent=True
+        "def fn(...):", ("a", "b", "c"), indent=True
     )
     assert indent_case == "    def fn(a, b, c):"
 
@@ -1669,7 +1669,7 @@ def test_needs_trailing_blank_line(code: str, expected: bool) -> None:
     ],
 )
 def test_ruff_blank_line_in_generated_code(
-    code: str, expected_pattern: str, unexpected_pattern: Optional[str]
+    code: str, expected_pattern: str, unexpected_pattern: str | None
 ) -> None:
     """Test that generated code has blank lines where ruff expects them."""
     result = codegen.generate_filecontents(
@@ -2124,6 +2124,114 @@ def default_formatter():
     return "default"\
 """
         )
+
+    @staticmethod
+    def test_demoted_function_cell_name_anonymized() -> None:
+        """A `@app.function` cell that gets demoted to a regular cell should
+        serialize with the canonical `_` name, not the original function
+        name. Regression test for `marimo check --fix` keeping the function
+        name in the cell signature.
+        """
+        from marimo._convert.converters import MarimoConvert
+
+        source = """\
+import marimo
+
+__generated_with = "0.0.0"
+app = marimo.App()
+
+
+@app.function
+def deco(func):
+    return func
+
+
+@app.cell
+def _():
+    x = 2
+    return (x,)
+
+
+@app.function
+@deco
+def foo():
+    return "Hello" * x
+
+
+@app.cell
+def _(foo):
+    foo()
+    return
+
+
+if __name__ == "__main__":
+    app.run()
+"""
+        result = _strip_header_footer(MarimoConvert.from_py(source).to_py())
+        ast.parse(result)
+        # The demoted cell signature must be `def _(...)`, not `def foo(...)`.
+        assert "@app.cell\ndef foo(" not in result
+        assert result == snapshot(
+            """\
+@app.function
+def deco(func):
+    return func
+
+
+@app.cell
+def _():
+    x = 2
+    return (x,)
+
+
+@app.cell
+def _(x):
+    @deco
+    def foo():
+        return "Hello" * x
+
+    return (foo,)
+
+
+@app.cell
+def _(foo):
+    foo()
+    return\
+"""
+        )
+
+    @staticmethod
+    def test_demoted_class_cell_name_anonymized() -> None:
+        """A `@app.class_definition` cell demoted because of cell-defined refs
+        should also serialize with `_`, not the original class name."""
+        from marimo._convert.converters import MarimoConvert
+
+        source = """\
+import marimo
+
+__generated_with = "0.0.0"
+app = marimo.App()
+
+
+@app.cell
+def _():
+    base_value = 10
+    return (base_value,)
+
+
+@app.class_definition
+class MyClass:
+    value = base_value
+
+
+if __name__ == "__main__":
+    app.run()
+"""
+        result = _strip_header_footer(MarimoConvert.from_py(source).to_py())
+        ast.parse(result)
+        # The demoted cell signature must be `def _(...)`, not `def MyClass(...)`.
+        assert "@app.cell\ndef MyClass(" not in result
+        assert "@app.cell\ndef _(" in result
 
 
 def _strip_header_footer(source: str) -> str:

@@ -5,7 +5,60 @@ import type { TableData } from "@/plugins/impl/DataTablePlugin";
 import { vegaLoadData } from "@/plugins/impl/vega/loader";
 import { jsonParseWithSpecialChar } from "@/utils/json/json-parser";
 import { getMimeValues } from "./mime-cell";
-import { INDEX_COLUMN_NAME } from "./types";
+import type { DataType } from "@/core/kernel/messages";
+import {
+  type CellValueSentinel,
+  INDEX_COLUMN_NAME,
+  isNumericType,
+  isTemporalType,
+} from "./types";
+
+const WHITESPACE_ONLY_RE = /^[\s]+$/;
+const WHITESPACE_CHAR_RE = /\s/;
+const EDGE_WHITESPACE_RE = /^(\s*)([\s\S]*?)(\s*)$/;
+
+/**
+ * checks for leading and trailing whitespaces.
+ * Will run for every cell, so fast exits for common cases
+ *
+ * @param value - to split
+ * @returns - leading, middle, and trailing string where leading and trailing are whitespace string
+ */
+export function splitLeadingTrailingWhitespace(value: string): {
+  leading: string;
+  middle: string;
+  trailing: string;
+} {
+  const parts = {
+    leading: "",
+    middle: "",
+    trailing: "",
+  };
+  if (value.length === 0) {
+    return parts;
+  }
+
+  const firstWhitespaceCh = WHITESPACE_CHAR_RE.test(value[0]);
+  const lastWhitespaceCh = WHITESPACE_CHAR_RE.test(value[value.length - 1]);
+
+  // if does not start or end with ws
+  if (!firstWhitespaceCh && !lastWhitespaceCh) {
+    parts.middle = value;
+    return parts;
+  }
+
+  const match = EDGE_WHITESPACE_RE.exec(value);
+  if (!match) {
+    parts.middle = value;
+    return parts;
+  }
+
+  parts.leading = match[1] ?? "";
+  parts.middle = match[2] ?? "";
+  parts.trailing = match[3] ?? "";
+
+  return parts;
+}
 
 /**
  * Convenience function to load table data.
@@ -80,6 +133,71 @@ export function getPageIndexForRow(
 
   if (rowIdx < currentPageStart || rowIdx > currentPageEnd) {
     return Math.floor(rowIdx / pageSize);
+  }
+
+  return null;
+}
+
+// String representations of numeric special values.
+// Only matched when the caller indicates the column is numeric.
+type StringValueSentinelType = Extract<
+  CellValueSentinel,
+  { value: number | string }
+>["type"];
+
+const NUMERIC_STRING_SPECIALS: Record<string, StringValueSentinelType> = {
+  NaN: "nan",
+  Infinity: "positive-infinity",
+  "-Infinity": "negative-infinity",
+  inf: "positive-infinity",
+  "-inf": "negative-infinity",
+};
+
+/**
+ * Detect if a cell value is a sentinel (null, empty string, whitespace,
+ * NaN, infinity, NaT). Column-type-dependent sentinels (string "NaN",
+ * "NaT", etc.) are matched based on `dataType`.
+ */
+export function detectSentinel(
+  value: unknown,
+  dataType: DataType | undefined,
+): CellValueSentinel | null {
+  if (value == null) {
+    return { type: "null", value };
+  }
+
+  if (typeof value === "string") {
+    if (value === "") {
+      return { type: "empty-string", value };
+    }
+    if (WHITESPACE_ONLY_RE.test(value)) {
+      return { type: "whitespace", value };
+    }
+    // String "NaN"/"Infinity" in a numeric column = actual special float value
+    if (isNumericType(dataType)) {
+      const type = NUMERIC_STRING_SPECIALS[value];
+      if (type) {
+        return { type, value };
+      }
+    }
+    // String "NaT" in a temporal column = pandas Not-a-Time sentinel
+    if (isTemporalType(dataType) && value === "NaT") {
+      return { type: "nat", value };
+    }
+    return null;
+  }
+
+  if (typeof value === "number") {
+    if (Number.isNaN(value)) {
+      return { type: "nan", value };
+    }
+    if (value === Number.POSITIVE_INFINITY) {
+      return { type: "positive-infinity", value };
+    }
+    if (value === Number.NEGATIVE_INFINITY) {
+      return { type: "negative-infinity", value };
+    }
+    return null;
   }
 
   return null;

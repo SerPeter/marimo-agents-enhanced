@@ -5,14 +5,13 @@ import ast
 import html
 import re
 import sys
-import threading
 import time
 from collections.abc import Collection, Mapping
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-import jedi  # type: ignore # noqa: F401
-import jedi.api  # type: ignore # noqa: F401
+import jedi  # type: ignore
+import jedi.api  # type: ignore
 
 from marimo import _loggers as loggers
 from marimo._dependencies.dependencies import DependencyManager
@@ -23,7 +22,6 @@ from marimo._messaging.types import Stream
 from marimo._output.md import _md
 from marimo._runtime import dataflow
 from marimo._runtime.commands import CodeCompletionCommand
-from marimo._session.queue import QueueType
 from marimo._types.ids import RequestId
 from marimo._utils.docs import MarimoConverter
 from marimo._utils.format_signature import format_signature
@@ -55,9 +53,8 @@ def _should_include_name(name: str, prefix: str) -> bool:
             return False
         elif not prefix.startswith("_"):
             return False
-        else:
-            # Only include dunder names when prefix starts with an underscore
-            return True
+        # Only include dunder names when prefix starts with an underscore
+        return True
     else:
         return True
 
@@ -260,34 +257,72 @@ def _get_type_hint(completion: jedi.api.classes.BaseName) -> str:
         return ""
 
 
+# Jedi types that carry a signature/docstring worth surfacing in live docs.
+_DOCUMENTABLE_TYPES = ("function", "class", "module")
+
+
+def _resolve_aliased_definition(
+    completion: jedi.api.classes.BaseName,
+) -> jedi.api.classes.BaseName | None:
+    """Follow an assignment statement to its underlying definition.
+
+    Aliases such as `func = another_func` are reported by Jedi as a `statement`
+    with no docstring of their own, so we infer the assignment to surface the
+    docstring and signature of the function/class/module it points at.
+
+    Only an unambiguous, single definition is resolved; multiple candidates
+    (e.g. a conditional assignment) would mean guessing which docs to show, so
+    we defer to the type hint instead.
+    """
+    try:
+        inferred = completion.infer()
+    except Exception:
+        return None
+    documentable = [d for d in inferred if d.type in _DOCUMENTABLE_TYPES]
+    if len(documentable) == 1:
+        return documentable[0]
+    return None
+
+
 def _get_completion_info(completion: jedi.api.classes.BaseName) -> str:
-    if completion.type != "statement":
-        try:
-            return _get_docstring(completion)
-        except Exception as e:
-            LOGGER.debug("jedi failed to get docstring: %s", str(e))
-            return ""
-    else:
-        try:
+    try:
+        if completion.type == "statement":
+            definition = _resolve_aliased_definition(completion)
+            # Fall back to the type hint when the alias has no resolvable
+            # definition, or when its docstring comes back empty.
+            if definition is not None:
+                docstring = _get_docstring(definition)
+                if docstring:
+                    return docstring
             return _get_type_hint(completion)
-        except Exception as e:
-            LOGGER.debug("jedi failed to get type hint: %s", str(e))
-            return ""
+        return _get_docstring(completion)
+    except Exception as e:
+        LOGGER.debug("jedi failed to get completion info: %s", str(e))
+        return ""
 
 
 def _get_completion_option(
     completion: jedi.api.classes.Completion,
     script: jedi.Script,
     compute_completion_info: bool,
+    compute_type: bool = True,
 ) -> CompletionOption:
     name = completion.name
+    # `completion.type` triggers jedi inference and can be surprisingly
+    # expensive on cold caches for heavy libraries (pandas, numpy, torch).
+    # When callers are already over budget they pass `compute_type=False`, in
+    # which case we also skip docstring computation — it re-triggers the same
+    # inference we just declined to pay for.
+    if not compute_type:
+        return CompletionOption(name=name, type="", completion_info="")
+
     kind = completion.type
 
     if compute_completion_info:
         # Choose whether the completion info should be from the name
         # or the enclosing function's signature, if any
         symbol_to_lookup = completion
-        if completion.type == "param":
+        if kind == "param":
             # Show the function/class docstring if available
             signatures = script.get_signatures()
             if len(signatures) == 1:
@@ -308,26 +343,25 @@ def _get_completion_options(
     limit: int,
     timeout: float,
 ) -> list[CompletionOption]:
-    if len(completions) > limit:
-        return [
-            _get_completion_option(
-                completion, script, compute_completion_info=False
-            )
-            for completion in completions
-            if _should_include_name(completion.name, prefix)
-        ]
+    # For large completion sets (e.g. `pd.`, ~140 attrs), building per-item
+    # docstrings costs seconds of jedi inference that the user will never read.
+    # Skip docstrings globally past `limit` and rely on the time budget to bail
+    # out of further type inference if we're already slow.
+    compute_docstrings = len(completions) <= limit
 
     completion_options: list[CompletionOption] = []
-    start_time = time.time()
+    deadline = time.monotonic() + timeout
     for completion in completions:
         if not _should_include_name(completion.name, prefix):
             continue
-        elapsed_time = time.time() - start_time
+        under_time_budget = time.monotonic() < deadline
         completion_options.append(
             _get_completion_option(
                 completion,
                 script,
-                compute_completion_info=elapsed_time < timeout,
+                compute_completion_info=compute_docstrings
+                and under_time_budget,
+                compute_type=under_time_budget,
             )
         )
     return completion_options
@@ -351,17 +385,6 @@ def _write_completion_result(
 
 def _write_no_completions(stream: Stream, completion_id: RequestId) -> None:
     _write_completion_result(stream, completion_id, 0, [])
-
-
-def _drain_queue(
-    completion_queue: QueueType[CodeCompletionCommand],
-) -> CodeCompletionCommand:
-    """Drain the queue of completion requests, returning the most recent one"""
-
-    request = completion_queue.get()
-    while not completion_queue.empty():
-        request = completion_queue.get()
-    return request
 
 
 def _get_completions_with_script(
@@ -417,10 +440,6 @@ def _isinstance_external(obj: Any, *, class_ref: str) -> bool:
     return isinstance(obj, target_class)
 
 
-class HasKeysMethod(Protocol):
-    def keys(self) -> Collection[Any]: ...
-
-
 class HasColumnsProperty(Protocol):
     @property
     def columns(self) -> Collection[Any]: ...
@@ -431,8 +450,9 @@ def _key_options_from_ipython_method(obj: Any) -> list[str]:
     return [str(key) for key in obj._ipython_key_completions_()]
 
 
-def _key_options_via_keys_method(obj: HasKeysMethod) -> list[str]:
-    return [str(key) for key in obj.keys()]
+def _key_options_via_keys_method(obj: Mapping[Any, Any]) -> list[str]:
+    """Completion keys from a mapping. Only used after `isinstance(obj, Mapping)`."""
+    return [str(key) for key in obj]
 
 
 # TODO refactor to customize the `CompletionOption.info` with `"columns"`
@@ -450,9 +470,9 @@ def _key_options_dispatcher(obj: Any) -> list[str]:
         return _key_options_from_ipython_method(obj)
     elif isinstance(obj, Mapping):
         return _key_options_via_keys_method(obj)
-    elif _isinstance_external(obj, class_ref="pandas.DataFrame"):
-        return _key_options_via_columns_method(obj)
-    elif _isinstance_external(obj, class_ref="polars.DataFrame"):
+    elif _isinstance_external(
+        obj, class_ref="pandas.DataFrame"
+    ) or _isinstance_external(obj, class_ref="polars.DataFrame"):
         return _key_options_via_columns_method(obj)
 
     LOGGER.debug(
@@ -497,7 +517,7 @@ def _resolve_chained_key_path(obj_name: str, document: str) -> list[list[str]]:
 
         # if nodes directly after `obj_name` node are not key accessor `[""]`, exit
         # we expect to never hit this condition
-        if not node.type == "trailer":
+        if node.type != "trailer":
             break
 
         key_path.append(ast.literal_eval(node.get_code()))
@@ -631,7 +651,7 @@ def complete(
             graph.cells[cid].code
             for cid in dataflow.topological_sort(
                 graph,
-                set(graph.cells.keys()) - set([request.cell_id]),
+                set(graph.cells.keys()) - {request.cell_id},
             )
         ]
 
@@ -735,32 +755,3 @@ def complete(
             pass
         else:
             LOGGER.debug("Completion worker released globals lock.")
-
-
-def completion_worker(
-    completion_queue: QueueType[CodeCompletionCommand],
-    graph: dataflow.DirectedGraph,
-    glbls: dict[str, Any],
-    glbls_lock: threading.RLock,
-    stream: Stream,
-) -> None:
-    """Code completion worker.
-
-
-    Args:
-        completion_queue: queue from which requests are pulled.
-        graph: dataflow graph backing the marimo program
-        glbls: dictionary of global variables in interpreter memory
-        glbls_lock: lock protecting globals
-        stream: stream used to communicate completion results
-    """
-
-    while True:
-        request = _drain_queue(completion_queue)
-        complete(
-            request=request,
-            graph=graph,
-            glbls=glbls,
-            glbls_lock=glbls_lock,
-            stream=stream,
-        )

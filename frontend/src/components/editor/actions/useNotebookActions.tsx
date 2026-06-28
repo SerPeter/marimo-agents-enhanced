@@ -14,14 +14,13 @@ import {
   DownloadIcon,
   EditIcon,
   ExternalLinkIcon,
+  EyeIcon,
   EyeOffIcon,
   FastForwardIcon,
   FileIcon,
-  FilePlus2Icon,
   Files,
   FileTextIcon,
   FolderDownIcon,
-  GithubIcon,
   GlobeIcon,
   HardDrive,
   Home,
@@ -39,11 +38,16 @@ import {
   SparklesIcon,
   Undo2Icon,
   XCircleIcon,
-  YoutubeIcon,
   ZapIcon,
 } from "lucide-react";
-import { settingDialogAtom } from "@/components/app-config/state";
+import {
+  settingDialogAtom,
+  useOpenSettingsToTab,
+} from "@/components/app-config/state";
 import { MarkdownIcon } from "@/components/editor/cell/code/icons";
+import { GitHubIcon } from "@/components/icons/github";
+import { MarimoPlusIcon } from "@/components/icons/marimo-icons";
+import { YouTubeIcon } from "@/components/icons/youtube";
 import { useImperativeModal } from "@/components/modal/ImperativeModal";
 import { renderShortcut } from "@/components/shortcuts/renderShortcut";
 import { PairWithAgentModal } from "@/components/editor/actions/pair-with-agent-modal";
@@ -53,10 +57,12 @@ import {
   canUndoDeletesAtom,
   getNotebook,
   hasDisabledCellsAtom,
+  undoLabelAtom,
   useCellActions,
 } from "@/core/cells/cells";
 import { disabledCellIds } from "@/core/cells/utils";
-import { useResolvedMarimoConfig } from "@/core/config/config";
+import { capabilitiesAtom } from "@/core/config/capabilities";
+import { aiEnabledAtom, useResolvedMarimoConfig } from "@/core/config/config";
 import { Constants } from "@/core/constants";
 import {
   updateCellOutputsWithScreenshots,
@@ -85,7 +91,7 @@ import { Strings } from "@/utils/strings";
 import { newNotebookURL } from "@/utils/urls";
 import { useRunAllCells } from "../cell/useRunCells";
 import { useChromeActions, useChromeState } from "../chrome/state";
-import { PANELS } from "../chrome/types";
+import { isPanelHidden, PANELS } from "../chrome/types";
 import { AddConnectionDialogContent } from "../connections/add-connection-dialog";
 import { keyboardShortcutsAtom } from "../controls/keyboard-shortcuts";
 import { commandPaletteAtom } from "../controls/state";
@@ -94,8 +100,8 @@ import { LAYOUT_TYPES } from "../renderers/types";
 import { runServerSidePDFDownload } from "./pdf-export";
 import type { ActionButton } from "./types";
 import { useCopyNotebook } from "./useCopyNotebook";
-import { useHideAllMarkdownCode } from "./useHideAllMarkdownCode";
 import { useRestartKernel } from "./useRestartKernel";
+import { useSetCodeVisibility } from "./useSetCodeVisibility";
 
 const NOOP_HANDLER = (event?: Event) => {
   event?.preventDefault();
@@ -109,8 +115,10 @@ export function useNotebookActions() {
   const { selectedPanel } = useChromeState();
   const [viewState] = useAtom(viewStateAtom);
   const kioskMode = useAtomValue(kioskModeAtom);
-  const hideAllMarkdownCode = useHideAllMarkdownCode();
+  const setCodeVisibility = useSetCodeVisibility();
   const [resolvedConfig] = useResolvedMarimoConfig();
+  const capabilities = useAtomValue(capabilitiesAtom);
+  const aiEnabled = useAtomValue(aiEnabledAtom);
 
   const {
     updateCellConfig,
@@ -125,6 +133,7 @@ export function useNotebookActions() {
   const copyNotebook = useCopyNotebook(filename);
   const setCommandPaletteOpen = useSetAtom(commandPaletteAtom);
   const setSettingsDialogOpen = useSetAtom(settingDialogAtom);
+  const { handleClick: openSettings } = useOpenSettingsToTab();
   const setKeyboardShortcutsOpen = useSetAtom(keyboardShortcutsAtom);
   const {
     exportAsIPYNB,
@@ -137,12 +146,14 @@ export function useNotebookActions() {
 
   const hasDisabledCells = useAtomValue(hasDisabledCellsAtom);
   const canUndoDeletes = useAtomValue(canUndoDeletesAtom);
+  const undoLabel = useAtomValue(undoLabelAtom);
   const { selectedLayout } = useLayoutState();
   const { setLayoutView } = useLayoutActions();
   const togglePresenting = useTogglePresenting();
-  // Fallback: if sharing is undefined, both are enabled by default
+  // Fallback: if sharing is undefined, all options are enabled by default
   const sharingHtmlEnabled = resolvedConfig.sharing?.html ?? true;
   const sharingWasmEnabled = resolvedConfig.sharing?.wasm ?? true;
+  const sharingMolabEnabled = resolvedConfig.sharing?.molab ?? true;
 
   // Server-side PDF export is always available outside WASM.
   // Browser print fallback is used in WASM.
@@ -348,6 +359,7 @@ export function useNotebookActions() {
     {
       icon: <SparklesIcon size={14} strokeWidth={1.5} />,
       label: "Pair with an agent",
+      hidden: isWasm(),
       handle: async () => {
         openModal(<PairWithAgentModal onClose={closeModal} />);
       },
@@ -357,7 +369,8 @@ export function useNotebookActions() {
       icon: <Share2Icon size={14} strokeWidth={1.5} />,
       label: "Share",
       handle: NOOP_HANDLER,
-      hidden: !sharingHtmlEnabled && !sharingWasmEnabled,
+      hidden:
+        !sharingHtmlEnabled && !sharingWasmEnabled && !sharingMolabEnabled,
       dropdown: [
         {
           icon: <GlobeIcon size={14} strokeWidth={1.5} />,
@@ -381,6 +394,19 @@ export function useNotebookActions() {
             });
           },
         },
+        {
+          icon: <MarimoPlusIcon size={14} strokeWidth={1.5} />,
+          label: "Create molab notebook",
+          hidden: !sharingMolabEnabled,
+          handle: async () => {
+            const code = await readCode();
+            const url = createShareableLink({
+              code: code.contents,
+              baseUrl: `${Constants.molab}/new`,
+            });
+            window.open(url, "_blank");
+          },
+        },
       ],
     },
 
@@ -389,20 +415,31 @@ export function useNotebookActions() {
       label: "Helper panel",
       redundant: true,
       handle: NOOP_HANDLER,
-      dropdown: PANELS.flatMap(
-        ({ type: id, Icon, hidden, additionalKeywords }) => {
-          if (hidden) {
-            return [];
-          }
-          return {
-            label: Strings.startCase(id),
-            rightElement: renderCheckboxElement(selectedPanel === id),
-            icon: <Icon size={14} strokeWidth={1.5} />,
-            handle: () => toggleApplication(id),
-            additionalKeywords,
-          };
-        },
-      ),
+      dropdown: PANELS.flatMap((panel) => {
+        // Still show the AI panel in the command palette so users can try AI
+        // features. When AI is disabled, open settings instead of the panel.
+        const openAiSettingsWhenDisabled = panel.type === "ai" && !aiEnabled;
+        if (
+          isPanelHidden({ panel, capabilities, aiEnabled }) &&
+          !openAiSettingsWhenDisabled
+        ) {
+          return [];
+        }
+        const { type: id, Icon, additionalKeywords } = panel;
+        return {
+          label: Strings.startCase(id),
+          rightElement: renderCheckboxElement(selectedPanel === id),
+          icon: <Icon size={14} strokeWidth={1.5} />,
+          handle: () => {
+            if (openAiSettingsWhenDisabled) {
+              openSettings("ai", "ai-features");
+              return;
+            }
+            toggleApplication(id);
+          },
+          additionalKeywords,
+        };
+      }),
     },
 
     {
@@ -512,7 +549,7 @@ export function useNotebookActions() {
     },
     {
       icon: <Undo2Icon size={14} strokeWidth={1.5} />,
-      label: "Undo cell deletion",
+      label: undoLabel,
       hidden: !canUndoDeletes || kioskMode,
       handle: () => {
         undoDeleteCell();
@@ -543,10 +580,32 @@ export function useNotebookActions() {
       },
     },
     {
+      icon: <EyeIcon size={14} strokeWidth={1.5} />,
+      label: "Show all code",
+      hotkey: "global.showAllCode",
+      handle: () => setCodeVisibility(false, "code"),
+      redundant: true,
+    },
+    {
+      icon: <EyeOffIcon size={14} strokeWidth={1.5} />,
+      label: "Hide all code",
+      hotkey: "global.hideAllCode",
+      handle: () => setCodeVisibility(true, "code"),
+      redundant: true,
+    },
+    {
+      icon: <EyeIcon size={14} strokeWidth={1.5} />,
+      label: "Show all markdown code",
+      hotkey: "global.showAllMarkdownCode",
+      handle: () => setCodeVisibility(false, "markdown"),
+      redundant: true,
+    },
+    {
       icon: <EyeOffIcon size={14} strokeWidth={1.5} />,
       label: "Hide all markdown code",
-      handle: hideAllMarkdownCode,
-      redundant: true, // hidden by default
+      hotkey: "global.hideAllMarkdownCode",
+      handle: () => setCodeVisibility(true, "markdown"),
+      redundant: true,
     },
     {
       icon: <ChevronRightCircleIcon size={14} strokeWidth={1.5} />,
@@ -596,7 +655,7 @@ export function useNotebookActions() {
           },
         },
         {
-          icon: <GithubIcon size={14} strokeWidth={1.5} />,
+          icon: <GitHubIcon className="h-3.5 w-3.5" />,
           label: "GitHub",
           handle: () => {
             window.open(Constants.githubPage, "_blank");
@@ -610,7 +669,7 @@ export function useNotebookActions() {
           },
         },
         {
-          icon: <YoutubeIcon size={14} strokeWidth={1.5} />,
+          icon: <YouTubeIcon className="h-3.5 w-3.5" />,
           label: "YouTube",
           handle: () => {
             window.open(Constants.youtube, "_blank");
@@ -640,7 +699,7 @@ export function useNotebookActions() {
     },
 
     {
-      icon: <FilePlus2Icon size={14} strokeWidth={1.5} />,
+      icon: <MarimoPlusIcon size={14} strokeWidth={1.5} />,
       label: "New notebook",
       // If file is in the url, then we ran `marimo edit`
       // without a specific file

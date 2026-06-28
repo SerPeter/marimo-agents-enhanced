@@ -260,6 +260,71 @@ class TestSetCode:
 
 
 # ------------------------------------------------------------------
+# Per-cell version
+# ------------------------------------------------------------------
+
+
+class TestCellVersion:
+    def test_new_cell_starts_at_zero(self) -> None:
+        doc = _doc()
+        doc.apply(
+            _tx(
+                CreateCell(
+                    cell_id=CellId_t("a"),
+                    code="x",
+                    name="__",
+                    config=CellConfig(),
+                )
+            )
+        )
+        assert doc.get_cell_version(CellId_t("a")) == 0
+
+    def test_set_code_bumps_version(self) -> None:
+        doc = _doc("a")
+        assert doc.get_cell_version(CellId_t("a")) == 0
+        doc.apply(_tx(SetCode(cell_id=CellId_t("a"), code="x")))
+        assert doc.get_cell_version(CellId_t("a")) == 1
+        doc.apply(_tx(SetCode(cell_id=CellId_t("a"), code="y")))
+        assert doc.get_cell_version(CellId_t("a")) == 2
+
+    def test_no_op_set_code_does_not_bump(self) -> None:
+        doc = _doc("a")
+        doc.apply(_tx(SetCode(cell_id=CellId_t("a"), code="x")))
+        assert doc.get_cell_version(CellId_t("a")) == 1
+        # Re-applying the same code is a no-op (e.g. format-on-save).
+        doc.apply(_tx(SetCode(cell_id=CellId_t("a"), code="x")))
+        assert doc.get_cell_version(CellId_t("a")) == 1
+
+    def test_other_changes_do_not_bump_version(self) -> None:
+        doc = _doc("a")
+        doc.apply(_tx(SetName(cell_id=CellId_t("a"), name="my_cell")))
+        assert doc.get_cell_version(CellId_t("a")) == 0
+        doc.apply(
+            _tx(
+                SetConfig(
+                    cell_id=CellId_t("a"),
+                    column=None,
+                    disabled=True,
+                    hide_code=False,
+                )
+            )
+        )
+        assert doc.get_cell_version(CellId_t("a")) == 0
+
+    def test_get_cell_version_missing(self) -> None:
+        doc = _doc("a")
+        assert doc.get_cell_version(CellId_t("missing")) is None
+
+    def test_rekey_preserves_version(self) -> None:
+        doc = _doc("a")
+        doc.apply(_tx(SetCode(cell_id=CellId_t("a"), code="x")))
+        doc.apply(_tx(SetCode(cell_id=CellId_t("a"), code="y")))
+        assert doc.get_cell_version(CellId_t("a")) == 2
+        doc._rekey({CellId_t("a"): CellId_t("x")})
+        assert doc.get_cell_version(CellId_t("x")) == 2
+
+
+# ------------------------------------------------------------------
 # SetName
 # ------------------------------------------------------------------
 
@@ -277,54 +342,85 @@ class TestSetName:
 
 
 class TestSetConfig:
-    def test_partial_hide_code(self) -> None:
-        doc = _doc("a")
-        doc.apply(_tx(SetConfig(cell_id=CellId_t("a"), hide_code=True)))
-        cfg = doc.get_cell(CellId_t("a")).config
-        assert cfg.hide_code is True
-        assert cfg.disabled is False  # unchanged default
-
-    def test_partial_disabled(self) -> None:
-        doc = _doc("a")
-        doc.apply(_tx(SetConfig(cell_id=CellId_t("a"), disabled=True)))
-        cfg = doc.get_cell(CellId_t("a")).config
-        assert cfg.disabled is True
-        assert cfg.hide_code is False  # unchanged default
-
-    def test_multiple_fields(self) -> None:
+    def test_sets_hide_code(self) -> None:
         doc = _doc("a")
         doc.apply(
             _tx(
-                SetConfig(cell_id=CellId_t("a"), hide_code=True, disabled=True)
+                SetConfig(
+                    cell_id=CellId_t("a"),
+                    column=None,
+                    disabled=False,
+                    hide_code=True,
+                )
             )
         )
         cfg = doc.get_cell(CellId_t("a")).config
-        assert cfg.hide_code is True
-        assert cfg.disabled is True
+        assert cfg == CellConfig(column=None, disabled=False, hide_code=True)
 
-    def test_all_none_is_noop(self) -> None:
+    def test_sets_disabled(self) -> None:
         doc = _doc("a")
-        doc.apply(_tx(SetConfig(cell_id=CellId_t("a"))))
+        doc.apply(
+            _tx(
+                SetConfig(
+                    cell_id=CellId_t("a"),
+                    column=None,
+                    disabled=True,
+                    hide_code=False,
+                )
+            )
+        )
         cfg = doc.get_cell(CellId_t("a")).config
-        assert cfg == CellConfig()
+        assert cfg == CellConfig(column=None, disabled=True, hide_code=False)
 
-    def test_preserves_existing(self) -> None:
-        """Setting one field preserves other non-default fields."""
+    def test_replaces_existing(self) -> None:
+        # SetConfig is a full replacement: prior fields are overwritten,
+        # not merged. This is what makes ``column=None`` a meaningful reset
+        # rather than a sentinel for "leave unchanged".
         doc = NotebookDocument(
             [
                 NotebookCell(
                     id=CellId_t("a"),
                     code="",
                     name="__",
-                    config=CellConfig(hide_code=True, column=2),
+                    config=CellConfig(column=2, disabled=True, hide_code=True),
                 )
             ]
         )
-        doc.apply(_tx(SetConfig(cell_id=CellId_t("a"), disabled=True)))
+        doc.apply(
+            _tx(
+                SetConfig(
+                    cell_id=CellId_t("a"),
+                    column=0,
+                    disabled=False,
+                    hide_code=False,
+                )
+            )
+        )
         cfg = doc.get_cell(CellId_t("a")).config
-        assert cfg.disabled is True
-        assert cfg.hide_code is True  # preserved
-        assert cfg.column == 2  # preserved
+        assert cfg == CellConfig(column=0, disabled=False, hide_code=False)
+
+    def test_column_reset_to_none(self) -> None:
+        doc = NotebookDocument(
+            [
+                NotebookCell(
+                    id=CellId_t("a"),
+                    code="",
+                    name="__",
+                    config=CellConfig(column=1),
+                )
+            ]
+        )
+        doc.apply(
+            _tx(
+                SetConfig(
+                    cell_id=CellId_t("a"),
+                    column=None,
+                    disabled=False,
+                    hide_code=False,
+                )
+            )
+        )
+        assert doc.get_cell(CellId_t("a")).config.column is None
 
 
 # ------------------------------------------------------------------
@@ -418,6 +514,47 @@ class TestVersion:
         applied = doc.apply(_tx())
         assert doc.version == 1
         assert applied.version == 1
+
+    def test_rekey_bumps_version(self) -> None:
+        doc = _doc("a", "b")
+        starting = doc.version
+        doc._rekey({CellId_t("a"): CellId_t("x")})
+        assert doc.version == starting + 1
+        assert _ids(doc) == ["x", "b"]
+
+
+class TestRekey:
+    def test_renames_mapped_cells(self) -> None:
+        doc = _doc("a", "b", "c")
+        doc._rekey(
+            {CellId_t("a"): CellId_t("x"), CellId_t("c"): CellId_t("z")}
+        )
+        assert _ids(doc) == ["x", "b", "z"]
+
+    def test_preserves_unmapped_cells(self) -> None:
+        doc = _doc("a", "b")
+        doc._rekey({CellId_t("a"): CellId_t("x")})
+        assert _ids(doc) == ["x", "b"]
+
+    def test_rejects_duplicate_target_ids(self) -> None:
+        doc = _doc("a", "b")
+        with pytest.raises(ValueError, match="duplicate"):
+            doc._rekey(
+                {CellId_t("a"): CellId_t("x"), CellId_t("b"): CellId_t("x")}
+            )
+
+    def test_rejects_target_colliding_with_unmapped(self) -> None:
+        doc = _doc("a", "b")
+        with pytest.raises(ValueError, match="duplicate"):
+            doc._rekey({CellId_t("a"): CellId_t("b")})
+
+    def test_failed_validation_does_not_mutate(self) -> None:
+        doc = _doc("a", "b")
+        starting = doc.version
+        with pytest.raises(ValueError):
+            doc._rekey({CellId_t("a"): CellId_t("b")})
+        assert _ids(doc) == ["a", "b"]
+        assert doc.version == starting
 
 
 # ------------------------------------------------------------------

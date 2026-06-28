@@ -1,24 +1,24 @@
 [build-system]
-requires = ["uv_build>=0.8.3,<0.11.0"]
+requires = ["uv_build>=0.8.3,<0.12.0"]
 build-backend = "uv_build"
 
 [project]
 name = "marimo"
-version = "0.22.4"
+version = "0.23.11"
 description = "A library for making reactive notebooks and apps"
 # We try to keep dependencies to a minimum, to avoid conflicts with
 # user environments; we need a very compelling reason for each dependency added.
 # Dependencies should have lower bounds, which should be as loose as possible.
 dependencies = [
     # For maintainable cli
-    "click>=8.0,<9",
-    # code completion
-    "jedi>=0.18.0",
+    "click>=8.0,<9; sys_platform != 'emscripten'",
+    # code completion (upper bound applied temporarily for resolution)
+    "jedi>=0.18.0,<0.20.0",
     # compile markdown to html
     "markdown>=3.6,<4",
     # add features to markdown
     # Pinned to specific version for introduction of codeblock handling.
-    "pymdown-extensions>=10.15,<11",
+    "pymdown-extensions>=10.21.2,<11",
     # syntax highlighting of code in markdown
     "pygments>=2.19,<3",
     # for reading, writing configs
@@ -27,22 +27,24 @@ dependencies = [
     "pyyaml>=6.0.1",
     # web server
     # - 0.22.0 introduced timeout-graceful-shutdown, which we use
-    "uvicorn>=0.22.0",
+    "uvicorn>=0.22.0; sys_platform != 'emscripten'",
     # web framework
     # - 0.29.0 introduced Middleware kwargs, which we use
     # - starlette 0.36.0 introduced a bug
     # - starlette 0.37.2 fixed httpx 0.28 compatibility
-    "starlette>=0.37.2",
+    "starlette>=0.37.2; sys_platform != 'emscripten'",
+    # multipart form parsing for file uploads (Starlette's request.form() requires it)
+    "python-multipart>=0.0.18",
     # websockets for use with starlette, and for lsp
-    "websockets >= 14.2.0",
-    # loro for collaborative editing
-    "loro>=1.10.0",
+    "websockets >= 14.2.0; sys_platform != 'emscripten'",
+    # loro for collaborative editing (native extension; server-only)
+    "loro>=1.10.0; sys_platform != 'emscripten' and sys_platform != 'android'",
     # python <=3.10 compatibility
     "typing_extensions>=4.4.0; python_version < '3.11'",
     # for rst parsing; lowerbound determined by awscli requiring < 0.17,
     "docutils>=0.16.0",
     # to show RAM, CPU usage, other system utilities
-    "psutil>=5.0",
+    "psutil>=5.0; sys_platform != 'emscripten' and sys_platform != 'android'",
     # required dependency in Starlette for SessionMiddleware support
     "itsdangerous>=2.0.0",
     # for dataframe support
@@ -51,14 +53,14 @@ dependencies = [
     "packaging",
     "msgspec>=0.20.0",
     # for IPC, required for marimo edit --sandbox, marimo run <multiple notebooks>
-    "pyzmq>=27.1.0; python_version < '3.15'",
+    "pyzmq>=27.1.0; python_version < '3.15' and sys_platform != 'emscripten'",
 ]
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 classifiers = [
     "Operating System :: OS Independent",
-    "License :: OSI Approved :: Apache Software License",
     "Environment :: Console",
     "Environment :: Web Environment",
     "Intended Audience :: Developers",
@@ -99,11 +101,11 @@ sandbox = [
 # in order to unlock all features in marimo
 recommended = [
     "marimo[sql]",
-    "marimo[sandbox]",                  # For `marimo edit --sandbox DIRECTORY`
-    "altair>=5.4.0",                    # Plotting in datasource viewer
-    "pydantic-ai-slim[openai]>=1.52.0", # AI features
-    "ruff",                             # Formatting
-    "nbformat>=5.7.0",                  # Export as IPYNB
+    "marimo[sandbox]",                           # For `marimo edit --sandbox DIRECTORY`
+    "altair>=5.4.0",                             # Plotting in datasource viewer
+    "pydantic-ai-slim[openai]>=1.107.0,<2.0.0",  # AI features
+    "ruff",                                      # Formatting
+    "nbformat>=5.7.0",                           # Export as IPYNB
 ]
 
 lsp = [
@@ -116,6 +118,13 @@ mcp = [
     "pydantic>2",
 ]
 
+otel = [
+    "opentelemetry-api~=1.28.0",
+    "opentelemetry-sdk~=1.28.0",
+    "opentelemetry-exporter-otlp-proto-http~=1.28.0",
+    "opentelemetry-exporter-otlp-proto-grpc~=1.28.0",
+]
+
 [dependency-groups]
 dev = [
     # Typo checking
@@ -123,15 +132,17 @@ dev = [
     # For tracing debugging
     "opentelemetry-api~=1.28.0",
     "opentelemetry-sdk~=1.28.0",
+    "opentelemetry-exporter-otlp-proto-http~=1.28.0",
+    "opentelemetry-exporter-otlp-proto-grpc~=1.28.0",
     # For SQL
     "duckdb>=1.0.0",
     "sqlglot[c]>=26.8.0",
     # Stubs for optional dataframe backends
     "pyarrow-stubs",
     # For linting
-    "ruff>=0.14.0,<0.15.2", # TODO: remove upper bound once we fix the ruff issues
+    "ruff>=0.15.16",
     # For AI
-    "pydantic-ai-slim[openai]>=1.71.0",
+    "pydantic-ai-slim[openai]>=1.107.0,<2.0.0",
 ]
 
 test = [
@@ -194,7 +205,7 @@ test-optional = [
     "anywidget~=0.9.21",
     "ipython~=8.12.3",
     # testing gen ai
-    "pydantic-ai-slim[google,anthropic,bedrock,openai]>=1.71.0",
+    "pydantic-ai-slim[google,anthropic,bedrock,openai]>=1.107.0,<2.0.0",
     # - google-auth uses cachetools, and cachetools<5.0.0 uses collections.MutableMapping (removed in Python 3.10)
     "cachetools>=5.0.0",
     "boto3>=1.38.46",
@@ -231,7 +242,7 @@ typecheck = [
     "sqlalchemy>=2.0.40",
     "obstore>=0.8.2",
     "fsspec>=2026.2.0",
-    "pydantic-ai-slim[google,anthropic,bedrock,openai]>=1.71.0",
+    "pydantic-ai-slim[google,anthropic,bedrock,openai]>=1.107.0,<2.0.0",
     "loro>=1.5.0",
     "boto3-stubs>=1.38.46",
     "pandas-stubs>=1.5.3.230321",
@@ -252,7 +263,7 @@ typecheck = [
 
 docs = [
     "marimo_docs",
-    "ruff>=0.14.0,<0.15.2", # TODO: remove upper bound once we fix the ruff issues
+    "ruff>=0.15.16",
     "mkdocs>=1.6.1",
     # Live reloading broken in >= 9.6.21: https://github.com/squidfunk/mkdocs-material/issues/8478
     "mkdocs-material==9.6.20",
@@ -269,12 +280,17 @@ docs = [
     "pillow>=10.2.0,!=11.3.0",  # for social cards, 11.3.0 doesn't have manylinux wheels
     "cairosvg>=2.7.1",  # for social cards
     "mdx-include>=1.4.2",
-    "pymdown-extensions>=10.7",
+    "pymdown-extensions>=10.21.2",
     "lzstring>=1.0.4",
     "beautifulsoup4>=4.12.0",
     "markdownify>=0.13.0",
 ]
 
+
+[tool.uv]
+# Mirror CI's dependency window (UV_EXCLUDE_NEWER in .github/workflows) so local
+# resolution reproduces what CI resolves at setup time, including the ruff version.
+exclude-newer = "7 days"
 
 [tool.uv.sources]
 marimo_docs = { path = "./docs", editable = true }
@@ -287,7 +303,7 @@ wheel-exclude = ["marimo/_smoke_tests/**"]
 
 [tool.ruff]
 line-length = 79
-target-version = "py39"
+target-version = "py310"
 include = ["marimo/**/*.py", "tests/**/*.py", "dagger/**/*.py"]
 exclude = [
     "build",
@@ -326,9 +342,53 @@ ignore = [
     "E501",  # Line too long, we still trim
     "D415", # First line should end with a period, question mark, or exclamation point
     "FA102", # Use `from __future__ import annotations`
-    "UP007", # Use X | Y for type annotations, wasn't supported in 3.9
-    "UP045", # Use X | None for optional type annotations, wasn't supported in 3.9
+    "PLR1711", # Useless returns. We use this currently to delimit the end of a cell.
+    "ASYNC119", # Yield in context manager in async generator; required for streaming generators (LLM/SSE), no clean refactor
+
+    # From new version of Ruff: We should fix these, but it raises too many errors
+    "BLE001", # Do not catch blind exception: `Exception`
+    "RUF059", # Unused unpacked variable
+    "DTZ001", # `datetime.datetime()` called without a `tzinfo` argument
+    "PLW1510", # `subprocess.run` without explicit `check`
+    "S110", # `try`-`except`-`pass`
+    "TRY004", # Type check without `TypeError`
+    "SIM102", # Use a single `if` statement instead of nested `if` statements
+    "SIM117", # Use a single `with` statement with multiple contexts instead of nested `with` statements
+    "RUF012", # Mutable class default
+    "S102", # Use of `exec`
+    "PYI036", # Bad `sys.exit` annotation
+    "DTZ005", # `datetime.now()` called without `tzinfo`
+    "PLC0206", # Dict index without `.items()`
+    "PYI066", # Put branches for newer Python versions first when branching on `sys.version_info` comparisons
+    "SIM115", # Open file without context handler
+    "DTZ006", # `datetime.fromtimestamp()` called without `tzinfo`
+    "DTZ007", # `datetime.strptime()` called without zone
+    "DTZ011", # `date.today()` used
+    "TRY401", # Verbose log message
+    "UP007", # Use `X | Y` for type annotations
+    "DTZ012", # `date.fromtimestamp()` called without `tzinfo`
+    "DTZ901", # `datetime.min` / `datetime.max` used
+    "PLW0602", # Global variable not assigned
+    "S112", # `try`-`except`-`continue`
+    "TRY203", # Useless `try`-`except`
+    "PLC0105", # Type name incorrect variance
+    "PLE1205", # Logging too many args
+    "PLW1508", # Invalid envvar default
+    "PLW1509", # `subprocess` `preexec_fn` argument
+    "PYI063", # PEP 484-style positional-only parameter
+    "DTZ002", # `datetime.today()` called without tz
+    "PLC0205", # Single string `__slots__`
+    "PLE0704", # Misplaced bare `raise`
+    "PLR1704", # Redefined argument from local
+    "PLW0129", # Assert on string literal
+    "PLW0642", # Self or cls assignment
+    "PYI006", # Bad `sys.version_info` comparison
+    "SIM113", # `enumerate` for loop
+    "T100", # Debugger
+    "UP045", # Use `X | None` for optional type annotations
+    "D421", # Property docstring should not start with a verb (preview rule)
 ]
+
 extend-select = [
     # pyflakes
     "F",
@@ -376,6 +436,7 @@ extend-select = [
     "D419",
     "PGH004", # Use specific rule codes when using noqa
     "PGH005", # Invalid unittest.mock.Mock methods/attributes/properties
+    "RUF006", # Store a reference to the return value of asyncio.create_task
     # "S101", # Checks use `assert` outside the test cases, test cases should be added into the exclusions
     "B004",   # Checks for use of hasattr(x, "__call__") and replaces it with callable(x)
     "B006",   # Checks for uses of mutable objects as function argument defaults.
@@ -395,15 +456,14 @@ extend-select = [
     "UP",  # Upgrades
 ]
 
-# Never try to fix `F401` (unused imports).
-unfixable = ["F401"]
-
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 "**/{tests}/*" = ["ANN201", "ANN202", "T201", "D", "F841", "PLW1514"]
 "dagger/*" = ["TID252"]
+# Prefer multi-line "\n".join([...]) expected strings in codegen tests.
+"tests/_ast/test_codegen.py" = ["FLY002"]
 
 [tool.ruff.lint.isort]
 required-imports = ["from __future__ import annotations"]

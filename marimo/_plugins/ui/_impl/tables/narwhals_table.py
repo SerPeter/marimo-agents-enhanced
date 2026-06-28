@@ -4,9 +4,11 @@ from __future__ import annotations
 import datetime
 import functools
 import io
+import json
 import math
+from enum import Enum
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import msgspec
 import narwhals.stable.v2 as nw
@@ -54,15 +56,13 @@ NEGATIVE_INF = str(float("-inf"))
 
 
 class NarwhalsTableManager(
-    TableManager[
-        Union[nw.DataFrame[IntoDataFrameT], nw.LazyFrame[IntoLazyFrameT]]
-    ]
+    TableManager[nw.DataFrame[IntoDataFrameT] | nw.LazyFrame[IntoLazyFrameT]]
 ):
     type = "narwhals"
 
     @staticmethod
     def from_dataframe(
-        data: Union[IntoDataFrameT, IntoLazyFrameT],
+        data: IntoDataFrameT | IntoLazyFrameT,
     ) -> NarwhalsTableManager[IntoDataFrameT, IntoLazyFrameT]:
         return NarwhalsTableManager(nw.from_native(data, pass_through=False))
 
@@ -91,7 +91,7 @@ class NarwhalsTableManager(
 
     def to_csv_str(
         self,
-        format_mapping: Optional[FormatMapping] = None,
+        format_mapping: FormatMapping | None = None,
         separator: str | None = None,
     ) -> str:
         _data = self.apply_formatting(format_mapping).as_frame()
@@ -99,7 +99,7 @@ class NarwhalsTableManager(
 
     def to_json_str(
         self,
-        format_mapping: Optional[FormatMapping] = None,
+        format_mapping: FormatMapping | None = None,
         strict_json: bool = False,
         ensure_ascii: bool = True,
     ) -> str:
@@ -115,14 +115,14 @@ class NarwhalsTableManager(
         return stream.getvalue()
 
     def apply_formatting(
-        self, format_mapping: Optional[FormatMapping]
+        self, format_mapping: FormatMapping | None
     ) -> NarwhalsTableManager[IntoDataFrameT, IntoLazyFrameT]:
         if not format_mapping:
             return self
 
         frame = self.as_frame()
         _data = frame.to_dict(as_series=False).copy()
-        for col in _data.keys():
+        for col in _data:
             if col in format_mapping:
                 _data[col] = [
                     format_value(col, x, format_mapping) for x in _data[col]
@@ -136,7 +136,7 @@ class NarwhalsTableManager(
 
     def select_rows(
         self, indices: list[int]
-    ) -> TableManager[Union[IntoDataFrameT, IntoLazyFrameT]]:
+    ) -> TableManager[IntoDataFrameT | IntoLazyFrameT]:
         if not indices:
             return self.with_new_data(self.data.head(0))
 
@@ -237,14 +237,19 @@ class NarwhalsTableManager(
 
         result = _calculate_top_k_rows(frame)
         value_counts: list[tuple[Any, int]] = []
+        col_dtype = self.data.collect_schema()[column]
 
-        # NaNs and Infs serialize to null, which isn't distingushable from normal nulls
-        # so instead we set to string values
+        # NaNs and Infs serialize to null, which isn't distinguishable from
+        # normal nulls, so we replace them with string tokens — but only for
+        # float columns where NaN/Inf are meaningful distinct values.
+        # For non-float columns (e.g. strings), NaN is just pandas' missing
+        # value sentinel and should stay as None.
+        is_float_col = col_dtype.is_float()
         for row in result.rows():
             value = unwrap_py_scalar(row[0])
             count = int(unwrap_py_scalar(row[1]))
             if isinstance(value, float) and math.isnan(value):
-                value = NAN_VALUE
+                value = NAN_VALUE if is_float_col else None
             elif isinstance(value, float) and math.isinf(value) and value > 0:
                 value = POSITIVE_INF
             elif isinstance(value, float) and math.isinf(value) and value < 0:
@@ -278,9 +283,7 @@ class NarwhalsTableManager(
             return ("time", dtype_string)
         elif dtype == nw.Date:
             return ("date", dtype_string)
-        elif dtype == nw.Datetime:
-            return ("datetime", dtype_string)
-        elif dtype.is_temporal():
+        elif dtype == nw.Datetime or dtype.is_temporal():
             return ("datetime", dtype_string)
         elif dtype.is_numeric():
             return ("number", dtype_string)
@@ -463,35 +466,7 @@ class NarwhalsTableManager(
                         ),
                     }
                 )
-        elif is_narwhals_integer_type(dtype):
-            exprs.update(
-                {
-                    "unique": col.n_unique(),
-                    "min": col.min(),
-                    "max": col.max(),
-                    "mean": col.mean(),
-                    "std": col.std(),
-                    "median": col.median(),
-                }
-            )
-            if supports_numeric_quantiles:
-                exprs.update(
-                    {
-                        "p5": col.quantile(
-                            0.05, interpolation=quantile_interpolation
-                        ),
-                        "p25": col.quantile(
-                            0.25, interpolation=quantile_interpolation
-                        ),
-                        "p75": col.quantile(
-                            0.75, interpolation=quantile_interpolation
-                        ),
-                        "p95": col.quantile(
-                            0.95, interpolation=quantile_interpolation
-                        ),
-                    }
-                )
-        elif dtype.is_numeric():
+        elif is_narwhals_integer_type(dtype) or dtype.is_numeric():
             exprs.update(
                 {
                     "unique": col.n_unique(),
@@ -680,7 +655,7 @@ class NarwhalsTableManager(
             return list(range(total))
         return [round(i * (total - 1) / (size - 1)) for i in range(size)]
 
-    def get_num_rows(self, force: bool = True) -> Optional[int]:
+    def get_num_rows(self, force: bool = True) -> int | None:
         # If force is true, collect the data and get the number of rows
         if force:
             return self.as_frame().shape[0]
@@ -725,17 +700,22 @@ class NarwhalsTableManager(
         # Sample 3 values from the column
         SAMPLE_SIZE = 3
         try:
-            from enum import Enum
+
+            def _json_default(o: Any) -> str:
+                if isinstance(o, Enum):
+                    return o.name
+                return str(o)
 
             def to_primitive(value: Any) -> str | int | float:
-                if isinstance(value, list):
-                    return str([to_primitive(v) for v in value])
-                elif isinstance(value, dict):
-                    return str({k: to_primitive(v) for k, v in value.items()})
-                elif isinstance(value, Enum):
+                if isinstance(value, Enum):
                     return value.name
-                elif isinstance(value, (float, int)):
+                if isinstance(value, (int, float)):
                     return value
+                if isinstance(value, (list, dict)):
+                    try:
+                        return json.dumps(value, default=_json_default)
+                    except (TypeError, ValueError):
+                        return str(value)
                 return str(value)
 
             if self.data[column].dtype == nw.Datetime:

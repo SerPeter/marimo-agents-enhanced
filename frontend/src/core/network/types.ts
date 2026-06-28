@@ -23,6 +23,8 @@ export type ExportAsIPYNBRequest = schemas["ExportAsIPYNBRequest"];
 export type ExportAsScriptRequest = schemas["ExportAsScriptRequest"];
 export type ExportAsPDFRequest = schemas["ExportAsPDFRequest"];
 export type UpdateCellOutputsRequest = schemas["UpdateCellOutputsRequest"];
+export type FileCopyRequest = schemas["FileCopyRequest"];
+export type FileCopyResponse = schemas["FileCopyResponse"];
 export type FileCreateRequest = schemas["FileCreateRequest"];
 export type FileCreateResponse = schemas["FileCreateResponse"];
 export type FileDeleteRequest = schemas["FileDeleteRequest"];
@@ -77,6 +79,17 @@ export type SaveUserConfigurationRequest =
   schemas["SaveUserConfigurationRequest"];
 export interface SetCellConfigRequest {
   configs: Record<CellId, Partial<CellConfig>>;
+}
+/**
+ * Client-side shape for creating a file/directory/notebook. The HTTP
+ * transport sends this as multipart/form-data; the WASM bridge base64-encodes
+ * `file` internally and crosses the JS<->Py boundary as JSON.
+ */
+export interface FileCreateInput {
+  path: string;
+  type: "file" | "directory" | "notebook";
+  name: string;
+  file?: Blob;
 }
 export type UpdateUIElementRequest = schemas["UpdateUIElementRequest"];
 export type ModelRequest = schemas["ModelRequest"];
@@ -163,11 +176,12 @@ export interface EditRequests {
   sendListFiles: (request: FileListRequest) => Promise<FileListResponse>;
   sendSearchFiles: (request: FileSearchRequest) => Promise<FileSearchResponse>;
   sendCreateFileOrFolder: (
-    request: FileCreateRequest,
+    request: FileCreateInput,
   ) => Promise<FileCreateResponse>;
   sendDeleteFileOrFolder: (
     request: FileDeleteRequest,
   ) => Promise<FileDeleteResponse>;
+  sendCopyFileOrFolder: (request: FileCopyRequest) => Promise<FileCopyResponse>;
   sendRenameFileOrFolder: (
     request: FileMoveRequest,
   ) => Promise<FileMoveResponse>;

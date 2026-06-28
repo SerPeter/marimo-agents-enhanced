@@ -94,7 +94,8 @@ components:
       title: AiCompletionRequest
       type: object
     AiConfig:
-      description: "Configuration options for AI.\n\n    **Keys.**\n\n    - `rules`:\
+      description: "Configuration options for AI.\n\n    **Keys.**\n\n    - `enabled`:\
+        \ if `False`, hide AI actions and panels in the marimo UI\n    - `rules`:\
         \ custom rules to include in all AI completion prompts\n    - `max_tokens`:\
         \ the maximum number of tokens to use in AI completions\n    - `mode`: the\
         \ mode to use for AI completions. Can be one of: `\"ask\"` or `\"manual\"\
@@ -104,9 +105,10 @@ components:
         \ the Google AI config\n    - `bedrock`: the Bedrock config\n    - `azure`:\
         \ the Azure config\n    - `ollama`: the Ollama config\n    - `github`: the\
         \ GitHub config\n    - `openrouter`: the OpenRouter config\n    - `wandb`:\
-        \ the Weights & Biases config\n    - `custom_providers`: a dict of custom\
-        \ OpenAI-compatible providers\n    - `open_ai_compatible`: the OpenAI-compatible\
-        \ config (deprecated, use custom_providers)"
+        \ the Weights & Biases config\n    - `opencode_go`: the OpenCode Go config\n\
+        \    - `custom_providers`: a dict of custom OpenAI-compatible providers\n\
+        \    - `open_ai_compatible`: the OpenAI-compatible config (deprecated, use\
+        \ custom_providers)"
       properties:
         anthropic:
           $ref: '#/components/schemas/AnthropicConfig'
@@ -118,6 +120,8 @@ components:
           additionalProperties:
             $ref: '#/components/schemas/OpenAiConfig'
           type: object
+        enabled:
+          type: boolean
         github:
           $ref: '#/components/schemas/GitHubConfig'
         google:
@@ -130,6 +134,7 @@ components:
           enum:
           - agent
           - ask
+          - code_mode
           - manual
         models:
           $ref: '#/components/schemas/AiModelConfig'
@@ -138,6 +143,8 @@ components:
         open_ai:
           $ref: '#/components/schemas/OpenAiConfig'
         open_ai_compatible:
+          $ref: '#/components/schemas/OpenAiConfig'
+        opencode_go:
           $ref: '#/components/schemas/OpenAiConfig'
         openrouter:
           $ref: '#/components/schemas/OpenAiConfig'
@@ -374,16 +381,18 @@ components:
       format: cell-id
       type: string
     CellNotification:
-      description: "Updates a cell's state in the frontend.\n\n    Only fields that\
-        \ are set (not None) will update the cell state.\n    Omitting a field leaves\
-        \ that aspect unchanged.\n\n    Attributes:\n        cell_id: Unique identifier\
-        \ of the cell being updated.\n        output: Cell's output. Use CellOutput.empty()\
-        \ to clear.\n        console: Console messages. Single/list appends, [] clears,\
-        \ None unchanged.\n        status: Execution status (idle/running/stale/queued/disabled-transitively).\n\
+      description: "Updates a cell's state in the frontend.\n\n    This is a partial\
+        \ update: each field carries its own \"unchanged\" semantics,\n    documented\
+        \ per field below. Most fields treat None as \"unchanged\"; fields\n    that\
+        \ need to distinguish \"unchanged\" from \"clear\" use msgspec.UNSET for the\n\
+        \    former and None for the latter.\n\n    Attributes:\n        cell_id:\
+        \ Unique identifier of the cell being updated.\n        output: Cell's output.\
+        \ Use CellOutput.empty() to clear.\n        console: Console messages. Single/list\
+        \ appends, [] clears, None unchanged.\n        status: Execution status (idle/running/stale/queued/disabled-transitively).\n\
         \        stale_inputs: Whether cell has stale inputs from changed dependencies.\n\
         \        run_id: Execution run ID for tracing. Auto-set from context.\n  \
-        \      serialization: Serialization status (TopLevelHints).\n        timestamp:\
-        \ Creation timestamp, auto-set."
+        \      serialization: Top-level reusability hint. UNSET unchanged, None clears,\
+        \ str sets.\n        timestamp: Creation timestamp, auto-set."
       properties:
         cell_id:
           $ref: '#/components/schemas/CellId'
@@ -412,7 +421,6 @@ components:
           anyOf:
           - type: string
           - type: 'null'
-          default: null
         stale_inputs:
           anyOf:
           - type: boolean
@@ -508,6 +516,28 @@ components:
       - data
       title: CellOutput
       type: object
+    CellOutputs:
+      description: "Per-cell output snapshot delivered alongside the document snapshot.\n\
+        \n    `output` carries the cell's last main (rich display) output;\n    `console_outputs`\
+        \ carries the buffered stdout/stderr stream from\n    its last execution.\
+        \  Both are keyed by cell id; missing keys mean\n    \"no output captured\"\
+        \ (the cell never ran, or produced nothing on\n    that channel)."
+      properties:
+        console_outputs:
+          additionalProperties:
+            items:
+              $ref: '#/components/schemas/CellOutput'
+            type: array
+          type: object
+        output:
+          additionalProperties:
+            $ref: '#/components/schemas/CellOutput'
+          type: object
+      required:
+      - output
+      - console_outputs
+      title: CellOutputs
+      type: object
     ChatAttachment:
       properties:
         content_type:
@@ -563,8 +593,6 @@ components:
 
         See pydantic_ai.ui.vercel_ai.request_types.UIMessage or Vercel AI SDK documentation.'
       properties:
-        context:
-          $ref: '#/components/schemas/AiCompletionContext'
         includeOtherCode:
           type: string
         model:
@@ -593,7 +621,6 @@ components:
           - type: 'null'
           default: null
       required:
-      - context
       - includeOtherCode
       - uiMessages
       title: ChatRequest
@@ -728,11 +755,21 @@ components:
       title: ColumnStats
       type: object
     CompletedRunNotification:
-      description: Run of submitted cells and descendants completed.
+      description: "Run of submitted cells and descendants completed.\n\n    Attributes:\n\
+        \        run_id: Correlation ID echoed from the command that triggered\n \
+        \           this completion. `None` for handlers that don't take a\n     \
+        \       `run_id` (everything except `handle_execute_scratchpad`\n        \
+        \    today). Consumers that want to wait for a specific command's\n      \
+        \      completion filter on this field."
       properties:
         op:
           enum:
           - completed-run
+        run_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
       required:
       - op
       title: CompletedRunNotification
@@ -744,7 +781,8 @@ components:
         \ the completion hotkey is entered\n    - `signature_hint_on_typing`: if `False`,\
         \ signature hint won't be shown when typing\n    - `copilot`: one of `\"github\"\
         `, `\"codeium\"`, or `\"custom\"`\n    - `codeium_api_key`: the Codeium API\
-        \ key"
+        \ key\n    - `auto_close_pairs`: if `False`, typing an opening bracket, parenthesis,\n\
+        \    or quote will not automatically insert the closing character"
       properties:
         activate_on_typing:
           type: boolean
@@ -752,6 +790,8 @@ components:
           anyOf:
           - type: string
           - type: 'null'
+        auto_close_pairs:
+          type: boolean
         base_url:
           anyOf:
           - type: string
@@ -817,6 +857,38 @@ components:
       - prefix_length
       - options
       title: CompletionResultNotification
+      type: object
+    ConsumerCapabilities:
+      description: "Per-consumer access capabilities for a session connection.\n\n\
+        \    - editor: `{edit: True, interact: True}`\n    - viewer: `{edit: False,\
+        \ interact: False}`\n\n    These gate the frontend UI; they are not the server's\
+        \ authority boundary.\n    Scopes are granted per session mode (see `@requires`),\
+        \ so in an edit session\n    every connection (viewers included) carries the\
+        \ `edit` scope and can issue\n    edit requests. A viewer's read-only status\
+        \ is enforced by the client hiding\n    edit affordances, not by the server\
+        \ rejecting the request."
+      properties:
+        edit:
+          type: boolean
+        interact:
+          type: boolean
+      required:
+      - edit
+      - interact
+      title: ConsumerCapabilities
+      type: object
+    ConsumerCapabilitiesNotification:
+      description: Notification of the frontend consumer's capabilities.
+      properties:
+        consumer_capabilities:
+          $ref: '#/components/schemas/ConsumerCapabilities'
+        op:
+          enum:
+          - consumer-capabilities
+      required:
+      - op
+      - consumer_capabilities
+      title: ConsumerCapabilitiesNotification
       type: object
     CopyNotebookRequest:
       properties:
@@ -1147,7 +1219,9 @@ components:
     Database:
       description: "Represents a collection of schemas.\n\nAttributes:\n    name (str):\
         \ The name of the database\n    dialect (str): The dialect of the database\n\
-        \    schemas (List[Schema]): List of schemas in the database\n    engine (Optional[VariableName]):\
+        \    schemas (List[Schema]): List of schemas in the database.\n    schemas_resolved\
+        \ (bool): True when `schemas` has been enumerated.\n        False when schema\
+        \ discovery was deferred. Defaults to True\n    engine (Optional[VariableName]):\
         \ Database engine or connection handler, if any."
       properties:
         dialect:
@@ -1163,6 +1237,9 @@ components:
           items:
             $ref: '#/components/schemas/Schema'
           type: array
+        schemas_resolved:
+          default: true
+          type: boolean
       required:
       - name
       - dialect
@@ -1498,8 +1575,22 @@ components:
         \        request: HTTP request context if available.\n        notebook_cells:\
         \ Snapshot of notebook cells from the session document.\n            Used\
         \ to populate the document ContextVar so code_mode can read\n            cell\
-        \ ordering, code, names, and configs."
+        \ ordering, code, names, and configs.\n        cell_outputs: Snapshot of per-cell\
+        \ outputs (main + console) from the\n            session view. Populates a\
+        \ parallel ContextVar so code_mode can\n            expose `cell.output` and\
+        \ `cell.console_outputs`. Frozen at\n            scratchpad start \u2014 not\
+        \ refreshed when `ctx.run_cell` produces\n            new outputs in the same\
+        \ batch.\n        run_id: Optional correlation ID. When set, the\n       \
+        \     `CompletedRunNotification` emitted at the end of this command\n    \
+        \        carries the same `run_id` so a caller holding a\n            `ScratchCellListener`\
+        \ can filter for *its* completion and\n            ignore `CompletedRun` events\
+        \ from unrelated commands on the\n            same session."
       properties:
+        cellOutputs:
+          anyOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/CellOutputs'
+          default: null
         code:
           type: string
         notebookCells:
@@ -1512,6 +1603,11 @@ components:
         request:
           anyOf:
           - $ref: '#/components/schemas/HTTPRequest'
+          - type: 'null'
+          default: null
+        runId:
+          anyOf:
+          - type: string
           - type: 'null'
           default: null
         type:
@@ -1524,6 +1620,11 @@ components:
       type: object
     ExecuteScratchpadRequest:
       properties:
+        cellOutputs:
+          anyOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/CellOutputs'
+          default: null
         code:
           type: string
         notebookCells:
@@ -1536,6 +1637,11 @@ components:
         request:
           anyOf:
           - $ref: '#/components/schemas/HTTPRequest'
+          - type: 'null'
+          default: null
+        runId:
+          anyOf:
+          - type: string
           - type: 'null'
           default: null
       required:
@@ -1631,6 +1737,63 @@ components:
       required:
       - download
       title: ExportAsScriptRequest
+      type: object
+    FileCopyRequest:
+      properties:
+        newPath:
+          type: string
+        path:
+          type: string
+      required:
+      - path
+      - newPath
+      title: FileCopyRequest
+      type: object
+    FileCopyResponse:
+      properties:
+        info:
+          anyOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/FileInfo'
+          default: null
+        message:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+        success:
+          type: boolean
+      required:
+      - success
+      title: FileCopyResponse
+      type: object
+    FileCreateMultipartRequest:
+      description: "multipart/form-data body for POST /api/files/create.\n\n    Schema-only:\
+        \ this struct exists to describe the multipart shape in\n    OpenAPI. At runtime,\
+        \ the endpoint reads the string fields from\n    `MultipartRequest.body` and\
+        \ the uploaded bytes from\n    `MultipartRequest.files[\"file\"]` \u2014 `body.file`\
+        \ is never populated."
+      properties:
+        file:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          format: binary
+        name:
+          type: string
+        path:
+          type: string
+        type:
+          enum:
+          - directory
+          - file
+          - notebook
+      required:
+      - path
+      - type
+      - name
+      title: FileCreateMultipartRequest
       type: object
     FileCreateRequest:
       properties:
@@ -1951,8 +2114,15 @@ components:
       description: "Result of a frontend-initiated function call.\n\n    Attributes:\n\
         \        function_call_id: ID matching the original request.\n        return_value:\
         \ Function return value as JSON.\n        status: Human-readable success/failure\
-        \ status."
+        \ status.\n        found: Whether the requested function was located in the\
+        \ registry.\n            False signals a transient registry desync, so the\
+        \ request is safe\n            to retry. True means no retry will help: a\
+        \ non-ok status then\n            reflects a failure unrelated to lookup,\
+        \ such as the function\n            raising during execution or not being\
+        \ associated with a cell."
       properties:
+        found:
+          type: boolean
         function_call_id:
           $ref: '#/components/schemas/RequestId'
         op:
@@ -1966,6 +2136,7 @@ components:
       - function_call_id
       - return_value
       - status
+      - found
       title: FunctionCallResultNotification
       type: object
     GetCacheInfoCommand:
@@ -2149,7 +2320,10 @@ components:
       description: "Package installation progress with streaming logs.\n\n    Attributes:\n\
         \        packages: Package name to status (queued/installing/installed/failed).\n\
         \        logs: Optional streaming logs per package.\n        log_status: Log\
-        \ stream status (append/start/done)."
+        \ stream status (append/start/done).\n        source: Which Python environment\
+        \ packages are installed into.\n                \"kernel\" (default) installs\
+        \ in the kernel's venv; \"server\"\n                installs in the server's\
+        \ own Python env."
       properties:
         log_status:
           anyOf:
@@ -2177,6 +2351,11 @@ components:
             - installing
             - queued
           type: object
+        source:
+          default: kernel
+          enum:
+          - kernel
+          - server
       required:
       - op
       - packages
@@ -2344,6 +2523,8 @@ components:
           items:
             $ref: '#/components/schemas/CellConfig'
           type: array
+        consumer_capabilities:
+          $ref: '#/components/schemas/ConsumerCapabilities'
         kiosk:
           type: boolean
         last_executed_code:
@@ -2389,6 +2570,7 @@ components:
       - app_config
       - kiosk
       - capabilities
+      - consumer_capabilities
       title: KernelReadyNotification
       type: object
     KernelStartupErrorNotification:
@@ -2404,6 +2586,17 @@ components:
       - op
       - error
       title: KernelStartupErrorNotification
+      type: object
+    KernelStatusResponse:
+      properties:
+        state:
+          enum:
+          - idle
+          - running
+          - stopped
+      required:
+      - state
+      title: KernelStatusResponse
       type: object
     KeymapConfig:
       description: "Configuration for keymaps.\n\n    **Keys.**\n\n    - `preset`:\
@@ -2574,6 +2767,7 @@ components:
           - $ref: '#/components/schemas/CacheInfoNotification'
           - $ref: '#/components/schemas/FocusCellNotification'
           - $ref: '#/components/schemas/NotebookDocumentTransactionNotification'
+          - $ref: '#/components/schemas/ConsumerCapabilitiesNotification'
           discriminator:
             mapping:
               alert: '#/components/schemas/AlertNotification'
@@ -2583,6 +2777,7 @@ components:
               cell-op: '#/components/schemas/CellNotification'
               completed-run: '#/components/schemas/CompletedRunNotification'
               completion-result: '#/components/schemas/CompletionResultNotification'
+              consumer-capabilities: '#/components/schemas/ConsumerCapabilitiesNotification'
               data-column-preview: '#/components/schemas/DataColumnPreviewNotification'
               data-source-connections: '#/components/schemas/DataSourceConnectionsNotification'
               datasets: '#/components/schemas/DatasetsNotification'
@@ -2651,11 +2846,11 @@ components:
       type: object
     LintConfig:
       description: "Configuration for lint rule selection.\n\n    Follows ruff-inspired\
-        \ semantics for selecting which rules to run\n    during ``marimo check``.\n\
-        \n    **Keys.**\n\n    - ``select``: list of rule code prefixes that replaces\
-        \ the default\n      enabled set. Use ``\"ALL\"`` to select all rules.\n \
-        \     Example: ``[\"MB\", \"MR001\"]``\n    - ``ignore``: list of rule code\
-        \ prefixes to remove from the\n      enabled set."
+        \ semantics for selecting which rules to run\n    during `marimo check`.\n\
+        \n    **Keys.**\n\n    - `select`: list of rule code prefixes that replaces\
+        \ the default\n      enabled set. Use `\"ALL\"` to select all rules.\n   \
+        \   Example: `[\"MB\", \"MR001\"]`\n    - `ignore`: list of rule code prefixes\
+        \ to remove from the\n      enabled set."
       properties:
         ignore:
           items:
@@ -2706,7 +2901,9 @@ components:
         \ schemas in a database. Used by the SQL editor for\n    schema selection.\n\
         \n    Attributes:\n        request_id: Unique identifier for this request.\n\
         \        engine: SQL engine ('postgresql', 'mysql', 'duckdb', etc.).\n   \
-        \     database: Database to query."
+        \     database: Database to query.\n        schema_path: Parent schema path\
+        \ whose child schemas to list.\n            Empty lists the database's top-level\
+        \ schemas."
       properties:
         database:
           type: string
@@ -2714,6 +2911,11 @@ components:
           type: string
         requestId:
           $ref: '#/components/schemas/RequestId'
+        schemaPath:
+          default: []
+          items:
+            type: string
+          type: array
         type:
           enum:
           - list-sql-schemas
@@ -2732,6 +2934,11 @@ components:
           type: string
         requestId:
           $ref: '#/components/schemas/RequestId'
+        schemaPath:
+          default: []
+          items:
+            type: string
+          type: array
       required:
       - requestId
       - engine
@@ -2744,7 +2951,8 @@ components:
         \n    Attributes:\n        request_id: Unique identifier for this request.\n\
         \        engine: SQL engine ('postgresql', 'mysql', 'duckdb', etc.).\n   \
         \     database: Database to query.\n        schema: Schema to list tables\
-        \ from."
+        \ from.\n        schema_path: Path of nested schemas (relative to `database`)\
+        \ for\n            catalogs with nested schemas. Empty for the top level."
       properties:
         database:
           type: string
@@ -2754,6 +2962,11 @@ components:
           $ref: '#/components/schemas/RequestId'
         schema:
           type: string
+        schemaPath:
+          default: []
+          items:
+            type: string
+          type: array
         type:
           enum:
           - list-sql-tables
@@ -2775,6 +2988,11 @@ components:
           $ref: '#/components/schemas/RequestId'
         schema:
           type: string
+        schemaPath:
+          default: []
+          items:
+            type: string
+          type: array
       required:
       - requestId
       - engine
@@ -3487,7 +3705,9 @@ components:
       title: MultipleDefinitionError
       type: object
     NotebookCell:
-      description: "A single cell in the document. Mutable \u2014 owned by the document."
+      description: "A single cell in the document. Mutable \u2014 owned by the document.\n\
+        \n    `version` increments on each `SetCode` that actually changes\n    `code`.\
+        \ Other property changes don't bump it."
       properties:
         code:
           type: string
@@ -3497,6 +3717,9 @@ components:
           $ref: '#/components/schemas/CellId'
         name:
           type: string
+        version:
+          default: 0
+          type: integer
       required:
       - id
       - code
@@ -3608,6 +3831,7 @@ components:
           anyOf:
           - enum:
             - dataflow
+            - external-dependencies
             - fileformat
             - for-jupyter-users
             - intro
@@ -3730,7 +3954,9 @@ components:
         \ Attributes:\n        request_id: Unique identifier for this request.\n \
         \       engine: SQL engine ('postgresql', 'mysql', 'duckdb', etc.).\n    \
         \    database: Database containing the table.\n        schema: Schema containing\
-        \ the table.\n        table_name: Table to preview."
+        \ the table.\n        table_name: Table to preview.\n        schema_path:\
+        \ Path of nested schemas (relative to `database`) for\n            catalogs\
+        \ with nested schemas. Empty for the top level."
       properties:
         database:
           type: string
@@ -3740,6 +3966,11 @@ components:
           $ref: '#/components/schemas/RequestId'
         schema:
           type: string
+        schemaPath:
+          default: []
+          items:
+            type: string
+          type: array
         tableName:
           type: string
         type:
@@ -3764,6 +3995,11 @@ components:
           $ref: '#/components/schemas/RequestId'
         schema:
           type: string
+        schemaPath:
+          default: []
+          items:
+            type: string
+          type: array
         tableName:
           type: string
       required:
@@ -3978,8 +4214,8 @@ components:
       type: object
     ReorderCells:
       description: "Replace the full cell ordering.\n\n    Cell IDs present in the\
-        \ document but missing from ``cell_ids``\n    are appended at the end. IDs\
-        \ not in the document are ignored."
+        \ document but missing from `cell_ids`\n    are appended at the end. IDs not\
+        \ in the document are ignored."
       properties:
         cellIds:
           items:
@@ -4107,12 +4343,19 @@ components:
       type: object
     SQLDatabaseMetadata:
       description: "SQL database metadata.\n\n    Attributes:\n        connection:\
-        \ Connection identifier.\n        database: Database name."
+        \ Connection identifier.\n        database: Database name.\n        schema_path:\
+        \ Parent schema path the schemas belong under. Empty for\n            the\
+        \ database's top level."
       properties:
         connection:
           type: string
         database:
           type: string
+        schema_path:
+          default: []
+          items:
+            type: string
+          type: array
       required:
       - connection
       - database
@@ -4121,7 +4364,8 @@ components:
     SQLMetadata:
       description: "SQL database and schema metadata.\n\n    Attributes:\n       \
         \ connection: Connection identifier.\n        database: Database name.\n \
-        \       schema: Schema name."
+        \       schema: Schema name.\n        schema_path: Path of nested schemas\
+        \ (relative to `database`). Empty\n            for the top level."
       properties:
         connection:
           type: string
@@ -4129,6 +4373,11 @@ components:
           type: string
         schema:
           type: string
+        schema_path:
+          default: []
+          items:
+            type: string
+          type: array
         type:
           enum:
           - sql-metadata
@@ -4298,13 +4547,33 @@ components:
       title: SaveUserConfigurationRequest
       type: object
     Schema:
+      description: "Represents a database schema and its tables.\n\nA schema may itself\
+        \ contain nested child schemas, e.g. for catalogs with\nhierarchical namespaces\
+        \ such as Iceberg (`top.nested.deep`).\n\nAttributes:\n    name (str): The\
+        \ name of the schema.\n    tables (List[DataTable]): Tables in this schema.\n\
+        \    tables_resolved (bool): True when `tables` has been enumerated\n    \
+        \    False when table discovery was deferred. Defaults to True\n    child_schemas\
+        \ (List[Schema]): Nested child schemas (sub-namespaces).\n    child_schemas_resolved\
+        \ (bool): True when `child_schemas` has been\n        enumerated. False when\
+        \ discovery was deferred. Defaults to True"
       properties:
+        child_schemas:
+          default: []
+          items:
+            $ref: '#/components/schemas/Schema'
+          type: array
+        child_schemas_resolved:
+          default: true
+          type: boolean
         name:
           type: string
         tables:
           items:
             $ref: '#/components/schemas/DataTable'
           type: array
+        tables_resolved:
+          default: true
+          type: boolean
       required:
       - name
       - tables
@@ -4417,7 +4686,7 @@ components:
       title: SetCode
       type: object
     SetConfig:
-      description: Partially update a cell's config. None fields are unchanged.
+      description: Replace a cell's config.
       properties:
         cellId:
           $ref: '#/components/schemas/CellId'
@@ -4425,23 +4694,19 @@ components:
           anyOf:
           - type: integer
           - type: 'null'
-          default: null
         disabled:
-          anyOf:
-          - type: boolean
-          - type: 'null'
-          default: null
+          type: boolean
         hideCode:
-          anyOf:
-          - type: boolean
-          - type: 'null'
-          default: null
+          type: boolean
         type:
           enum:
           - set-config
       required:
       - type
       - cellId
+      - column
+      - disabled
+      - hideCode
       title: SetConfig
       type: object
     SetName:
@@ -4487,9 +4752,12 @@ components:
       description: "Configuration for sharing features.\n\n    **Keys.**\n\n    -\
         \ `html`: if `False`, HTML sharing options will be hidden from the UI\n  \
         \  - `wasm`: if `False`, WebAssembly sharing options will be hidden from the\
-        \ UI"
+        \ UI\n    - `molab`: if `False`, molab sharing options will be hidden from\
+        \ the UI"
       properties:
         html:
+          type: boolean
+        molab:
           type: boolean
         wasm:
           type: boolean
@@ -4736,7 +5004,8 @@ components:
         \ entries returned by the operation.\n        namespace: Variable name of\
         \ the storage backend.\n        prefix: The prefix that was listed (set by\
         \ list_entries).\n        query: The search query that was used (set by search).\n\
-        \        error: Error message if the operation failed."
+        \        next_page_token: Token for fetching the next page of entries.\n \
+        \       error: Error message if the operation failed."
       properties:
         entries:
           items:
@@ -4749,6 +5018,11 @@ components:
           default: null
         namespace:
           type: string
+        next_page_token:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
         op:
           enum:
           - storage-entries
@@ -4813,12 +5087,18 @@ components:
         \ and virtual directories at one level.\n\n    Attributes:\n        request_id:\
         \ Unique identifier for this request.\n        namespace: Variable name identifying\
         \ the storage backend.\n        limit: Max entries to return.\n        prefix:\
-        \ Path prefix to list (None = root)."
+        \ Path prefix to list (None = root).\n        page_token: Token for the next\
+        \ page of entries."
       properties:
         limit:
           type: integer
         namespace:
           type: string
+        pageToken:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
         prefix:
           anyOf:
           - type: string
@@ -4842,6 +5122,11 @@ components:
           type: integer
         namespace:
           type: string
+        pageToken:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
         prefix:
           anyOf:
           - type: string
@@ -4970,6 +5255,7 @@ components:
             enum:
             - agent
             - ask
+            - code_mode
             - manual
           type: array
         name:
@@ -4991,8 +5277,8 @@ components:
       type: object
     Transaction:
       description: "An atomic batch of changes applied to a NotebookDocument.\n\n\
-        \    ``source`` identifies the writer (e.g. ``\"frontend\"``, ``\"kernel\"\
-        ``).\n    ``version`` is ``None`` when created and stamped by\n    ``NotebookDocument.apply()``."
+        \    `source` identifies the writer (e.g. `\"frontend\"`, `\"kernel\"`).\n\
+        \    `version` is `None` when created and stamped by\n    `NotebookDocument.apply()`."
       properties:
         changes:
           items:
@@ -5016,7 +5302,12 @@ components:
               propertyName: type
           type: array
         source:
-          type: string
+          enum:
+          - cell-manager
+          - code-mode
+          - file-watch
+          - frontend
+          - kernel
         version:
           anyOf:
           - type: integer
@@ -6018,13 +6309,27 @@ paths:
           description: Update the cell outputs
         400:
           description: File must be saved before downloading
-  /api/files/create:
+  /api/files/copy:
     post:
       requestBody:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/FileCreateRequest'
+              $ref: '#/components/schemas/FileCopyRequest'
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileCopyResponse'
+          description: Copy a file or directory
+  /api/files/create:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/FileCreateMultipartRequest'
       responses:
         200:
           content:
@@ -6611,6 +6916,24 @@ paths:
               schema:
                 $ref: '#/components/schemas/SuccessResponse'
           description: Shutdown the kernel
+  /api/kernel/status:
+    get:
+      parameters:
+      - in: header
+        name: Marimo-Session-Id
+        required: true
+        schema:
+          type: string
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KernelStatusResponse'
+          description: Report whether the kernel is currently executing. `running`
+            means at least one cell is queued or running; `idle` means the kernel
+            is alive but not executing; `stopped` means the kernel process is not
+            running.
   /api/kernel/stdin:
     post:
       parameters:

@@ -4,6 +4,8 @@ from __future__ import annotations
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from marimo._session.consumer_policy import initial_capabilities
+
 if TYPE_CHECKING:
     from starlette.websockets import WebSocket
 
@@ -19,7 +21,7 @@ from starlette.websockets import WebSocketDisconnect
 from marimo import _loggers
 from marimo._messaging.types import NoopStream
 from marimo._runtime.params import QueryParams
-from marimo._server.codes import WebSocketCodes
+from marimo._server.codes import WebSocketCloseReason, WebSocketCodes
 from marimo._server.models.models import InstantiateNotebookRequest
 from marimo._session.model import ConnectionState, SessionMode
 
@@ -34,6 +36,21 @@ class ConnectionType(Enum):
     RTC_EXISTING = "rtc_existing"
     RESUME = "resume"
     NEW = "new"
+
+
+def is_viewer_connection(
+    *, connection_type: ConnectionType, is_main_consumer: bool
+) -> bool:
+    """Whether a connection should receive read-only (kiosk) message filtering.
+
+    RTC collaborators are full editors even though they are not the room's
+    main consumer, so they are never treated as viewers. For the single-editor
+    model, the viewer is whichever connection is not currently the main
+    consumer; takeover flips this by reassigning the main consumer.
+    """
+    if connection_type is ConnectionType.RTC_EXISTING:
+        return False
+    return not is_main_consumer
 
 
 class SessionConnector:
@@ -70,16 +87,28 @@ class SessionConnector:
         if existing_by_id is not None:
             return self._reconnect_session(existing_by_id)
 
-        # 3. Connect to existing session (RTC mode)
+        # 3. Connect to existing session
+        # 3a. If RTC enabled and session exists for file key, connect to it
+
         existing_by_file = self.manager.get_session_by_file_key(
             self.params.file_key
         )
+        session_in_edit_mode = self.manager.mode == SessionMode.EDIT
+
         if (
             existing_by_file is not None
+            and session_in_edit_mode
             and self.params.rtc_enabled
-            and self.manager.mode == SessionMode.EDIT
         ):
             return self._connect_rtc_session(existing_by_file)
+
+        # 3b. Viewer only mode: a second connection request is auto routed as reader only
+        if (
+            existing_by_file is not None
+            and session_in_edit_mode
+            and not initial_capabilities(existing_by_file, self.params).edit
+        ):
+            return self._connect_kiosk()
 
         # 4. Resume previous session
         resumable = self.manager.maybe_resume_session(
@@ -101,7 +130,8 @@ class SessionConnector:
         if self.manager.mode is not SessionMode.EDIT:
             LOGGER.debug("Kiosk mode is only supported in edit mode")
             raise WebSocketDisconnect(
-                WebSocketCodes.FORBIDDEN, "MARIMO_KIOSK_NOT_ALLOWED"
+                WebSocketCodes.FORBIDDEN,
+                WebSocketCloseReason.KIOSK_NOT_ALLOWED,
             )
 
         # Try to find session by ID first
@@ -122,7 +152,7 @@ class SessionConnector:
                 self.params.file_key,
             )
             raise WebSocketDisconnect(
-                WebSocketCodes.NORMAL_CLOSE, "MARIMO_NO_SESSION"
+                WebSocketCodes.NORMAL_CLOSE, WebSocketCloseReason.NO_SESSION
             )
 
         LOGGER.debug("Connecting to kiosk session")

@@ -73,6 +73,16 @@
     }
   }
 
+  /* Styling for cells marked for cut */
+  &.pending-cut {
+    .output-area,
+    .cm-gutters,
+    .cm {
+      background-color: var(--gray-2);
+      opacity: 0.55;
+    }
+  }
+
   &:focus-within {
     z-index: 20;
   }
@@ -123,6 +133,10 @@
 
       marimo-table::part(table-footer) {
         padding-inline: 0.25rem;
+      }
+
+      marimo-table::part(filter-pills) {
+        padding-bottom: 0;
       }
     }
 
@@ -200,7 +214,6 @@
   &.error-outline,
   &.error-outline:focus-within {
     box-shadow: 8px 8px 0 0 color-mix(in srgb, var(--error), transparent 80%);
-    background-color: var(--red-2);
   }
 
   /* Needs Run */

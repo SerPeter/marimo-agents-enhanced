@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 
@@ -11,6 +11,7 @@ from marimo._plugins.ui._impl.file_browser import (
     FileBrowserFileInfo,
     ListDirectoryArgs,
     ListDirectoryResponse,
+    _normalize_selection_mode,
     file_browser,
 )
 from marimo._utils.paths import normalize_path
@@ -21,7 +22,7 @@ def test_file_browser_init(tmp_path: Path) -> None:
     fb = file_browser(initial_path=tmp_path)
     assert isinstance(fb._initial_path, Path)
     assert str(fb._initial_path) == str(normalize_path(tmp_path))
-    assert fb._selection_mode == "file"
+    assert fb._selection_mode == frozenset({"file"})
     assert fb._filetypes == set()
     assert fb._restrict_navigation is False
 
@@ -35,7 +36,7 @@ def test_file_browser_init(tmp_path: Path) -> None:
     )
     assert fb._initial_path == normalize_path(tmp_path)
     assert fb._filetypes == set(custom_filetypes)
-    assert fb._selection_mode == "directory"
+    assert fb._selection_mode == frozenset({"directory"})
     assert fb._restrict_navigation is True
 
 
@@ -61,6 +62,116 @@ def test_navigation_restriction() -> None:
     with pytest.raises(RuntimeError) as e:
         fb._list_directory(ListDirectoryArgs(path=str(Path.cwd().parent)))
     assert "Navigation is restricted" in str(e.value)
+
+
+def test_navigation_restriction_allows_subdirectory(tmp_path: Path) -> None:
+    """Navigation within the initial directory must succeed."""
+    root = tmp_path / "root"
+    child = root / "child"
+    child.mkdir(parents=True)
+    (child / "file.txt").touch()
+
+    fb = file_browser(initial_path=root, restrict_navigation=True)
+    response = fb._list_directory(ListDirectoryArgs(path=str(child)))
+    assert isinstance(response, ListDirectoryResponse)
+    file_names = [f["name"] for f in response.files]
+    assert "file.txt" in file_names
+
+
+def test_navigation_restriction_sibling(tmp_path: Path) -> None:
+    """Sibling directories must be rejected, not just direct parents."""
+    restricted = tmp_path / "restricted"
+    sibling = tmp_path / "sibling"
+    restricted.mkdir()
+    sibling.mkdir()
+    (sibling / "secret.txt").touch()
+
+    fb = file_browser(initial_path=restricted, restrict_navigation=True)
+    with pytest.raises(RuntimeError, match="Navigation is restricted"):
+        fb._list_directory(ListDirectoryArgs(path=str(sibling)))
+
+
+def test_navigation_restriction_absolute_path(tmp_path: Path) -> None:
+    """Arbitrary absolute paths outside the root must be rejected."""
+    restricted = tmp_path / "restricted"
+    restricted.mkdir()
+
+    fb = file_browser(initial_path=restricted, restrict_navigation=True)
+    with pytest.raises(RuntimeError, match="Navigation is restricted"):
+        fb._list_directory(ListDirectoryArgs(path="/tmp"))
+
+
+def test_navigation_restriction_symlink_escape(tmp_path: Path) -> None:
+    """A symlink inside the restricted dir pointing outside must be rejected."""
+    restricted = tmp_path / "restricted"
+    restricted.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").touch()
+
+    # Symlink lives inside restricted/ but resolves outside
+    escape_link = restricted / "escape"
+    try:
+        escape_link.symlink_to(outside)
+    except OSError:
+        pytest.skip("Cannot create symlinks on this system")
+
+    fb = file_browser(initial_path=restricted, restrict_navigation=True)
+    with pytest.raises(RuntimeError, match="Navigation is restricted"):
+        fb._list_directory(ListDirectoryArgs(path=str(escape_link)))
+
+
+def test_navigation_restriction_symlink_loop(tmp_path: Path) -> None:
+    """Circular symlinks must not hang or silently succeed."""
+    restricted = tmp_path / "restricted"
+    restricted.mkdir()
+
+    link_a = restricted / "link_a"
+    link_b = restricted / "link_b"
+    try:
+        link_a.symlink_to(link_b)
+        link_b.symlink_to(link_a)
+    except OSError:
+        pytest.skip("Cannot create symlinks on this system")
+
+    fb = file_browser(initial_path=restricted, restrict_navigation=True)
+    with pytest.raises(RuntimeError, match="Navigation is restricted"):
+        fb._list_directory(ListDirectoryArgs(path=str(link_a)))
+
+
+def test_navigation_restriction_internal_symlink(tmp_path: Path) -> None:
+    """A symlink that resolves to a path inside the restricted dir is allowed."""
+    restricted = tmp_path / "restricted"
+    child = restricted / "child"
+    child.mkdir(parents=True)
+    (child / "file.txt").touch()
+
+    # Symlink inside restricted/ pointing to another subdir of restricted/
+    alias = restricted / "alias"
+    try:
+        alias.symlink_to(child)
+    except OSError:
+        pytest.skip("Cannot create symlinks on this system")
+
+    fb = file_browser(initial_path=restricted, restrict_navigation=True)
+    response = fb._list_directory(ListDirectoryArgs(path=str(alias)))
+    assert isinstance(response, ListDirectoryResponse)
+    file_names = [f["name"] for f in response.files]
+    assert "file.txt" in file_names
+
+
+def test_navigation_restriction_dotdot_escape(tmp_path: Path) -> None:
+    """Path traversal via .. components must be caught."""
+    restricted = tmp_path / "restricted"
+    sibling = tmp_path / "sibling"
+    restricted.mkdir()
+    sibling.mkdir()
+    (sibling / "secret.txt").touch()
+
+    fb = file_browser(initial_path=restricted, restrict_navigation=True)
+    traversal = str(restricted / ".." / "sibling")
+    with pytest.raises(RuntimeError, match="Navigation is restricted"):
+        fb._list_directory(ListDirectoryArgs(path=traversal))
 
 
 def test_name_method() -> None:
@@ -219,7 +330,7 @@ def test_extended_path_class(tmp_path: Path) -> None:
     assert isinstance(value[0].path, CustomPath)
 
     class CustomPathWithClient(Path):
-        def __init__(self, path: Path, client: Optional[Any] = None) -> None:
+        def __init__(self, path: Path, client: Any | None = None) -> None:
             super().__init__(path)
             self.client = client
 
@@ -242,8 +353,8 @@ def test_extended_path_class(tmp_path: Path) -> None:
 
 def test_validation() -> None:
     with pytest.raises(ValueError) as e:
-        file_browser(initial_path="invalid", selection_mode="invalid")
-    assert "Value must be one of" in str(e.value)
+        file_browser(initial_path="invalid", selection_mode="invalid")  # type: ignore[arg-type]
+    assert "Invalid selection_mode" in str(e.value)
 
 
 def test_limit_arg(tmp_path: Path) -> None:
@@ -980,3 +1091,282 @@ def test_file_browser_relative_path_sent_to_frontend_as_absolute(
 
     finally:
         os.chdir(original_cwd)
+
+
+class TestNormalizeSelectionMode:
+    def test_string_file(self) -> None:
+        assert _normalize_selection_mode("file") == frozenset({"file"})
+
+    def test_string_directory(self) -> None:
+        assert _normalize_selection_mode("directory") == frozenset(
+            {"directory"}
+        )
+
+    def test_string_all(self) -> None:
+        assert _normalize_selection_mode("all") == frozenset(
+            {"file", "directory"}
+        )
+
+    def test_list_single_file(self) -> None:
+        assert _normalize_selection_mode(["file"]) == frozenset({"file"})
+
+    def test_list_single_directory(self) -> None:
+        assert _normalize_selection_mode(["directory"]) == frozenset(
+            {"directory"}
+        )
+
+    def test_list_both(self) -> None:
+        assert _normalize_selection_mode(["file", "directory"]) == frozenset(
+            {"file", "directory"}
+        )
+
+    def test_list_order_independent(self) -> None:
+        assert _normalize_selection_mode(["directory", "file"]) == frozenset(
+            {"file", "directory"}
+        )
+
+    def test_list_dedup(self) -> None:
+        assert _normalize_selection_mode(["file", "file"]) == frozenset(
+            {"file"}
+        )
+
+    def test_tuple_accepted(self) -> None:
+        assert _normalize_selection_mode(("file", "directory")) == frozenset(
+            {"file", "directory"}
+        )
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "both",
+            "folder",
+            "",
+            "FILE",
+            [],
+            ["both"],
+            ["file", "nope"],
+            ["file", 1],
+            None,
+            123,
+        ],
+    )
+    def test_rejects_invalid(self, value: Any) -> None:
+        with pytest.raises(ValueError):
+            _normalize_selection_mode(value)
+
+
+class TestSelectionModeAll:
+    def test_init_all_string(self, tmp_path: Path) -> None:
+        fb = file_browser(initial_path=tmp_path, selection_mode="all")
+        assert fb._selection_mode == frozenset({"file", "directory"})
+
+    def test_init_list_form(self, tmp_path: Path) -> None:
+        fb = file_browser(
+            initial_path=tmp_path, selection_mode=["file", "directory"]
+        )
+        assert fb._selection_mode == frozenset({"file", "directory"})
+
+    def test_init_list_single(self, tmp_path: Path) -> None:
+        fb = file_browser(initial_path=tmp_path, selection_mode=["directory"])
+        assert fb._selection_mode == frozenset({"directory"})
+
+    def test_init_rejects_both(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError):
+            file_browser(initial_path=tmp_path, selection_mode="both")  # type: ignore[arg-type]
+
+    def test_init_rejects_empty_list(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError):
+            file_browser(initial_path=tmp_path, selection_mode=[])
+
+    def test_wire_format_all(self, tmp_path: Path) -> None:
+        fb = file_browser(initial_path=tmp_path, selection_mode="all")
+        assert fb._component_args["selection-mode"] == "all"
+
+    def test_wire_format_file(self, tmp_path: Path) -> None:
+        fb = file_browser(initial_path=tmp_path, selection_mode="file")
+        assert fb._component_args["selection-mode"] == "file"
+
+    def test_wire_format_directory(self, tmp_path: Path) -> None:
+        fb = file_browser(initial_path=tmp_path, selection_mode="directory")
+        assert fb._component_args["selection-mode"] == "directory"
+
+    def test_wire_format_list_normalized_to_all(self, tmp_path: Path) -> None:
+        fb = file_browser(
+            initial_path=tmp_path,
+            selection_mode=["directory", "file"],
+        )
+        assert fb._component_args["selection-mode"] == "all"
+
+    def test_list_directory_all_returns_files_and_dirs(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "a.txt").touch()
+        (tmp_path / "b.parquet").touch()
+        fb = file_browser(initial_path=tmp_path, selection_mode="all")
+        response = fb._list_directory(ListDirectoryArgs(path=str(tmp_path)))
+        names = {f["name"] for f in response.files}
+        assert names == {"sub", "a.txt", "b.parquet"}
+
+    def test_list_directory_all_respects_filetypes_for_files(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "a.txt").touch()
+        (tmp_path / "b.parquet").touch()
+        fb = file_browser(
+            initial_path=tmp_path,
+            selection_mode="all",
+            filetypes=[".parquet"],
+        )
+        response = fb._list_directory(ListDirectoryArgs(path=str(tmp_path)))
+        names = {f["name"] for f in response.files}
+        assert names == {"sub", "b.parquet"}
+
+    def test_list_directory_directory_only_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "a.txt").touch()
+        fb = file_browser(initial_path=tmp_path, selection_mode="directory")
+        response = fb._list_directory(ListDirectoryArgs(path=str(tmp_path)))
+        names = {f["name"] for f in response.files}
+        assert names == {"sub"}
+
+
+class TestFilterParameter:
+    def test_filter_regex_string(self, tmp_path: Path) -> None:
+        """Regex string filter matches filenames."""
+        (tmp_path / "report_2024.csv").touch()
+        (tmp_path / "report_2025.csv").touch()
+        (tmp_path / "notes.txt").touch()
+
+        fb = file_browser(initial_path=tmp_path, filter=r"report_\d{4}\.csv")
+        response = fb._list_directory(ListDirectoryArgs(path=str(tmp_path)))
+        names = {f["name"] for f in response.files if not f["is_directory"]}
+        assert names == {"report_2024.csv", "report_2025.csv"}
+        assert "notes.txt" not in names
+
+    def test_filter_compiled_pattern(self, tmp_path: Path) -> None:
+        """Compiled re.Pattern works the same as a string."""
+        import re as _re
+
+        (tmp_path / "train.parquet").touch()
+        (tmp_path / "test.parquet").touch()
+        (tmp_path / "readme.md").touch()
+
+        pattern = _re.compile(r"\.(parquet)$", _re.IGNORECASE)
+        fb = file_browser(initial_path=tmp_path, filter=pattern)
+        response = fb._list_directory(ListDirectoryArgs(path=str(tmp_path)))
+        names = {f["name"] for f in response.files if not f["is_directory"]}
+        assert names == {"train.parquet", "test.parquet"}
+
+    def test_filter_callable(self, tmp_path: Path) -> None:
+        """Callable filter receives a Path and returns bool."""
+        (tmp_path / "big_file.bin").write_bytes(b"x" * 100)
+        (tmp_path / "small_file.bin").write_bytes(b"x" * 10)
+        (tmp_path / "tiny.txt").write_bytes(b"hi")
+
+        fb = file_browser(
+            initial_path=tmp_path,
+            filter=lambda p: p.stat().st_size >= 50,
+        )
+        response = fb._list_directory(ListDirectoryArgs(path=str(tmp_path)))
+        names = {f["name"] for f in response.files if not f["is_directory"]}
+        assert names == {"big_file.bin"}
+
+    def test_filter_callable_oserror_is_isolated(self, tmp_path: Path) -> None:
+        """A callable that raises OSError on one file must not crash the listing.
+
+        The offending file is treated as "no match" and the rest of the
+        directory is still returned (e.g. a broken symlink shouldn't hide the
+        other files).
+        """
+        (tmp_path / "good.txt").touch()
+        (tmp_path / "bad.txt").touch()
+
+        def flaky(path: Path) -> bool:
+            if path.name == "bad.txt":
+                raise OSError("broken symlink")
+            return True
+
+        fb = file_browser(initial_path=tmp_path, filter=flaky)
+        response = fb._list_directory(ListDirectoryArgs(path=str(tmp_path)))
+        names = {f["name"] for f in response.files if not f["is_directory"]}
+        assert names == {"good.txt"}
+
+    def test_filter_callable_non_oserror_propagates(
+        self, tmp_path: Path
+    ) -> None:
+        """A non-OSError from the filter callable propagates (not swallowed)."""
+        (tmp_path / "file.txt").touch()
+
+        def boom(_path: Path) -> bool:
+            raise ValueError("programming error")
+
+        fb = file_browser(initial_path=tmp_path, filter=boom)
+        with pytest.raises(ValueError, match="programming error"):
+            fb._list_directory(ListDirectoryArgs(path=str(tmp_path)))
+
+    def test_filter_does_not_hide_directories(self, tmp_path: Path) -> None:
+        """Directories are always shown regardless of filter."""
+        sub = tmp_path / "subdir"
+        sub.mkdir()
+        (tmp_path / "file.txt").touch()
+
+        fb = file_browser(initial_path=tmp_path, filter=r"\.csv$")
+        response = fb._list_directory(ListDirectoryArgs(path=str(tmp_path)))
+        names = {f["name"] for f in response.files}
+        assert "subdir" in names
+        assert "file.txt" not in names
+
+    def test_filter_and_filetypes_both_applied(self, tmp_path: Path) -> None:
+        """filter and filetypes must both match (AND semantics)."""
+        (tmp_path / "train_v1.csv").touch()
+        (tmp_path / "train_v2.csv").touch()
+        (tmp_path / "test_v1.csv").touch()
+        (tmp_path / "train_v1.txt").touch()
+
+        fb = file_browser(
+            initial_path=tmp_path,
+            filetypes=[".csv"],
+            filter=r"^train_",
+        )
+        response = fb._list_directory(ListDirectoryArgs(path=str(tmp_path)))
+        names = {f["name"] for f in response.files if not f["is_directory"]}
+        assert names == {"train_v1.csv", "train_v2.csv"}
+
+    def test_filter_none_shows_all_files(self, tmp_path: Path) -> None:
+        """Default filter=None does not restrict files."""
+        (tmp_path / "a.csv").touch()
+        (tmp_path / "b.txt").touch()
+
+        fb = file_browser(initial_path=tmp_path, filter=None)
+        response = fb._list_directory(ListDirectoryArgs(path=str(tmp_path)))
+        names = {f["name"] for f in response.files if not f["is_directory"]}
+        assert names == {"a.csv", "b.txt"}
+
+    def test_filter_invalid_type_raises(self, tmp_path: Path) -> None:
+        """Non-string/pattern/callable raises ValueError."""
+        with pytest.raises((ValueError, TypeError)):
+            file_browser(initial_path=tmp_path, filter=123)  # type: ignore[arg-type]
+
+    def test_filter_with_ignore_empty_dirs(self, tmp_path: Path) -> None:
+        """ignore_empty_dirs respects the filter when scanning recursively."""
+        matched_dir = tmp_path / "matched"
+        matched_dir.mkdir()
+        (matched_dir / "data.csv").touch()
+
+        unmatched_dir = tmp_path / "unmatched"
+        unmatched_dir.mkdir()
+        (unmatched_dir / "notes.txt").touch()
+
+        fb = file_browser(
+            initial_path=tmp_path,
+            filter=r"\.csv$",
+            ignore_empty_dirs=True,
+        )
+        response = fb._list_directory(ListDirectoryArgs(path=str(tmp_path)))
+        dir_names = {f["name"] for f in response.files if f["is_directory"]}
+        assert "matched" in dir_names
+        assert "unmatched" not in dir_names

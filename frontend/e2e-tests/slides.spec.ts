@@ -24,56 +24,58 @@ test("slides", async ({ page }) => {
 
   await openCommandPalette({ page, command: "Present as Slides" });
 
-  // Wait for slides mode - Swiper adds .swiper class and component has .mo-slides-theme
-  const slidesContainer = page.locator(".swiper.mo-slides-theme");
+  // Wait for slides mode - reveal.js adds .reveal class
+  const slidesContainer = page.locator(".reveal.mo-slides-theme");
   await expect(slidesContainer).toBeVisible();
 
   await takeScreenshot(page, __filename);
 
-  // Check pagination shows we're on first slide (bullet 1 is active)
-  // Use pagintion bullets instead of text because the library (Swiper) puts all elements in the viewport.
-  const paginationBullets = page.locator(".swiper-pagination-bullet");
-  await expect(paginationBullets.first()).toHaveClass(
-    /swiper-pagination-bullet-active/,
-  );
+  // Reveal.js marks the active slide <section> with `.present`. It only sets
+  // `data-index-h` in overview / scroll modes, so we identify each slide
+  // positionally via `.slides > section` and assert which one is active.
+  const slides = slidesContainer.locator(".slides > section");
+  await expect(slides).toHaveCount(2);
+  await expect(slides.nth(0)).toHaveClass(/present/);
 
-  // Navigate to next slide using right arrow key
+  // Click the deck so DOM focus lands on it (the wrapper is `tabindex="-1"`).
+  // Without this, focus stays on whatever the command palette dialog
+  // restored it to (often the speaker-notes textarea), which makes reveal
+  // ignore the arrow keys.
+  await slidesContainer.click();
+  await expect
+    .poll(() =>
+      slidesContainer.evaluate((el) => document.activeElement === el),
+    )
+    .toBe(true);
+
   await page.keyboard.press("ArrowRight");
-
-  // Verify we moved to second slide via pagination
-  await expect(paginationBullets.nth(1)).toHaveClass(
-    /swiper-pagination-bullet-active/,
-  );
+  await expect(slides.nth(1)).toHaveClass(/present/);
 
   await takeScreenshot(page, __filename);
 
-  // Navigate back to first slide using left arrow key
   await page.keyboard.press("ArrowLeft");
-
-  // Verify we're back on the first slide
-  await expect(paginationBullets.first()).toHaveClass(
-    /swiper-pagination-bullet-active/,
-  );
+  await expect(slides.nth(0)).toHaveClass(/present/);
 });
 
 test("slides fullscreen", async ({ page }) => {
   await openCommandPalette({ page, command: "Present as Slides" });
 
-  // Wait for slides mode - Swiper adds .swiper class and component has .mo-slides-theme
-  const slidesContainer = page.locator(".swiper.mo-slides-theme");
+  // Wait for slides mode - reveal.js adds .reveal class
+  const slidesContainer = page.locator(".reveal.mo-slides-theme");
   await expect(slidesContainer).toBeVisible();
 
-  // Test buttons
-  await expect(page.getByText("Fullscreen")).toBeVisible();
-  await page.getByText("Fullscreen").click();
+  // Fullscreen button is hidden until hover
+  const fullscreenButton = page.getByTestId("marimo-plugin-slides-fullscreen");
+  const slidesWrapper = slidesContainer.locator("..");
+  await slidesWrapper.hover();
+  await expect(fullscreenButton).toBeVisible();
 
-  await expect(page.getByText("Exit Fullscreen")).toBeVisible();
-  await page.getByText("Exit Fullscreen").click();
+  // Enter fullscreen
+  await fullscreenButton.click();
 
-  await expect(page.getByText("Fullscreen")).toBeVisible();
-  await page.getByText("Fullscreen").click();
-
-  // Test Escape key for exiting fullscreen
+  // Exit fullscreen with Escape
   await page.keyboard.press("Escape");
-  await expect(page.getByText("Fullscreen")).toBeVisible();
+
+  // Slides container should still be visible after exiting fullscreen
+  await expect(slidesContainer).toBeVisible();
 });

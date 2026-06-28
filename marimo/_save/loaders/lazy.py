@@ -1,11 +1,14 @@
 # Copyright 2026 Marimo. All rights reserved.
 from __future__ import annotations
 
+import importlib
+import inspect
 import pickle
 import queue
 import threading
+from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import msgspec
 
@@ -18,11 +21,15 @@ from marimo._save.hash import HashKey
 from marimo._save.loaders.loader import BasePersistenceLoader
 from marimo._save.stores import FileStore, Store
 from marimo._save.stubs import (
-    LAZY_STUB_LOOKUP,
+    ClassStub,
     FunctionStub,
     ModuleStub,
 )
 from marimo._save.stubs.lazy_stub import (
+    _LAZY_STUB_CACHE,
+    BLOB_DESERIALIZERS,
+    BLOB_SERIALIZERS,
+    LAZY_STUB_LOOKUP,
     Cache as CacheSchema,
     CacheType,
     ImmediateReferenceStub,
@@ -30,37 +37,106 @@ from marimo._save.stubs.lazy_stub import (
     Meta,
     ReferenceStub,
 )
+from marimo._save.stubs.stubs import mro_lookup
 
 LOGGER = _loggers.marimo_logger()
 
 
+class _BlobStatus(Enum):
+    """Sentinel placed in the results queue when a blob is missing."""
+
+    MISSING = auto()
+
+
+def maybe_update_lazy_stub(value: Any) -> str:
+    """Return the loader strategy string for *value*, caching the result.
+
+    Walks the MRO of `type(value)` against `LAZY_STUB_LOOKUP` (a
+    fq-class-name → loader-string registry).  Falls back to `"pickle"`
+    when no match is found.
+    """
+    value_type = type(value)
+    if value_type in _LAZY_STUB_CACHE:
+        return _LAZY_STUB_CACHE[value_type]
+    result = mro_lookup(value_type, LAZY_STUB_LOOKUP)
+    loader = result[1] if result else "pickle"
+    _LAZY_STUB_CACHE[value_type] = loader
+    return loader
+
+
+def _maybe_import_ref(value: Any) -> tuple[str, str] | None:
+    """Return `(module, qualname)` if *value* is re-importable by name,
+    else `None`.
+    """
+    if not (
+        inspect.isclass(value)
+        or inspect.isroutine(value)
+        or type(value).__module__ == "typing"
+    ):
+        return None
+    module = getattr(value, "__module__", None)
+    qualname = (
+        getattr(value, "__qualname__", None)
+        or getattr(value, "__name__", None)
+        or getattr(value, "_name", None)
+    )
+    if not module or module == "__main__" or not qualname:
+        return None
+    try:
+        obj: Any = importlib.import_module(module)
+        for part in qualname.split("."):
+            obj = getattr(obj, part)
+    except (ImportError, AttributeError):
+        return None
+    return (module, qualname) if obj is value else None
+
+
 def to_item(
     path: Path,
-    value: Optional[Any],
+    value: Any | None,
     var_name: str = "",
-    loader: Optional[str] = None,
-    hash: Optional[str] = "",  # noqa: A002
+    loader: str | None = None,
+    hash: str | None = "",  # noqa: A002
 ) -> Item:
     if value is None:
         return Item()
 
     if loader is None:
-        loader = LAZY_STUB_LOOKUP.get(type(value), "pickle")
+        loader = maybe_update_lazy_stub(value)
+
+    type_hint = f"{type(value).__module__}.{type(value).__name__}"
 
     if loader == "pickle":
+        # A re-importable reference is stored inline rather than as a blob.
+        ref = _maybe_import_ref(value)
+        if ref is not None:
+            return Item(import_ref=ref)
+    if loader in ("pickle", "npy", "arrow", "pt"):
+        # Blob strategies: the file extension is the loader name, matching
+        # the path `save_cache` writes (`{var}.{loader}`). Listing them
+        # together keeps a new format (e.g. `pt`) from silently falling
+        # through to the `.pickle` fallback and mismatching its blob.
         return Item(
-            reference=(path / f"{var_name}.pickle").as_posix(), hash=hash
+            reference=(path / f"{var_name}.{loader}").as_posix(),
+            hash=hash,
+            type_hint=type_hint,
         )
     if loader == "ui":
         return Item(reference=(path / "ui.pickle").as_posix())
     if isinstance(value, FunctionStub):
         return Item(function=value.dump())
+    if isinstance(value, ClassStub):
+        return Item(class_def=value.dump())
     if isinstance(value, ModuleStub):
         return Item(module=value.name)
     if isinstance(value, (int, str, float, bool, bytes, type(None))):
         return Item(primitive=value)
 
-    return Item(reference=(path / f"{var_name}.pickle").as_posix(), hash=hash)
+    return Item(
+        reference=(path / f"{var_name}.pickle").as_posix(),
+        hash=hash,
+        type_hint=type_hint,
+    )
 
 
 def from_item(item: Item) -> Any:
@@ -72,10 +148,18 @@ def from_item(item: Item) -> Any:
         mod_stub = ModuleStub.__new__(ModuleStub)
         mod_stub.name = item.module
         return mod_stub
+    if item.import_ref is not None:
+        module, qualname = item.import_ref
+        obj: Any = importlib.import_module(module)
+        for part in qualname.split("."):
+            obj = getattr(obj, part)
+        return obj
     if item.function is not None:
         fn_stub = FunctionStub.__new__(FunctionStub)
         fn_stub.code, fn_stub.filename, fn_stub.lineno = item.function
         return fn_stub
+    if item.class_def is not None:
+        return ClassStub.from_dump(item.class_def)
     if item.primitive is not None:
         return item.primitive
     return None
@@ -88,7 +172,7 @@ class LazyLoader(BasePersistenceLoader):
     def __init__(
         self,
         name: str,
-        store: Optional[Store] = None,
+        store: Store | None = None,
     ) -> None:
         if store is None:
             store = LazyStore()
@@ -101,9 +185,14 @@ class LazyLoader(BasePersistenceLoader):
             t.join()
         self._pending.clear()
 
-    def load_cache(self, key: HashKey) -> Optional[Cache]:
+    def load_cache(
+        self,
+        key: HashKey,
+        glbls: dict[str, Any] | None = None,
+    ) -> Cache | None:
+        del glbls
         try:
-            blob: Optional[bytes] = self.store.get(str(self.build_path(key)))
+            blob: bytes | None = self.store.get(str(self.build_path(key)))
             if not blob:
                 return None
             return self.restore_cache(key, blob)
@@ -117,60 +206,100 @@ class LazyLoader(BasePersistenceLoader):
 
         # Collect references to load
         ref_vars: dict[str, str] = {}
+        ref_type_hints: dict[str, str | None] = {}
         variable_hashes: dict[str, str] = {}
+        # Instances of cell-defined (__main__) classes are deferred: their
+        # class must be re-exec'd into __main__ before the blob can unpickle.
+        # Cache.restore orders these after their class via `requires`.
+        deferred: dict[str, tuple[str, str]] = {}
         for var_name, item in cache_data.defs.items():
             if var_name in cache_data.ui_defs:
                 ref_vars[var_name] = (base / "ui.pickle").as_posix()
             elif item.reference is not None:
-                ref_vars[var_name] = item.reference
+                if item.type_hint and item.type_hint.startswith("__main__."):
+                    deferred[var_name] = (
+                        item.reference,
+                        item.type_hint.rsplit(".", 1)[-1],
+                    )
+                else:
+                    ref_vars[var_name] = item.reference
+                    ref_type_hints[item.reference] = item.type_hint
             if item.hash:
                 variable_hashes[var_name] = item.hash
 
         # Eagerly resolve return value reference alongside defs
-        return_ref: Optional[str] = None
+        return_ref: str | None = None
+        return_type_hint: str | None = None
         if (
             cache_data.meta.return_value
             and cache_data.meta.return_value.reference
         ):
             return_ref = cache_data.meta.return_value.reference
+            return_type_hint = cache_data.meta.return_value.type_hint
 
-        # Read + unpickle in parallel, stream results via queue
+        # Read + deserialize in parallel, stream results via queue.
+        # Every thread unconditionally puts exactly one item — either the
+        # deserialized value or _BlobStatus.MISSING — so queue.get() needs
+        # no timeout.
         results: queue.Queue[tuple[str, Any]] = queue.Queue()
         unique_keys = set(ref_vars.values())
         if return_ref:
             unique_keys.add(return_ref)
 
-        def _load_and_unpickle(key: str) -> None:
-            data = self.store.get(key)
-            if data:
-                results.put((key, pickle.loads(data)))
+        def _load_blob(key: str) -> None:
+            try:
+                data = self.store.get(key)
+                if data:
+                    ext = Path(key).suffix
+                    deserialize = BLOB_DESERIALIZERS.get(
+                        ext, BLOB_DESERIALIZERS[".pickle"]
+                    )
+                    type_hint = ref_type_hints.get(key) or (
+                        return_type_hint if key == return_ref else None
+                    )
+                    results.put((key, deserialize(data, type_hint)))
+                else:
+                    results.put((key, _BlobStatus.MISSING))
+            except Exception as e:
+                LOGGER.warning("Failed to deserialize blob %s: %s", key, e)
+                results.put((key, _BlobStatus.MISSING))
 
         threads = [
-            threading.Thread(target=_load_and_unpickle, args=(key,))
+            threading.Thread(target=_load_blob, args=(key,))
             for key in unique_keys
         ]
         for t in threads:
             t.start()
 
-        # Stream results as they arrive
+        # N threads → N results guaranteed; no timeout needed.
         unpickled: dict[str, Any] = {}
-        for _ in unique_keys:
-            try:
-                key, val = results.get(timeout=30)
+        try:
+            for _ in unique_keys:
+                key, val = results.get()
+                if val is _BlobStatus.MISSING:
+                    raise FileNotFoundError("Incomplete cache: missing blobs")
                 unpickled[key] = val
-            except queue.Empty:
-                break
-
-        for t in threads:
-            t.join()
-
-        if len(unpickled) < len(unique_keys):
-            raise FileNotFoundError("Incomplete cache: missing blobs")
+        finally:
+            for t in threads:
+                t.join()
 
         # Distribute to defs
         defs: dict[str, Any] = {}
         for var_name, item in cache_data.defs.items():
-            if var_name in ref_vars:
+            if var_name in deferred:
+                ref, requires = deferred[var_name]
+                # Read the bytes now (via this loader's store); defer only
+                # the unpickle until Cache.restore has materialized the class.
+                raw = self.store.get(ref)
+                if not raw:
+                    raise FileNotFoundError("Incomplete cache: missing blobs")
+                stub = ImmediateReferenceStub(
+                    ReferenceStub(ref, hash_value=item.hash or "", blob=raw)
+                )
+                # Tag the cell class this instance needs materialized first.
+                stub.requires = requires
+                defs[var_name] = stub
+            elif var_name in ref_vars:
                 ref_key = ref_vars[var_name]
                 val = unpickled.get(ref_key)
                 if var_name in cache_data.ui_defs and isinstance(val, dict):
@@ -210,32 +339,40 @@ class LazyLoader(BasePersistenceLoader):
             path, cache.meta.get("return", None), var_name="return"
         )
         if return_item.reference:
-            return_item.reference = (path / "return.pickle").as_posix()
+            # Normalize base name to "return" while preserving format extension.
+            ext = Path(return_item.reference).suffix
+            return_item.reference = (path / f"return{ext}").as_posix()
 
         try:
             cache_type_enum = CacheType(cache.cache_type)
         except ValueError:
             cache_type_enum = CacheType.UNKNOWN
 
-        pickle_vars: dict[str, Any] = {}
+        # Separate vars by loader strategy
+        format_vars: dict[str, dict[str, Any]] = {}  # loader → {var: obj}
         ui_vars: dict[str, Any] = {}
         defs_dict: dict[str, Item] = {}
         ui_defs_list: list[str] = []
 
         for var, obj in cache.defs.items():
-            loader = LAZY_STUB_LOOKUP.get(type(obj), "pickle")
-            if loader == "pickle":
-                pickle_vars[var] = obj
-            elif loader == "ui":
-                ui_vars[var] = obj
-                ui_defs_list.append(var)
-            defs_dict[var] = to_item(
+            loader = maybe_update_lazy_stub(obj)
+            item = to_item(
                 path,
                 obj,
                 var_name=var,
                 loader=loader,
                 hash=variable_hashes.get(var, ""),
             )
+            defs_dict[var] = item
+            if item.import_ref is not None:
+                # Re-importable reference: lives inline in the manifest,
+                # no blob to write.
+                continue
+            if loader == "ui":
+                ui_vars[var] = obj
+                ui_defs_list.append(var)
+            elif loader not in ("inline",):
+                format_vars.setdefault(loader, {})[var] = obj
 
         manifest = msgspec.json.encode(
             CacheSchema(
@@ -255,23 +392,33 @@ class LazyLoader(BasePersistenceLoader):
         store = self.store
         return_ref = return_item.reference
         return_value = cache.meta.get("return", None)
+        return_loader = (
+            maybe_update_lazy_stub(return_value)
+            if return_value is not None
+            else "pickle"
+        )
         manifest_key = str(self.build_path(cache.key))
 
         def _serialize_and_write() -> None:
             """Serialize and write all blobs + manifest in background."""
             try:
                 if return_ref:
-                    store.put(return_ref, pickle.dumps(return_value))
+                    serialize = BLOB_SERIALIZERS.get(
+                        return_loader, pickle.dumps
+                    )
+                    store.put(return_ref, serialize(return_value))
                 if ui_vars:
                     store.put(
                         (path / "ui.pickle").as_posix(),
                         pickle.dumps(ui_vars),
                     )
-                for var, obj in pickle_vars.items():
-                    store.put(
-                        (path / f"{var}.pickle").as_posix(),
-                        pickle.dumps(obj),
-                    )
+                for loader, vars_dict in format_vars.items():
+                    serialize = BLOB_SERIALIZERS.get(loader, pickle.dumps)
+                    for var, obj in vars_dict.items():
+                        store.put(
+                            (path / f"{var}.{loader}").as_posix(),
+                            serialize(obj),
+                        )
                 # Manifest last — readers check for it to detect complete writes
                 store.put(manifest_key, manifest)
             except Exception:
@@ -282,7 +429,7 @@ class LazyLoader(BasePersistenceLoader):
         self._pending.append(t)
         return True
 
-    def to_blob(self, cache: Cache) -> Optional[bytes]:
+    def to_blob(self, cache: Cache) -> bytes | None:
         # Not used — save_cache is overridden. Kept for interface compliance.
         del cache
         return None

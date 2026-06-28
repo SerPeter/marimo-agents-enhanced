@@ -4,8 +4,11 @@ from __future__ import annotations
 from functools import partial
 from typing import cast
 
+import pytest
+
 from marimo._ast import compiler
 from marimo._ast.names import SETUP_CELL_NAME
+from marimo._dependencies.dependencies import DependencyManager
 from marimo._lint.validate_graph import check_for_errors
 from marimo._messaging.errors import (
     CycleError,
@@ -13,8 +16,10 @@ from marimo._messaging.errors import (
     SetupRootError,
 )
 from marimo._runtime import dataflow
+from marimo._types.ids import CellId_t
 
 parse_cell = partial(compiler.compile_cell, cell_id="0")
+HAS_DUCKDB = DependencyManager.duckdb.has()
 
 
 def test_multiple_definition_error() -> None:
@@ -22,13 +27,13 @@ def test_multiple_definition_error() -> None:
     graph.register_cell("0", parse_cell("x = 0"))
     graph.register_cell("1", parse_cell("x = 1"))
     errors = check_for_errors(graph)
-    assert set(errors.keys()) == set(["0", "1"])
+    assert set(errors.keys()) == {"0", "1"}
     assert errors["0"] == (MultipleDefinitionError(name="x", cells=("1",)),)
     assert errors["1"] == (MultipleDefinitionError(name="x", cells=("0",)),)
 
     graph.register_cell("2", parse_cell("x = 1"))
     errors = check_for_errors(graph)
-    assert set(errors.keys()) == set(["0", "1", "2"])
+    assert set(errors.keys()) == {"0", "1", "2"}
     assert errors["0"] == (
         MultipleDefinitionError(name="x", cells=("1", "2")),
     )
@@ -46,13 +51,42 @@ def test_overlapping_multiple_definition_errors() -> None:
     graph.register_cell("1", parse_cell("x, y = 1, 2"))
     graph.register_cell("2", parse_cell("y, z = 3, 4"))
     errors = check_for_errors(graph)
-    assert set(errors.keys()) == set(["0", "1", "2"])
+    assert set(errors.keys()) == {"0", "1", "2"}
     assert errors["0"] == (MultipleDefinitionError(name="x", cells=("1",)),)
     assert errors["1"] == (
         MultipleDefinitionError(name="x", cells=("0",)),
         MultipleDefinitionError(name="y", cells=("2",)),
     )
     assert errors["2"] == (MultipleDefinitionError(name="y", cells=("1",)),)
+
+
+@pytest.mark.skipif(not HAS_DUCKDB, reason="duckdb is required")
+def test_sql_multiple_definition_errors_use_qualified_names() -> None:
+    graph = dataflow.DirectedGraph()
+    graph.register_cell(
+        CellId_t("0"),
+        parse_cell('mo.sql("CREATE TABLE finance.datalake.xx (id INT)")'),
+    )
+    graph.register_cell(
+        CellId_t("1"),
+        parse_cell(
+            'mo.sql("CREATE TABLE finance.information_layer.xx (id INT)")'
+        ),
+    )
+    graph.register_cell(
+        CellId_t("2"),
+        parse_cell('mo.sql("CREATE TABLE finance.datalake.xx (id INT)")'),
+    )
+
+    errors = check_for_errors(graph)
+
+    assert set(errors.keys()) == {CellId_t("0"), CellId_t("2")}
+    assert errors[CellId_t("0")] == (
+        MultipleDefinitionError(name="xx", cells=(CellId_t("2"),)),
+    )
+    assert errors[CellId_t("2")] == (
+        MultipleDefinitionError(name="xx", cells=(CellId_t("0"),)),
+    )
 
 
 def test_underscore_variables_are_private() -> None:
@@ -74,7 +108,7 @@ def test_two_node_cycle() -> None:
     graph.register_cell("0", parse_cell("x = y"))
     graph.register_cell("1", parse_cell("y = x"))
     errors = check_for_errors(graph)
-    assert set(errors.keys()) == set(["0", "1"])
+    assert set(errors.keys()) == {"0", "1"}
     # Edge ordering in returned error is not deterministic, so we list both
     # possible cycles
     expected_cycle = [
@@ -93,7 +127,7 @@ def test_three_node_cycle() -> None:
     graph.register_cell("1", parse_cell("y = z"))
     graph.register_cell("2", parse_cell("z = x"))
     errors = check_for_errors(graph)
-    assert set(errors.keys()) == set(["0", "1", "2"])
+    assert set(errors.keys()) == {"0", "1", "2"}
     for t in errors.values():
         assert len(t) == 1
         assert isinstance(t[0], CycleError)
@@ -109,7 +143,7 @@ def test_cycle_and_multiple_def() -> None:
     graph.register_cell("0", parse_cell("x, z = y, 0"))
     graph.register_cell("1", parse_cell("y, z = x, 0"))
     errors = check_for_errors(graph)
-    assert set(errors.keys()) == set(["0", "1"])
+    assert set(errors.keys()) == {"0", "1"}
     for cell, t in errors.items():
         assert len(t) == 2
         assert isinstance(t[0], CycleError) or isinstance(t[1], CycleError)
@@ -157,7 +191,7 @@ def test_setup_has_refs() -> None:
     graph.register_cell(SETUP_CELL_NAME, parse_cell("z = y"))
     graph.register_cell("0", parse_cell("y = 1"))
     errors = check_for_errors(graph)
-    assert set(errors.keys()) == set([SETUP_CELL_NAME])
+    assert set(errors.keys()) == {SETUP_CELL_NAME}
     for t in errors.values():
         assert len(t) == 1
         assert isinstance(t[0], SetupRootError)

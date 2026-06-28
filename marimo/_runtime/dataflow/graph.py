@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, Literal, Optional
+from typing import TYPE_CHECKING, Literal
 
 from marimo import _loggers
 from marimo._ast.compiler import code_key
@@ -19,7 +19,7 @@ from marimo._runtime.dataflow.topology import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from marimo._ast.cell import CellImpl
     from marimo._ast.visitor import ImportData, Name, VariableData
@@ -46,6 +46,15 @@ class DirectedGraph(GraphTopology):
         default_factory=DefinitionRegistry
     )
     cycle_tracker: CycleTracker = field(default_factory=CycleTracker)
+
+    # Cell ids whose last post-execution broadcast advertised a top-level
+    # reusability hint. Tracked here (not on the per-run CellImpl, which is
+    # replaced when a cell's code changes) so the hint can be cleared exactly
+    # on the top-level -> non-top-level transition. Not topology; broadcast
+    # bookkeeping that needs to survive cell re-registration.
+    cells_serving_serialization_hint: set[CellId_t] = field(
+        default_factory=set
+    )
 
     # This lock must be acquired during methods that mutate the graph; it's
     # only needed because a graph is shared between the kernel and the code
@@ -142,6 +151,14 @@ class DirectedGraph(GraphTopology):
             for cid in self.ancestors(cell_id)
         )
 
+    def is_any_ancestor_errored(self, cell_id: CellId_t) -> bool:
+        """Check if any ancestor of a cell has an error."""
+        return any(
+            self.topology.cells[cid].run_result_status
+            in ("exception", "marimo-error")
+            for cid in self.ancestors(cell_id)
+        )
+
     def disable_cell(self, cell_id: CellId_t) -> None:
         """Disables a cell in the graph.
 
@@ -202,7 +219,9 @@ class DirectedGraph(GraphTopology):
 
             # Removing this cell from its defs' definer sets
             cell = self.topology.cells[cell_id]
-            self.definition_registry.unregister_definitions(cell_id, cell.defs)
+            self.definition_registry.unregister_definitions(
+                cell_id, cell.variable_data
+            )
 
             # Remove cycles that are broken from removing this cell
             edges = [
@@ -241,7 +260,7 @@ class DirectedGraph(GraphTopology):
         return False
 
     def get_imports(
-        self, cell_id: Optional[CellId_t] = None
+        self, cell_id: CellId_t | None = None
     ) -> dict[Name, ImportData]:
         """Get imports from cell(s)."""
         imports = {}
@@ -257,6 +276,12 @@ class DirectedGraph(GraphTopology):
 
     def get_multiply_defined(self) -> list[Name]:
         """Return a list of names that are defined in multiple cells."""
+        return [name for name, _ in self.get_multiply_defined_conflicts()]
+
+    def get_multiply_defined_conflicts(
+        self,
+    ) -> list[tuple[Name, set[CellId_t]]]:
+        """Return multiply-defined names with their conflicting cells."""
         return self.definition_registry.get_multiply_defined()
 
     def get_deleted_nonlocal_ref(self) -> list[Name]:

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Literal, Optional, cast
+from typing import Literal, cast
 
 from marimo._types.ids import CellId_t
 
@@ -14,6 +14,7 @@ class Severity(Enum):
     FORMATTING = "formatting"  # prefix: MF0000
     RUNTIME = "runtime"  # prefix: MR0000
     BREAKING = "breaking"  # prefix: MB0000
+    WASM = "wasm"  # prefix: MW0000
 
 
 def line_num(line: int) -> str:
@@ -29,12 +30,12 @@ class Diagnostic:
     line: int | list[int]
     column: int | list[int]
     cell_id: None | list[CellId_t] = None
-    code: Optional[str] = None
-    name: Optional[str] = None
-    severity: Optional[Severity] = None
+    code: str | None = None
+    name: str | None = None
+    severity: Severity | None = None
     fixable: bool | Literal["unsafe"] | None = None
-    fix: Optional[str] = None
-    filename: Optional[str] = None
+    fix: str | None = None
+    filename: str | None = None
 
     def format(
         self,
@@ -79,5 +80,7 @@ class Diagnostic:
         # mypy seems unable to infer the type
         return cast(
             tuple[tuple[int], tuple[int]],
-            tuple(zip(*sorted(zip(lines, columns)))),
+            tuple(
+                zip(*sorted(zip(lines, columns, strict=False)), strict=False)
+            ),
         )

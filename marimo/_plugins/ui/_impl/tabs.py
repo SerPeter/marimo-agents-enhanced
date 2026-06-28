@@ -1,13 +1,16 @@
 # Copyright 2026 Marimo. All rights reserved.
 from __future__ import annotations
 
-from typing import Callable, Final, Optional
+from typing import TYPE_CHECKING, Final, Literal
 
 from marimo._output.formatting import as_html
 from marimo._output.md import md
 from marimo._output.rich_help import mddoc
 from marimo._plugins.stateless.lazy import lazy as lazy_ui
 from marimo._plugins.ui._core.ui_element import UIElement
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 @mddoc
@@ -38,6 +41,14 @@ class tabs(UIElement[str, str]):
         )
         ```
 
+        Stack tabs vertically (useful when there are many tabs or long labels):
+        ```python
+        tabs = mo.ui.tabs(
+            {f"Section {i}": f"Content {i}" for i in range(20)},
+            orientation="vertical",
+        )
+        ```
+
     Attributes:
         value (str): The name of the selected tab.
 
@@ -48,6 +59,8 @@ class tabs(UIElement[str, str]):
         lazy (bool, optional): Whether to lazily load the tab content.
             This is a convenience that wraps each tab in a `mo.lazy`
             component. Defaults to False.
+        orientation ("horizontal" | "vertical", optional): The orientation of
+            the tab bar. Use "vertical" to stack the tabs in a side panel. Defaults to "horizontal".
         label (str, optional): A descriptive name for the tab. Defaults to "".
         on_change (Callable[[dict[str, object]], None], optional): Optional callback
             to run when this element's value changes.
@@ -58,11 +71,12 @@ class tabs(UIElement[str, str]):
     def __init__(
         self,
         tabs: dict[str, object],
-        value: Optional[str] = None,
+        value: str | None = None,
         lazy: bool = False,
         *,
+        orientation: Literal["horizontal", "vertical"] = "horizontal",
         label: str = "",
-        on_change: Optional[Callable[[str], None]] = None,
+        on_change: Callable[[str], None] | None = None,
     ) -> None:
         def render_content(tab: object) -> str:
             if lazy:
@@ -79,7 +93,7 @@ class tabs(UIElement[str, str]):
         )
 
         self._tab_keys = list(tabs.keys())
-        tab_labels = list(md(label).text for label in tabs.keys())
+        tab_labels = [md(label).text for label in tabs]
 
         index = (
             str(self._tab_keys.index(value))
@@ -91,7 +105,7 @@ class tabs(UIElement[str, str]):
             component_name=self._name,
             initial_value=index or "",
             label=label,
-            args={"tabs": tab_labels},
+            args={"tabs": tab_labels, "orientation": orientation},
             on_change=on_change,
             slotted_html=tab_items,
         )

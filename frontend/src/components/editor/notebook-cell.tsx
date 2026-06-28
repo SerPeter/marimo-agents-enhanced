@@ -27,6 +27,7 @@ import { Tooltip, TooltipProvider } from "@/components/ui/tooltip";
 import { aiCompletionCellAtom } from "@/core/ai/state";
 import { outputIsLoading, outputIsStale } from "@/core/cells/cell";
 import { isOutputEmpty } from "@/core/cells/outputs";
+import { useIsPendingCut } from "@/core/cells/pending-cut-service";
 import { autocompletionKeymap } from "@/core/codemirror/cm";
 import type { LanguageAdapterType } from "@/core/codemirror/language/types";
 import { CSSClasses } from "@/core/constants";
@@ -48,12 +49,15 @@ import {
   useCellRuntime,
 } from "../../core/cells/cells";
 import { type CellId, SETUP_CELL_ID } from "../../core/cells/ids";
-import { isUninstantiated } from "../../core/cells/utils";
+import {
+  cellNeedsRun,
+  cellStatusClasses,
+  isUninstantiated,
+} from "../../core/cells/utils";
 import type { UserConfig } from "../../core/config/config-schema";
 import { isAppInteractionDisabled } from "../../core/websocket/connection-utils";
 import { useCellRenderCount } from "../../hooks/useCellRenderCount";
 import type { Theme } from "../../theme/useTheme";
-import { derefNotNull } from "../../utils/dereference";
 import { Functions } from "../../utils/functions";
 import { Logger } from "../../utils/Logger";
 import { renderShortcut } from "../shortcuts/renderShortcut";
@@ -228,8 +232,9 @@ export type CellComponentActions = Pick<
 export interface CellHandle {
   /**
    * The CodeMirror editor view.
+   * TODO: merge this with editorViewOrNull
    */
-  editorView: EditorView;
+  editorView: EditorView | null;
   /**
    * The CodeMirror editor view, or null if it is not yet mounted.
    */
@@ -275,7 +280,7 @@ const CellComponent = (props: CellProps) => {
     ref,
     () => ({
       get editorView() {
-        return derefNotNull(editorView);
+        return editorView.current;
       },
       get editorViewOrNull() {
         return editorView.current;
@@ -387,11 +392,9 @@ const EditableCellComponent = ({
   const deleteCell = useDeleteCellCallback();
   const runCell = useRunCell(cellId);
   const { sendStdin } = useRequestClient();
+  const isPendingCut = useIsPendingCut(cellId);
 
   const [languageAdapter, setLanguageAdapter] = useState<LanguageAdapterType>();
-
-  const disabledOrAncestorDisabled =
-    cellData.config.disabled || cellRuntime.status === "disabled-transitively";
 
   const uninstantiated = isUninstantiated({
     executionTime: cellRuntime.runElapsedTimeMs ?? cellData.lastExecutionTime,
@@ -401,10 +404,13 @@ const EditableCellComponent = ({
     stopped: cellRuntime.stopped,
   });
 
-  const needsRun =
-    cellData.edited ||
-    cellRuntime.interrupted ||
-    (cellRuntime.staleInputs && !disabledOrAncestorDisabled);
+  const needsRun = cellNeedsRun({
+    edited: cellData.edited,
+    interrupted: cellRuntime.interrupted,
+    staleInputs: cellRuntime.staleInputs,
+    disabled: cellData.config.disabled,
+    status: cellRuntime.status,
+  });
 
   const loading = outputIsLoading(cellRuntime.status);
 
@@ -532,13 +538,16 @@ const EditableCellComponent = ({
 
   const className = clsx("marimo-cell", "hover-actions-parent z-10", {
     interactive: true,
-    "needs-run": needsRun,
-    "has-error": cellRuntime.errored,
-    stopped: cellRuntime.stopped,
-    disabled: cellData.config.disabled,
-    stale: cellRuntime.status === "disabled-transitively",
+    ...cellStatusClasses({
+      needsRun,
+      errored: cellRuntime.errored,
+      stopped: cellRuntime.stopped,
+      disabled: cellData.config.disabled,
+      status: cellRuntime.status,
+    }),
     borderless:
       isMarkdownCodeHidden && hasOutput && !navigationProps["data-selected"],
+    "pending-cut": isPendingCut,
   });
 
   const handleRefactorWithAI: OnRefactorWithAI = useEvent(
@@ -731,6 +740,7 @@ const EditableCellComponent = ({
             <ConsoleOutput
               consoleOutputs={cellRuntime.consoleOutputs}
               stale={consoleOutputStale}
+              interrupted={cellRuntime.interrupted}
               // Empty name if serialization triggered
               cellName={cellRuntime.serialization ? "_" : cellData.name}
               onRefactorWithAI={handleRefactorWithAI}
@@ -979,9 +989,6 @@ const SetupCellComponent = ({
   const setAiCompletionCell = useSetAtom(aiCompletionCellAtom);
   const runCell = useRunCell(cellId);
 
-  const disabledOrAncestorDisabled =
-    cellData.config.disabled || cellRuntime.status === "disabled-transitively";
-
   const uninstantiated = isUninstantiated({
     executionTime: cellRuntime.runElapsedTimeMs ?? cellData.lastExecutionTime,
     status: cellRuntime.status,
@@ -990,10 +997,13 @@ const SetupCellComponent = ({
     stopped: cellRuntime.stopped,
   });
 
-  const needsRun =
-    cellData.edited ||
-    cellRuntime.interrupted ||
-    (cellRuntime.staleInputs && !disabledOrAncestorDisabled);
+  const needsRun = cellNeedsRun({
+    edited: cellData.edited,
+    interrupted: cellRuntime.interrupted,
+    staleInputs: cellRuntime.staleInputs,
+    disabled: cellData.config.disabled,
+    status: cellRuntime.status,
+  });
   const loading =
     cellRuntime.status === "running" || cellRuntime.status === "queued";
 
@@ -1034,9 +1044,13 @@ const SetupCellComponent = ({
 
   const className = clsx("marimo-cell", "hover-actions-parent z-10", {
     interactive: true,
-    "needs-run": needsRun,
-    "has-error": cellRuntime.errored,
-    stopped: cellRuntime.stopped,
+    ...cellStatusClasses({
+      needsRun,
+      errored: cellRuntime.errored,
+      stopped: cellRuntime.stopped,
+      disabled: cellData.config.disabled,
+      status: cellRuntime.status,
+    }),
   });
 
   const handleRefactorWithAI: OnRefactorWithAI = useEvent(
@@ -1191,6 +1205,7 @@ const SetupCellComponent = ({
             <ConsoleOutput
               consoleOutputs={cellRuntime.consoleOutputs}
               stale={consoleOutputStale}
+              interrupted={cellRuntime.interrupted}
               // Don't show name
               cellName={"_"}
               onRefactorWithAI={handleRefactorWithAI}

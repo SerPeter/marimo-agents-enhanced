@@ -47,7 +47,7 @@ and deployable as apps.
 - 🖐️ **interactive:** [bind sliders, tables, plots, and more](https://docs.marimo.io/guides/interactivity.html) to Python — no callbacks required
 - 🐍 **git-friendly:** stored as `.py` files
 - 🛢️ **designed for data**: query dataframes, databases, warehouses, or lakehouses [with SQL](https://docs.marimo.io/guides/working_with_data/sql.html), filter and search [dataframes](https://docs.marimo.io/guides/working_with_data/dataframes.html)
-- 🤖 **AI-native**: [generate cells with AI](https://docs.marimo.io/guides/generate_with_ai/) tailored for data work
+- 🤖 **AI-native**: [connect agent CLIs](https://docs.marimo.io/guides/generate_with_ai/marimo_pair/) like Claude Code to notebooks, or use our editor's [built-in AI features](https://docs.marimo.io/guides/editor_features/ai_completion/)
 - 🔬 **reproducible:** [no hidden state](https://docs.marimo.io/guides/reactivity.html#no-hidden-state), deterministic execution, [built-in package management](https://docs.marimo.io/guides/package_management/)
 - 🏃 **executable:** [execute as a Python script](https://docs.marimo.io/guides/scripts.html), parameterized by CLI args
 - 🛜 **shareable**: [deploy as an interactive web app](https://docs.marimo.io/guides/apps.html) or [slides](https://docs.marimo.io/guides/apps.html#slides-layout), [run in the browser via WASM](https://docs.marimo.io/guides/wasm.html)
@@ -100,11 +100,14 @@ millions of rows blazingly fast, no code required.
 
 <img src="https://raw.githubusercontent.com/marimo-team/marimo/main/docs/_static/docs-df.gif" width="700px" />
 
-**Generate cells with data-aware AI.** [Generate code with an AI
-assistant](https://docs.marimo.io/guides/editor_features/ai_completion/) that is highly
-specialized for working with data, with context about your variables in memory;
-[zero-shot entire notebooks](https://docs.marimo.io/guides/generate_with_ai/text_to_notebook/).
-Customize the system prompt, bring your own API keys, or use local models.
+**Generate cells with data-aware AI.** Collaborate on marimo notebooks with
+your favorite agent, such as Claude Code, Codex, or OpenCode, using [marimo
+pair](https://docs.marimo.io/guides/generate_with_ai/marimo_pair/). Or,
+generate code [in the marimo editor with an AI
+assistant](https://docs.marimo.io/guides/editor_features/ai_completion/) that
+is highly specialized for working with data, with context about your variables
+in memory. Customize the system prompt, bring your own API keys, or use local
+models.
 
 <img src="https://raw.githubusercontent.com/marimo-team/marimo/main/docs/_static/readme-generate-with-ai.gif" width="700px" />
 
@@ -333,6 +336,13 @@ a greater movement toward reactive dataflow programming. From
 [React](https://github.com/facebook/react), the ideas of functional,
 declarative, and reactive programming are transforming a broad range of tools
 for the better.
+
+Finally, we would like to acknowledge [Bennet
+Meyers](https://bmeyers.github.io/about/) and [David
+Chassin](https://www.chassin.org/about/) for believing in marimo from the very
+beginning: this work was supported in part by U.S. DOE Office of Critical
+Minerals and Energy Innovation (CMEI) Integrated Energy Systems Office (IESO),
+Agreement 34368.
 
 <p align="right">
   <img src="https://raw.githubusercontent.com/marimo-team/marimo/main/docs/_static/marimo-logotype-horizontal.png" height="200px">

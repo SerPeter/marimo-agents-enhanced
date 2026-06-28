@@ -29,7 +29,7 @@ export function notebookCells(state: NotebookState) {
 export function notebookCellEditorViews({ cellHandles }: NotebookState) {
   const views: Record<CellId, EditorView> = {};
   for (const [cell, ref] of Objects.entries(cellHandles)) {
-    if (!ref.current) {
+    if (!ref.current?.editorView) {
       continue;
     }
     views[cell] = ref.current.editorView;
@@ -63,6 +63,17 @@ export function enabledCellIds(state: NotebookState) {
 
 export function canUndoDeletes(state: NotebookState) {
   return state.history.length > 0;
+}
+
+/**
+ * Label for the undo action based on the last history entry type.
+ */
+export function getUndoLabel(state: NotebookState): string {
+  const last = state.history[state.history.length - 1];
+  if (!last) {
+    return "Undo cell deletion";
+  }
+  return last.type === "move" ? "Undo move" : "Undo cell deletion";
 }
 
 /**
@@ -139,4 +150,49 @@ export function isUninstantiated({
     // and isn't in an error state.
     !(errored || interrupted || stopped)
   );
+}
+
+/**
+ * Whether a cell needs to be run given its edited / interrupted / stale
+ * inputs, while accounting for ancestor-disabled cells (which should not be
+ * flagged as needing a run until re-enabled).
+ */
+export function cellNeedsRun({
+  edited,
+  interrupted,
+  staleInputs,
+  disabled,
+  status,
+}: {
+  edited: boolean;
+  interrupted: boolean;
+  staleInputs: boolean;
+  disabled: boolean | undefined;
+  status: RuntimeState;
+}): boolean {
+  const disabledOrAncestorDisabled =
+    disabled || status === "disabled-transitively";
+  return edited || interrupted || (staleInputs && !disabledOrAncestorDisabled);
+}
+
+export function cellStatusClasses({
+  needsRun,
+  errored,
+  stopped,
+  disabled,
+  status,
+}: {
+  needsRun: boolean;
+  errored: boolean;
+  stopped: boolean;
+  disabled: boolean | undefined;
+  status: RuntimeState;
+}) {
+  return {
+    "needs-run": needsRun,
+    "has-error": errored,
+    stopped,
+    disabled: disabled ?? false,
+    stale: status === "disabled-transitively",
+  };
 }

@@ -3,11 +3,10 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from marimo._ast.app import AppKernelRunnerRegistry
 from marimo._config.config import MarimoConfig
-from marimo._messaging.types import Stderr, Stdout
 from marimo._plugins.ui._core.ids import IDProvider, NoIDProviderException
 from marimo._runtime.cell_lifecycle_registry import CellLifecycleRegistry
 from marimo._runtime.context.types import (
@@ -24,9 +23,11 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from marimo._ast.app import InternalApp
-    from marimo._messaging.types import Stream
+    from marimo._messaging.types import KernelStreams
+    from marimo._runtime.runner.scheduler import Scheduler
     from marimo._runtime.runtime import Kernel
     from marimo._runtime.state import State
+    from marimo._runtime.virtual_file import VirtualFileStorageType
     from marimo._types.ids import CellId_t
 
 
@@ -38,9 +39,17 @@ class KernelRuntimeContext(RuntimeContext):
     _kernel: Kernel
     _session_mode: SessionMode
     # app that owns this context; None for top-level contexts
-    _app: Optional[InternalApp] = None
-    _id_provider: Optional[IDProvider] = None
-    _execution_context: Optional[ExecutionContext] = None
+    _app: InternalApp | None = None
+    _id_provider: IDProvider | None = None
+    _execution_context: ExecutionContext | None = None
+    # Set while a Scheduler's `async with` is open. Lookup goes through
+    # the currently-installed context — not one captured at install
+    # time — so embedded-app child contexts route SIGINT correctly.
+    _active_scheduler: Scheduler | None = None
+
+    @property
+    def active_scheduler(self) -> Scheduler | None:
+        return self._active_scheduler
 
     @property
     def graph(self) -> DirectedGraph:
@@ -69,7 +78,7 @@ class KernelRuntimeContext(RuntimeContext):
         return self._kernel.lazy()
 
     @property
-    def cell_id(self) -> Optional[CellId_t]:
+    def cell_id(self) -> CellId_t | None:
         """Get the cell id of the currently executing cell, if any."""
         if self.execution_context is not None:
             return self.execution_context.cell_id
@@ -140,10 +149,8 @@ class KernelRuntimeContext(RuntimeContext):
 def create_kernel_context(
     *,
     kernel: Kernel,
-    stream: Stream,
-    stdout: Stdout | None,
-    stderr: Stderr | None,
-    virtual_files_supported: bool,
+    streams: KernelStreams,
+    virtual_file_storage: VirtualFileStorageType | None,
     mode: SessionMode,
     app: InternalApp | None = None,
     parent: KernelRuntimeContext | None = None,
@@ -154,15 +161,17 @@ def create_kernel_context(
         InMemoryStorage,
         SharedMemoryStorage,
         VirtualFileRegistry,
+        VirtualFileStorage,
     )
     from marimo._save.cache import CacheState
     from marimo._save.stores import get_store
 
-    # Use shared memory in edit mode,
-    # in-memory storage in run mode (same process)
-    storage = (
+    # Storage is chosen explicitly by the caller. None means virtual files
+    # are not supported; we still construct an (inert) InMemoryStorage so
+    # the registry has a backend, but ctx.virtual_files_supported is False.
+    storage: VirtualFileStorage = (
         SharedMemoryStorage()
-        if mode == SessionMode.EDIT
+        if virtual_file_storage == "shared_memory"
         else InMemoryStorage()
     )
 
@@ -181,10 +190,10 @@ def create_kernel_context(
             else AppKernelRunnerRegistry()
         ),
         virtual_file_registry=VirtualFileRegistry(storage=storage),
-        virtual_files_supported=virtual_files_supported,
-        stream=stream,
-        stdout=stdout,
-        stderr=stderr,
+        virtual_files_supported=virtual_file_storage is not None,
+        stream=streams.stream,
+        stdout=streams.stdout,
+        stderr=streams.stderr,
         children=[],
         parent=parent,
         filename=kernel.app_metadata.filename,
@@ -195,10 +204,8 @@ def create_kernel_context(
 def initialize_kernel_context(
     *,
     kernel: Kernel,
-    stream: Stream,
-    stdout: Stdout | None,
-    stderr: Stderr | None,
-    virtual_files_supported: bool,
+    streams: KernelStreams,
+    virtual_file_storage: VirtualFileStorageType | None,
     mode: SessionMode,
 ) -> KernelRuntimeContext:
     """Initializes thread-local/session-specific context.
@@ -207,10 +214,8 @@ def initialize_kernel_context(
     """
     ctx = create_kernel_context(
         kernel=kernel,
-        stream=stream,
-        stdout=stdout,
-        stderr=stderr,
-        virtual_files_supported=virtual_files_supported,
+        streams=streams,
+        virtual_file_storage=virtual_file_storage,
         mode=mode,
     )
     initialize_context(runtime_context=ctx)

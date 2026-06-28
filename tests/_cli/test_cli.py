@@ -19,9 +19,10 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -29,21 +30,22 @@ from marimo._ast import codegen
 from marimo._ast.cell import CellConfig
 from marimo._cli.cli import (
     _collect_marimo_files,
-    _create_run_file_router,
+    _create_run_workspace,
+    _split_run_paths_and_args,
     main as cli_main,
 )
 from marimo._config.manager import get_default_config_manager
 from marimo._dependencies.dependencies import DependencyManager
-from marimo._server.file_router import (
-    LazyListOfFilesAppFileRouter,
-    ListOfFilesAppFileRouter,
-)
 from marimo._server.templates.templates import get_version
+from marimo._server.workspace import (
+    DirectoryWorkspace,
+    FixedFilesWorkspace,
+)
 from marimo._utils.platform import is_windows
 from marimo._utils.toml import toml_reader
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 HAS_UV = DependencyManager.which("uv")
 HAS_ZMQ = DependencyManager.zmq.has()
@@ -93,7 +95,7 @@ def _confirm_shutdown(process: subprocess.Popen[Any]) -> None:
 
 def _check_shutdown(
     process: subprocess.Popen[Any],
-    check_fn: Optional[Callable[[int], bool]] = None,
+    check_fn: Callable[[int], bool] | None = None,
 ) -> None:
     max_tries = 3
     tries = 0
@@ -107,15 +109,25 @@ def _check_shutdown(
 
 
 def _try_fetch(
-    port: int, host: str = "localhost", token: Optional[str] = None
-) -> Optional[bytes]:
+    port: int, host: str = "localhost", token: str | None = None
+) -> bytes | None:
+    import http.cookiejar
+
     err: Exception | None = None
     for _ in range(20):
         try:
             url = f"http://{host}:{port}"
             if token is not None:
                 url = f"{url}?access_token={token}"
-            return urllib.request.urlopen(url).read()
+            # The server 303-redirects `/?access_token=...` to strip the
+            # token from the URL, attaching the session cookie to the
+            # redirect. Use a cookie-aware opener so the follow-up request
+            # carries that cookie and lands on the authenticated page
+            # instead of the login screen.
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+            )
+            return opener.open(url).read()
         except Exception as e:
             err = e
             time.sleep(0.6)
@@ -123,7 +135,7 @@ def _try_fetch(
     return None
 
 
-def _check_started(port: int, host: str = "localhost") -> Optional[bytes]:
+def _check_started(port: int, host: str = "localhost") -> bytes | None:
     assert _try_fetch(port, host) is not None
 
 
@@ -141,7 +153,7 @@ def _temp_run_file(directory: tempfile.TemporaryDirectory[str]) -> str:
 def _check_contents(
     p: subprocess.Popen[Any],  # type: ignore
     phrase: bytes,
-    contents: Optional[bytes],
+    contents: bytes | None,
 ) -> None:
     try:
         assert contents is not None, contents
@@ -163,7 +175,7 @@ def _get_port() -> int:
     raise OSError("Could not find an unused port.")
 
 
-def _read_toml(filepath: Path) -> Optional[dict[str, Any]]:
+def _read_toml(filepath: Path) -> dict[str, Any] | None:
     if not filepath.exists():
         return None
     return toml_reader.read(filepath)
@@ -858,6 +870,105 @@ def test_cli_new() -> None:
     _check_contents(p, b'"serverToken": ', contents)
 
 
+@pytest.mark.skipif(
+    _is_win32(),
+    reason="Parent polling is Unix-only (relies on getppid/killpg)",
+)
+def test_cli_kernel_killed_when_server_killed() -> None:
+    """Orphaned kernels should self-terminate via the parent poller."""
+    import psutil
+    from websockets.sync.client import connect
+
+    port = _get_port()
+    p = subprocess.Popen(
+        ["marimo", "new", "-p", str(port), "--headless", "--no-token"]
+    )
+    try:
+        assert _try_fetch(port) is not None
+        # Opening a WebSocket causes the server to spawn a kernel process.
+        with connect(f"ws://localhost:{port}/ws?session_id=s1"):
+            server = psutil.Process(p.pid)
+            deadline = time.time() + 10
+            kernel_pids: list[int] = []
+            while time.time() < deadline:
+                kernel_pids = [c.pid for c in server.children()]
+                if kernel_pids:
+                    break
+                time.sleep(0.2)
+            assert kernel_pids, "expected kernel child process to be spawned"
+
+        # Kill only the server; the kernel's parent poller should notice.
+        p.kill()
+        p.wait(timeout=5)
+
+        deadline = time.time() + 10
+        while time.time() < deadline and any(
+            psutil.pid_exists(pid) for pid in kernel_pids
+        ):
+            time.sleep(0.2)
+
+        still_alive = [pid for pid in kernel_pids if psutil.pid_exists(pid)]
+        assert not still_alive, (
+            f"kernel pids {still_alive} still alive after server killed"
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            p.kill()
+
+
+@pytest.mark.skipif(
+    _is_win32(),
+    reason="Parent polling is Unix-only (relies on getppid/killpg)",
+)
+def test_cli_server_exits_when_ancestor_pid_dies(
+    temp_marimo_file: str,
+) -> None:
+    """When MARIMO_ANCESTOR_PID points at a process that dies, the server's
+    ancestor poller should shut the server down.
+
+    This is the mechanism the single-file sandbox relies on to clean up the
+    inner marimo (and its kernel) when the outer CLI is SIGKILLed — we can't
+    exercise that end-to-end here because the sandbox's inner marimo is
+    installed fresh by uv from PyPI (not the PR's source), so any changes
+    under test wouldn't be present in the inner process. Testing the
+    mechanism directly avoids that."""
+    fake_ancestor = subprocess.Popen(["sleep", "60"])
+    env = os.environ.copy()
+    env["MARIMO_ANCESTOR_PID"] = str(fake_ancestor.pid)
+
+    port = _get_port()
+    # start_new_session so the poller's killpg doesn't touch pytest.
+    p = subprocess.Popen(
+        [
+            "marimo",
+            "edit",
+            temp_marimo_file,
+            "-p",
+            str(port),
+            "--headless",
+            "--no-token",
+        ],
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        assert _try_fetch(port) is not None
+
+        fake_ancestor.kill()
+        fake_ancestor.wait(timeout=5)
+
+        # Poller ticks every 1s; give it a generous window.
+        try:
+            p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pytest.fail("server did not exit after ancestor died")
+    finally:
+        with contextlib.suppress(Exception):
+            fake_ancestor.kill()
+        with contextlib.suppress(Exception):
+            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+
+
 def test_cli_run(temp_marimo_file: str) -> None:
     port = _get_port()
     p = subprocess.Popen(
@@ -1064,30 +1175,30 @@ def test_collect_marimo_files_excludes_marimo_generated_markdown(
     assert str(generated_md) not in paths
 
 
-def test_create_run_file_router_watch_single_directory_is_lazy(
+def test_create_run_workspace_watch_single_directory_is_lazy(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "one.py").write_text(
         "import marimo\napp = marimo.App()\n", encoding="utf-8"
     )
 
-    router = _create_run_file_router([str(tmp_path)], watch=True)
-    assert isinstance(router, LazyListOfFilesAppFileRouter)
-    assert router.include_markdown is True
+    workspace = _create_run_workspace([str(tmp_path)], watch=True)
+    assert isinstance(workspace, DirectoryWorkspace)
+    assert workspace.include_markdown is True
 
 
-def test_create_run_file_router_no_watch_single_directory_is_static(
+def test_create_run_workspace_no_watch_single_directory_is_static(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "one.py").write_text(
         "import marimo\napp = marimo.App()\n", encoding="utf-8"
     )
 
-    router = _create_run_file_router([str(tmp_path)], watch=False)
-    assert isinstance(router, ListOfFilesAppFileRouter)
+    workspace = _create_run_workspace([str(tmp_path)], watch=False)
+    assert isinstance(workspace, FixedFilesWorkspace)
 
 
-def test_create_run_file_router_watch_mixed_paths_is_static(
+def test_create_run_workspace_watch_mixed_paths_is_static(
     tmp_path: Path,
 ) -> None:
     directory = tmp_path / "gallery"
@@ -1100,10 +1211,10 @@ def test_create_run_file_router_watch_mixed_paths_is_static(
         "import marimo\napp = marimo.App()\n", encoding="utf-8"
     )
 
-    router = _create_run_file_router(
+    workspace = _create_run_workspace(
         [str(directory), str(standalone)], watch=True
     )
-    assert isinstance(router, ListOfFilesAppFileRouter)
+    assert isinstance(workspace, FixedFilesWorkspace)
 
 
 def test_cli_run_with_show_code(temp_marimo_file: str) -> None:
@@ -1611,6 +1722,102 @@ def test_cli_run_sandbox_prompt_yes() -> None:
     p.kill()
 
 
+@pytest.mark.parametrize(
+    "tail_args",
+    [
+        ["experiment_name=my-exp", "epochs=25"],
+        ["--key", "value"],
+        ["--key"],
+        ["-key", "value"],
+    ],
+)
+def test_cli_run_double_dash_reaches_splitter(tail_args: list[str]) -> None:
+    runner = CliRunner()
+    captured: dict[str, Any] = {}
+
+    def _capture(
+        name: str,
+        args: tuple[str, ...],
+        args_after_separator: tuple[str, ...] | None = None,
+    ) -> tuple[list[str], tuple[str, ...]]:
+        captured["name"] = name
+        captured["args"] = args
+        captured["args_after_separator"] = args_after_separator
+        raise click.ClickException("stop after capture")
+
+    with patch(
+        "marimo._cli.cli._split_run_paths_and_args", side_effect=_capture
+    ):
+        result = runner.invoke(
+            cli_main,
+            ["run", "notebook.py", "--", *tail_args],
+        )
+
+    assert result.exit_code != 0
+    assert "stop after capture" in result.output
+    assert captured["name"] == "notebook.py"
+    assert captured["args"] == tuple(tail_args)
+    assert captured["args_after_separator"] == tuple(tail_args)
+
+
+@pytest.mark.parametrize(
+    ("args", "args_after_separator", "expected"),
+    [
+        (
+            ("experiment_name=my-exp",),
+            ("experiment_name=my-exp",),
+            (["notebook.py"], ("experiment_name=my-exp",)),
+        ),
+        (
+            ("other.py", "arg=value"),
+            ("arg=value",),
+            (["notebook.py", "other.py"], ("arg=value",)),
+        ),
+        (("other.py",), None, (["notebook.py", "other.py"], ())),
+    ],
+)
+def test_split_run_paths_and_args_with_click_separator_state(
+    args: tuple[str, ...],
+    args_after_separator: tuple[str, ...] | None,
+    expected: tuple[list[str], tuple[str, ...]],
+) -> None:
+    assert (
+        _split_run_paths_and_args("notebook.py", args, args_after_separator)
+        == expected
+    )
+
+
+def test_cli_run_double_dash_passes_notebook_argv(tmp_path: Path) -> None:
+    runner = CliRunner()
+    notebook = tmp_path / "notebook.py"
+    notebook.write_text("")
+
+    with (
+        patch(
+            "marimo._cli.cli.prompt_run_in_docker_container",
+            return_value=False,
+        ),
+        patch("marimo._cli.cli.check_app_correctness"),
+        patch("marimo._cli.cli.start") as mock_start,
+    ):
+        result = runner.invoke(
+            cli_main,
+            [
+                "run",
+                str(notebook),
+                "--headless",
+                "--no-token",
+                "--",
+                "experiment_name=my-exp",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    mock_start.assert_called_once()
+    assert mock_start.call_args.kwargs["argv"] == ["experiment_name=my-exp"]
+    assert mock_start.call_args.kwargs["cli_args"] == {}
+
+
 def test_cli_with_custom_pyproject_config(tmp_path: Path) -> None:
     # Create a custom pyproject.toml with special marimo config
     pyproject_path = tmp_path / "pyproject.toml"
@@ -1729,7 +1936,7 @@ def test_cli_with_custom_pyproject_config_no_file(tmp_path: Path) -> None:
 # shell-completion has 1 input (value of $SHELL) & 3 outputs (return code, stdout, & stderr)
 # parameterize to give coverage. We use a boolean to specify if output on that stream should be present.
 @pytest.mark.parametrize(
-    "shell,rc,expect_stdout,expect_stderr".split(","),
+    ("shell", "rc", "expect_stdout", "expect_stderr"),
     [
         # valid shell values, rc of 0, data only on stdout
         ("bash", 0, True, False),

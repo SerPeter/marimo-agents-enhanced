@@ -14,6 +14,7 @@ import {
 } from "@codemirror/lang-sql";
 import {
   BigQueryDialect,
+  DremioDialect,
   DuckDBDialect,
 } from "@marimo-team/codemirror-sql/dialects";
 import type { DataSourceConnection } from "@/core/kernel/messages";
@@ -52,6 +53,7 @@ const KNOWN_DIALECTS_ARRAY = [
   "databricks",
   "datafusion",
   "microsoft sql server",
+  "dremio",
 ] as const;
 const KNOWN_DIALECTS: ReadonlySet<string> = new Set(KNOWN_DIALECTS_ARRAY);
 type KnownDialect = (typeof KNOWN_DIALECTS_ARRAY)[number];
@@ -96,6 +98,8 @@ export function guessDialect(
       return PLSQL;
     case "bigquery":
       return BigQueryDialect;
+    case "dremio":
+      return DremioDialect;
     case "timescaledb":
       return PostgreSQL; // TimescaleDB is a PostgreSQL dialect
     case "awsathena":

@@ -1088,6 +1088,45 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/files/copy": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: {
+        content: {
+          "application/json": components["schemas"]["FileCopyRequest"];
+        };
+      };
+      responses: {
+        /** @description Copy a file or directory */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            "application/json": components["schemas"]["FileCopyResponse"];
+          };
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/files/create": {
     parameters: {
       query?: never;
@@ -1106,7 +1145,7 @@ export interface paths {
       };
       requestBody?: {
         content: {
-          "application/json": components["schemas"]["FileCreateRequest"];
+          "multipart/form-data": components["schemas"]["FileCreateMultipartRequest"];
         };
       };
       responses: {
@@ -2485,6 +2524,43 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/kernel/status": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: {
+      parameters: {
+        query?: never;
+        header: {
+          "Marimo-Session-Id": string;
+        };
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description Report whether the kernel is currently executing. `running` means at least one cell is queued or running; `idle` means the kernel is alive but not executing; `stopped` means the kernel process is not running. */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            "application/json": components["schemas"]["KernelStatusResponse"];
+          };
+        };
+      };
+    };
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/kernel/stdin": {
     parameters: {
       query?: never;
@@ -3355,6 +3431,7 @@ export interface components {
      *
      *         **Keys.**
      *
+     *         - `enabled`: if `False`, hide AI actions and panels in the marimo UI
      *         - `rules`: custom rules to include in all AI completion prompts
      *         - `max_tokens`: the maximum number of tokens to use in AI completions
      *         - `mode`: the mode to use for AI completions. Can be one of: `"ask"` or `"manual"`
@@ -3369,6 +3446,7 @@ export interface components {
      *         - `github`: the GitHub config
      *         - `openrouter`: the OpenRouter config
      *         - `wandb`: the Weights & Biases config
+     *         - `opencode_go`: the OpenCode Go config
      *         - `custom_providers`: a dict of custom OpenAI-compatible providers
      *         - `open_ai_compatible`: the OpenAI-compatible config (deprecated, use custom_providers)
      */
@@ -3379,16 +3457,18 @@ export interface components {
       custom_providers?: {
         [key: string]: components["schemas"]["OpenAiConfig"];
       };
+      enabled?: boolean;
       github?: components["schemas"]["GitHubConfig"];
       google?: components["schemas"]["GoogleAiConfig"];
       inline_tooltip?: boolean;
       max_tokens?: number;
       /** @enum {unknown} */
-      mode?: "agent" | "ask" | "manual";
+      mode?: "agent" | "ask" | "code_mode" | "manual";
       models?: components["schemas"]["AiModelConfig"];
       ollama?: components["schemas"]["OpenAiConfig"];
       open_ai?: components["schemas"]["OpenAiConfig"];
       open_ai_compatible?: components["schemas"]["OpenAiConfig"];
+      opencode_go?: components["schemas"]["OpenAiConfig"];
       openrouter?: components["schemas"]["OpenAiConfig"];
       rules?: string;
       wandb?: components["schemas"]["OpenAiConfig"];
@@ -3567,8 +3647,10 @@ export interface components {
      * CellNotification
      * @description Updates a cell's state in the frontend.
      *
-     *         Only fields that are set (not None) will update the cell state.
-     *         Omitting a field leaves that aspect unchanged.
+     *         This is a partial update: each field carries its own "unchanged" semantics,
+     *         documented per field below. Most fields treat None as "unchanged"; fields
+     *         that need to distinguish "unchanged" from "clear" use msgspec.UNSET for the
+     *         former and None for the latter.
      *
      *         Attributes:
      *             cell_id: Unique identifier of the cell being updated.
@@ -3577,7 +3659,7 @@ export interface components {
      *             status: Execution status (idle/running/stale/queued/disabled-transitively).
      *             stale_inputs: Whether cell has stale inputs from changed dependencies.
      *             run_id: Execution run ID for tracing. Auto-set from context.
-     *             serialization: Serialization status (TopLevelHints).
+     *             serialization: Top-level reusability hint. UNSET unchanged, None clears, str sets.
      *             timestamp: Creation timestamp, auto-set.
      */
     CellNotification: {
@@ -3593,7 +3675,6 @@ export interface components {
       output?: null | components["schemas"]["CellOutput"];
       /** @default null */
       run_id?: string | null;
-      /** @default null */
       serialization?: string | null;
       /** @default null */
       stale_inputs?: boolean | null;
@@ -3650,6 +3731,24 @@ export interface components {
         | "video/mpeg";
       timestamp?: number;
     };
+    /**
+     * CellOutputs
+     * @description Per-cell output snapshot delivered alongside the document snapshot.
+     *
+     *         `output` carries the cell's last main (rich display) output;
+     *         `console_outputs` carries the buffered stdout/stderr stream from
+     *         its last execution.  Both are keyed by cell id; missing keys mean
+     *         "no output captured" (the cell never ran, or produced nothing on
+     *         that channel).
+     */
+    CellOutputs: {
+      console_outputs: {
+        [key: string]: components["schemas"]["CellOutput"][];
+      };
+      output: {
+        [key: string]: components["schemas"]["CellOutput"];
+      };
+    };
     /** ChatAttachment */
     ChatAttachment: {
       /** @default null */
@@ -3681,7 +3780,6 @@ export interface components {
      *     See pydantic_ai.ui.vercel_ai.request_types.UIMessage or Vercel AI SDK documentation.
      */
     ChatRequest: {
-      context: components["schemas"]["AiCompletionContext"];
       includeOtherCode: string;
       /** @default null */
       model?: string | null;
@@ -3766,10 +3864,19 @@ export interface components {
     /**
      * CompletedRunNotification
      * @description Run of submitted cells and descendants completed.
+     *
+     *         Attributes:
+     *             run_id: Correlation ID echoed from the command that triggered
+     *                 this completion. `None` for handlers that don't take a
+     *                 `run_id` (everything except `handle_execute_scratchpad`
+     *                 today). Consumers that want to wait for a specific command's
+     *                 completion filter on this field.
      */
     CompletedRunNotification: {
       /** @enum {unknown} */
       op: "completed-run";
+      /** @default null */
+      run_id?: string | null;
     };
     /**
      * CompletionConfig
@@ -3785,10 +3892,13 @@ export interface components {
      *         - `signature_hint_on_typing`: if `False`, signature hint won't be shown when typing
      *         - `copilot`: one of `"github"`, `"codeium"`, or `"custom"`
      *         - `codeium_api_key`: the Codeium API key
+     *         - `auto_close_pairs`: if `False`, typing an opening bracket, parenthesis,
+     *         or quote will not automatically insert the closing character
      */
     CompletionConfig: {
       activate_on_typing: boolean;
       api_key?: string | null;
+      auto_close_pairs?: boolean;
       base_url?: string | null;
       codeium_api_key?: string | null;
       copilot: boolean | ("codeium" | "custom" | "github");
@@ -3816,6 +3926,32 @@ export interface components {
       op: "completion-result";
       options: components["schemas"]["CompletionOption"][];
       prefix_length: number;
+    };
+    /**
+     * ConsumerCapabilities
+     * @description Per-consumer access capabilities for a session connection.
+     *
+     *         - editor: `{edit: True, interact: True}`
+     *         - viewer: `{edit: False, interact: False}`
+     *
+     *         These gate the frontend UI; they are not the server's authority boundary.
+     *         Scopes are granted per session mode (see `@requires`), so in an edit session
+     *         every connection (viewers included) carries the `edit` scope and can issue
+     *         edit requests. A viewer's read-only status is enforced by the client hiding
+     *         edit affordances, not by the server rejecting the request.
+     */
+    ConsumerCapabilities: {
+      edit: boolean;
+      interact: boolean;
+    };
+    /**
+     * ConsumerCapabilitiesNotification
+     * @description Notification of the frontend consumer's capabilities.
+     */
+    ConsumerCapabilitiesNotification: {
+      consumer_capabilities: components["schemas"]["ConsumerCapabilities"];
+      /** @enum {unknown} */
+      op: "consumer-capabilities";
     };
     /** CopyNotebookRequest */
     CopyNotebookRequest: {
@@ -4007,7 +4143,9 @@ export interface components {
      *     Attributes:
      *         name (str): The name of the database
      *         dialect (str): The dialect of the database
-     *         schemas (List[Schema]): List of schemas in the database
+     *         schemas (List[Schema]): List of schemas in the database.
+     *         schemas_resolved (bool): True when `schemas` has been enumerated.
+     *             False when schema discovery was deferred. Defaults to True
      *         engine (Optional[VariableName]): Database engine or connection handler, if any.
      */
     Database: {
@@ -4016,6 +4154,8 @@ export interface components {
       engine?: components["schemas"]["VariableName"] | null;
       name: string;
       schemas: components["schemas"]["Schema"][];
+      /** @default true */
+      schemas_resolved?: boolean;
     };
     /**
      * DatasetsNotification
@@ -4228,23 +4368,42 @@ export interface components {
      *             notebook_cells: Snapshot of notebook cells from the session document.
      *                 Used to populate the document ContextVar so code_mode can read
      *                 cell ordering, code, names, and configs.
+     *             cell_outputs: Snapshot of per-cell outputs (main + console) from the
+     *                 session view. Populates a parallel ContextVar so code_mode can
+     *                 expose `cell.output` and `cell.console_outputs`. Frozen at
+     *                 scratchpad start — not refreshed when `ctx.run_cell` produces
+     *                 new outputs in the same batch.
+     *             run_id: Optional correlation ID. When set, the
+     *                 `CompletedRunNotification` emitted at the end of this command
+     *                 carries the same `run_id` so a caller holding a
+     *                 `ScratchCellListener` can filter for *its* completion and
+     *                 ignore `CompletedRun` events from unrelated commands on the
+     *                 same session.
      */
     ExecuteScratchpadCommand: {
+      /** @default null */
+      cellOutputs?: null | components["schemas"]["CellOutputs"];
       code: string;
       /** @default null */
       notebookCells?: components["schemas"]["NotebookCell"][] | null;
       /** @default null */
       request?: components["schemas"]["HTTPRequest"] | null;
+      /** @default null */
+      runId?: string | null;
       /** @enum {unknown} */
       type: "execute-scratchpad";
     };
     /** ExecuteScratchpadRequest */
     ExecuteScratchpadRequest: {
+      /** @default null */
+      cellOutputs?: null | components["schemas"]["CellOutputs"];
       code: string;
       /** @default null */
       notebookCells?: components["schemas"]["NotebookCell"][] | null;
       /** @default null */
       request?: components["schemas"]["HTTPRequest"] | null;
+      /** @default null */
+      runId?: string | null;
     };
     /**
      * ExecuteStaleCellsCommand
@@ -4301,6 +4460,39 @@ export interface components {
     /** ExportAsScriptRequest */
     ExportAsScriptRequest: {
       download: boolean;
+    };
+    /** FileCopyRequest */
+    FileCopyRequest: {
+      newPath: string;
+      path: string;
+    };
+    /** FileCopyResponse */
+    FileCopyResponse: {
+      /** @default null */
+      info?: null | components["schemas"]["FileInfo"];
+      /** @default null */
+      message?: string | null;
+      success: boolean;
+    };
+    /**
+     * FileCreateMultipartRequest
+     * @description multipart/form-data body for POST /api/files/create.
+     *
+     *         Schema-only: this struct exists to describe the multipart shape in
+     *         OpenAPI. At runtime, the endpoint reads the string fields from
+     *         `MultipartRequest.body` and the uploaded bytes from
+     *         `MultipartRequest.files["file"]` — `body.file` is never populated.
+     */
+    FileCreateMultipartRequest: {
+      /**
+       * Format: binary
+       * @default null
+       */
+      file?: string | null;
+      name: string;
+      path: string;
+      /** @enum {unknown} */
+      type: "directory" | "file" | "notebook";
     };
     /** FileCreateRequest */
     FileCreateRequest: {
@@ -4467,8 +4659,14 @@ export interface components {
      *             function_call_id: ID matching the original request.
      *             return_value: Function return value as JSON.
      *             status: Human-readable success/failure status.
+     *             found: Whether the requested function was located in the registry.
+     *                 False signals a transient registry desync, so the request is safe
+     *                 to retry. True means no retry will help: a non-ok status then
+     *                 reflects a failure unrelated to lookup, such as the function
+     *                 raising during execution or not being associated with a cell.
      */
     FunctionCallResultNotification: {
+      found: boolean;
       function_call_id: components["schemas"]["RequestId"];
       /** @enum {unknown} */
       op: "function-call-result";
@@ -4622,6 +4820,9 @@ export interface components {
      *             packages: Package name to status (queued/installing/installed/failed).
      *             logs: Optional streaming logs per package.
      *             log_status: Log stream status (append/start/done).
+     *             source: Which Python environment packages are installed into.
+     *                     "kernel" (default) installs in the kernel's venv; "server"
+     *                     installs in the server's own Python env.
      */
     InstallingPackageAlertNotification: {
       /** @default null */
@@ -4635,6 +4836,11 @@ export interface components {
       packages: {
         [key: string]: "failed" | "installed" | "installing" | "queued";
       };
+      /**
+       * @default kernel
+       * @enum {unknown}
+       */
+      source?: "kernel" | "server";
     };
     /** InstantiateNotebookRequest */
     InstantiateNotebookRequest: {
@@ -4746,6 +4952,7 @@ export interface components {
       cell_ids: components["schemas"]["CellId"][];
       codes: string[];
       configs: components["schemas"]["CellConfig"][];
+      consumer_capabilities: components["schemas"]["ConsumerCapabilities"];
       kiosk: boolean;
       last_executed_code: {
         [key: string]: string;
@@ -4771,6 +4978,11 @@ export interface components {
       error: string;
       /** @enum {unknown} */
       op: "kernel-startup-error";
+    };
+    /** KernelStatusResponse */
+    KernelStatusResponse: {
+      /** @enum {unknown} */
+      state: "idle" | "running" | "stopped";
     };
     /**
      * KeymapConfig
@@ -4885,7 +5097,8 @@ export interface components {
         | components["schemas"]["CacheClearedNotification"]
         | components["schemas"]["CacheInfoNotification"]
         | components["schemas"]["FocusCellNotification"]
-        | components["schemas"]["NotebookDocumentTransactionNotification"];
+        | components["schemas"]["NotebookDocumentTransactionNotification"]
+        | components["schemas"]["ConsumerCapabilitiesNotification"];
     };
     /**
      * LanguageServersConfig
@@ -4914,14 +5127,14 @@ export interface components {
      * @description Configuration for lint rule selection.
      *
      *         Follows ruff-inspired semantics for selecting which rules to run
-     *         during ``marimo check``.
+     *         during `marimo check`.
      *
      *         **Keys.**
      *
-     *         - ``select``: list of rule code prefixes that replaces the default
-     *           enabled set. Use ``"ALL"`` to select all rules.
-     *           Example: ``["MB", "MR001"]``
-     *         - ``ignore``: list of rule code prefixes to remove from the
+     *         - `select`: list of rule code prefixes that replaces the default
+     *           enabled set. Use `"ALL"` to select all rules.
+     *           Example: `["MB", "MR001"]`
+     *         - `ignore`: list of rule code prefixes to remove from the
      *           enabled set.
      */
     LintConfig: {
@@ -4961,11 +5174,15 @@ export interface components {
      *             request_id: Unique identifier for this request.
      *             engine: SQL engine ('postgresql', 'mysql', 'duckdb', etc.).
      *             database: Database to query.
+     *             schema_path: Parent schema path whose child schemas to list.
+     *                 Empty lists the database's top-level schemas.
      */
     ListSQLSchemasCommand: {
       database: string;
       engine: string;
       requestId: components["schemas"]["RequestId"];
+      /** @default [] */
+      schemaPath?: string[];
       /** @enum {unknown} */
       type: "list-sql-schemas";
     };
@@ -4974,6 +5191,8 @@ export interface components {
       database: string;
       engine: string;
       requestId: components["schemas"]["RequestId"];
+      /** @default [] */
+      schemaPath?: string[];
     };
     /**
      * ListSQLTablesCommand
@@ -4987,12 +5206,16 @@ export interface components {
      *             engine: SQL engine ('postgresql', 'mysql', 'duckdb', etc.).
      *             database: Database to query.
      *             schema: Schema to list tables from.
+     *             schema_path: Path of nested schemas (relative to `database`) for
+     *                 catalogs with nested schemas. Empty for the top level.
      */
     ListSQLTablesCommand: {
       database: string;
       engine: string;
       requestId: components["schemas"]["RequestId"];
       schema: string;
+      /** @default [] */
+      schemaPath?: string[];
       /** @enum {unknown} */
       type: "list-sql-tables";
     };
@@ -5002,6 +5225,8 @@ export interface components {
       engine: string;
       requestId: components["schemas"]["RequestId"];
       schema: string;
+      /** @default [] */
+      schemaPath?: string[];
     };
     /**
      * ListSecretKeysCommand
@@ -5389,12 +5614,17 @@ export interface components {
     /**
      * NotebookCell
      * @description A single cell in the document. Mutable — owned by the document.
+     *
+     *         `version` increments on each `SetCode` that actually changes
+     *         `code`. Other property changes don't bump it.
      */
     NotebookCell: {
       code: string;
       config: components["schemas"]["CellConfig"];
       id: components["schemas"]["CellId"];
       name: string;
+      /** @default 0 */
+      version?: number;
     };
     /**
      * NotebookDocumentTransactionNotification
@@ -5467,6 +5697,7 @@ export interface components {
       tutorialId:
         | (
             | "dataflow"
+            | "external-dependencies"
             | "fileformat"
             | "for-jupyter-users"
             | "intro"
@@ -5549,12 +5780,16 @@ export interface components {
      *             database: Database containing the table.
      *             schema: Schema containing the table.
      *             table_name: Table to preview.
+     *             schema_path: Path of nested schemas (relative to `database`) for
+     *                 catalogs with nested schemas. Empty for the top level.
      */
     PreviewSQLTableCommand: {
       database: string;
       engine: string;
       requestId: components["schemas"]["RequestId"];
       schema: string;
+      /** @default [] */
+      schemaPath?: string[];
       tableName: string;
       /** @enum {unknown} */
       type: "preview-sql-table";
@@ -5565,6 +5800,8 @@ export interface components {
       engine: string;
       requestId: components["schemas"]["RequestId"];
       schema: string;
+      /** @default [] */
+      schemaPath?: string[];
       tableName: string;
     };
     /**
@@ -5717,7 +5954,7 @@ export interface components {
      * ReorderCells
      * @description Replace the full cell ordering.
      *
-     *         Cell IDs present in the document but missing from ``cell_ids``
+     *         Cell IDs present in the document but missing from `cell_ids`
      *         are appended at the end. IDs not in the document are ignored.
      */
     ReorderCells: {
@@ -5811,10 +6048,14 @@ export interface components {
      *         Attributes:
      *             connection: Connection identifier.
      *             database: Database name.
+     *             schema_path: Parent schema path the schemas belong under. Empty for
+     *                 the database's top level.
      */
     SQLDatabaseMetadata: {
       connection: string;
       database: string;
+      /** @default [] */
+      schema_path?: string[];
     };
     /**
      * SQLMetadata
@@ -5824,11 +6065,15 @@ export interface components {
      *             connection: Connection identifier.
      *             database: Database name.
      *             schema: Schema name.
+     *             schema_path: Path of nested schemas (relative to `database`). Empty
+     *                 for the top level.
      */
     SQLMetadata: {
       connection: string;
       database: string;
       schema: string;
+      /** @default [] */
+      schema_path?: string[];
       /** @enum {unknown} */
       type: "sql-metadata";
     };
@@ -5927,10 +6172,31 @@ export interface components {
     SaveUserConfigurationRequest: {
       config: Record<string, any>;
     };
-    /** Schema */
+    /**
+     * Schema
+     * @description Represents a database schema and its tables.
+     *
+     *     A schema may itself contain nested child schemas, e.g. for catalogs with
+     *     hierarchical namespaces such as Iceberg (`top.nested.deep`).
+     *
+     *     Attributes:
+     *         name (str): The name of the schema.
+     *         tables (List[DataTable]): Tables in this schema.
+     *         tables_resolved (bool): True when `tables` has been enumerated
+     *             False when table discovery was deferred. Defaults to True
+     *         child_schemas (List[Schema]): Nested child schemas (sub-namespaces).
+     *         child_schemas_resolved (bool): True when `child_schemas` has been
+     *             enumerated. False when discovery was deferred. Defaults to True
+     */
     Schema: {
+      /** @default [] */
+      child_schemas?: components["schemas"]["Schema"][];
+      /** @default true */
+      child_schemas_resolved?: boolean;
       name: string;
       tables: components["schemas"]["DataTable"][];
+      /** @default true */
+      tables_resolved?: boolean;
     };
     /** SchemaColumn */
     SchemaColumn: {
@@ -5996,16 +6262,13 @@ export interface components {
     };
     /**
      * SetConfig
-     * @description Partially update a cell's config. None fields are unchanged.
+     * @description Replace a cell's config.
      */
     SetConfig: {
       cellId: components["schemas"]["CellId"];
-      /** @default null */
-      column?: number | null;
-      /** @default null */
-      disabled?: boolean | null;
-      /** @default null */
-      hideCode?: boolean | null;
+      column: number | null;
+      disabled: boolean;
+      hideCode: boolean;
       /** @enum {unknown} */
       type: "set-config";
     };
@@ -6033,9 +6296,11 @@ export interface components {
      *
      *         - `html`: if `False`, HTML sharing options will be hidden from the UI
      *         - `wasm`: if `False`, WebAssembly sharing options will be hidden from the UI
+     *         - `molab`: if `False`, molab sharing options will be hidden from the UI
      */
     SharingConfig: {
       html?: boolean;
+      molab?: boolean;
       wasm?: boolean;
     };
     /** ShutdownSessionRequest */
@@ -6203,6 +6468,7 @@ export interface components {
      *             namespace: Variable name of the storage backend.
      *             prefix: The prefix that was listed (set by list_entries).
      *             query: The search query that was used (set by search).
+     *             next_page_token: Token for fetching the next page of entries.
      *             error: Error message if the operation failed.
      */
     StorageEntriesNotification: {
@@ -6210,6 +6476,8 @@ export interface components {
       /** @default null */
       error?: string | null;
       namespace: string;
+      /** @default null */
+      next_page_token?: string | null;
       /** @enum {unknown} */
       op: "storage-entries";
       /** @default null */
@@ -6253,10 +6521,13 @@ export interface components {
      *             namespace: Variable name identifying the storage backend.
      *             limit: Max entries to return.
      *             prefix: Path prefix to list (None = root).
+     *             page_token: Token for the next page of entries.
      */
     StorageListEntriesCommand: {
       limit: number;
       namespace: string;
+      /** @default null */
+      pageToken?: string | null;
       /** @default null */
       prefix?: string | null;
       requestId: string;
@@ -6267,6 +6538,8 @@ export interface components {
     StorageListEntriesRequest: {
       limit: number;
       namespace: string;
+      /** @default null */
+      pageToken?: string | null;
       /** @default null */
       prefix?: string | null;
       requestId: components["schemas"]["RequestId"];
@@ -6347,7 +6620,7 @@ export interface components {
      */
     ToolDefinition: {
       description: string;
-      mode: ("agent" | "ask" | "manual")[];
+      mode: ("agent" | "ask" | "code_mode" | "manual")[];
       name: string;
       parameters: Record<string, any>;
       /** @enum {unknown} */
@@ -6357,9 +6630,9 @@ export interface components {
      * Transaction
      * @description An atomic batch of changes applied to a NotebookDocument.
      *
-     *         ``source`` identifies the writer (e.g. ``"frontend"``, ``"kernel"``).
-     *         ``version`` is ``None`` when created and stamped by
-     *         ``NotebookDocument.apply()``.
+     *         `source` identifies the writer (e.g. `"frontend"`, `"kernel"`).
+     *         `version` is `None` when created and stamped by
+     *         `NotebookDocument.apply()`.
      */
     Transaction: {
       changes: (
@@ -6371,7 +6644,13 @@ export interface components {
         | components["schemas"]["SetName"]
         | components["schemas"]["SetConfig"]
       )[];
-      source: string;
+      /** @enum {unknown} */
+      source:
+        | "cell-manager"
+        | "code-mode"
+        | "file-watch"
+        | "frontend"
+        | "kernel";
       /** @default null */
       version?: number | null;
     };

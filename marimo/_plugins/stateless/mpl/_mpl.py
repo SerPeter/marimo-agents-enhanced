@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import io
 import warnings
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any
 
 from marimo import _loggers
 from marimo._messaging.mimetypes import KnownMimeType
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 
 def new_figure_manager_given_figure(
-    num: int, figure: Union[Figure, SubFigure, Axes]
+    num: int, figure: Figure | SubFigure | Axes
 ) -> Any:
     from matplotlib.backends.backend_webagg_core import (
         FigureCanvasWebAggCore,
@@ -60,7 +60,7 @@ def new_figure_manager_given_figure(
     return manager
 
 
-def png_bytes(figure: Union[Figure, SubFigure, Axes]) -> bytes:
+def png_bytes(figure: Figure | SubFigure | Axes) -> bytes:
     """Convert a matplotlib figure to base64-encoded PNG bytes.
 
     The Html._mime_ method expects _repr_png_ to return bytes that
@@ -79,7 +79,7 @@ def png_bytes(figure: Union[Figure, SubFigure, Axes]) -> bytes:
 
 
 class NonInteractiveMplHtml(Html):
-    def __init__(self, figure: Union[Figure, SubFigure, Axes]) -> None:
+    def __init__(self, figure: Figure | SubFigure | Axes) -> None:
         self._figure = figure
         super().__init__(as_html(figure).text)
 
@@ -91,7 +91,7 @@ class NonInteractiveMplHtml(Html):
 
 
 @mddoc
-def interactive(figure: Union[Figure, SubFigure, Axes]) -> Html:
+def interactive(figure: Figure | SubFigure | Axes) -> Html:
     """Render a matplotlib figure using an interactive viewer.
 
     The interactive viewer allows you to pan, zoom, and see plot coordinates
@@ -127,6 +127,17 @@ def interactive(figure: Union[Figure, SubFigure, Axes]) -> Html:
     # fall back to static PNG instead of interactive plot
     if not ctx.virtual_files_supported:
         return NonInteractiveMplHtml(figure)
+
+    # Figure::figure returns self; SubFigure::figure returns the parent Figure
+    is_subfigure = figure.figure is not figure
+    if is_subfigure:
+        warnings.warn(
+            message="SubFigure is not supported in interactive mode; "
+            "rendering as static PNG instead. "
+            "Consider using a regular Figure instead.",
+            stacklevel=2,
+        )
+        return NonInteractiveMplHtml(figure=figure)
 
     from marimo._plugins.ui._impl.from_mpl_interactive import mpl_interactive
 

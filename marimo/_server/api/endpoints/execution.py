@@ -2,23 +2,28 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from starlette.authentication import requires
 from starlette.responses import JSONResponse, StreamingResponse
 
 from marimo import _loggers
-from marimo._messaging.notification import AlertNotification
+from marimo._code_mode.screenshot_meta import (
+    SCREENSHOT_AUTH_TOKEN_KEY,
+    SCREENSHOT_SERVER_URL_KEY,
+)
 from marimo._runtime.commands import HTTPRequest, UpdateUIElementCommand
 from marimo._server.api.deps import AppState
 from marimo._server.api.endpoints.ws.ws_connection_validator import (
     FILE_QUERY_PARAM_KEY,
 )
 from marimo._server.api.endpoints.ws_endpoint import DOC_MANAGER
-from marimo._server.api.utils import dispatch_control_request, parse_request
-from marimo._server.file_router import MarimoFileKey
+from marimo._server.api.utils import (
+    dispatch_control_request,
+    get_code_mode_credentials,
+    parse_request,
+)
 from marimo._server.models.models import (
     BaseResponse,
     DebugCellRequest,
@@ -26,13 +31,21 @@ from marimo._server.models.models import (
     ExecuteScratchpadRequest,
     InstantiateNotebookRequest,
     InvokeFunctionRequest,
+    KernelStatusResponse,
     ModelRequest,
     SuccessResponse,
     UpdateUIElementValuesRequest,
 )
 from marimo._server.router import APIRouter
 from marimo._server.uvicorn_utils import close_uvicorn
+from marimo._server.workspace import MarimoFileKey
+from marimo._session.consumer_policy import (
+    TakeoverDecision,
+    can_take_over_editing,
+)
+from marimo._session.types import KernelState
 from marimo._types.ids import ConsumerId
+from marimo._utils.asyncio_utils import cancel_and_wait
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -46,6 +59,7 @@ router = APIRouter()
 
 
 @router.post("/set_ui_element_value")
+@requires("read")
 async def set_ui_element_values(
     *,
     request: Request,
@@ -86,6 +100,7 @@ async def set_ui_element_values(
 
 
 @router.post("/set_model_value")
+@requires("read")
 async def set_model_values(
     *,
     request: Request,
@@ -151,6 +166,7 @@ async def instantiate(
 
 
 @router.post("/function_call")
+@requires("read")
 async def function_call(
     *,
     request: Request,
@@ -230,7 +246,7 @@ async def run_cell(
                 application/json:
                     schema:
                         $ref: "#/components/schemas/SuccessResponse"
-    """  # noqa: E501
+    """
     app_state = AppState(request)
     body = await parse_request(request, cls=ExecuteCellsRequest)
     body.request = HTTPRequest.from_request(request)
@@ -240,6 +256,46 @@ async def run_cell(
     )
 
     return SuccessResponse()
+
+
+@router.get("/status")
+@requires("edit")
+async def kernel_status(
+    *,
+    request: Request,
+) -> KernelStatusResponse:
+    """
+    parameters:
+        - in: header
+          name: Marimo-Session-Id
+          schema:
+            type: string
+          required: true
+    responses:
+        200:
+            description: Report whether the kernel is currently executing.
+                `running` means at least one cell is queued or running;
+                `idle` means the kernel is alive but not executing; `stopped`
+                means the kernel process is not running.
+            content:
+                application/json:
+                    schema:
+                        $ref: "#/components/schemas/KernelStatusResponse"
+    """
+    app_state = AppState(request)
+    session = app_state.require_current_session()
+
+    if session.kernel_state() in (
+        KernelState.STOPPED,
+        KernelState.NOT_STARTED,
+    ):
+        return KernelStatusResponse(state="stopped")
+
+    is_running = any(
+        notification.status in ("queued", "running")
+        for notification in session.session_view.cell_notifications.values()
+    )
+    return KernelStatusResponse(state="running" if is_running else "idle")
 
 
 @router.post("/execute", include_in_schema=False)
@@ -261,16 +317,25 @@ async def execute_code(
                 text/event-stream:
                     schema:
                         type: string
-    """  # noqa: E501
+    """
     from marimo._runtime.commands import ExecuteScratchpadCommand
     from marimo._server.scratchpad import (
         ScratchCellListener,
         build_done_event,
+        snapshot_for_scratchpad,
     )
 
     app_state = AppState(request)
     body = await parse_request(request, cls=ExecuteScratchpadRequest)
     session = app_state.require_current_session()
+
+    # Register cells into the graph without executing them so that
+    # code_mode's run_cell can resolve dependencies. The kernel
+    # no-ops if already instantiated.
+    session.instantiate(
+        InstantiateNotebookRequest(object_ids=[], values=[], auto_run=False),
+        http_request=HTTPRequest.from_request(request),
+    )
 
     async def _watch_disconnect() -> None:
         """Wait for client disconnect and interrupt the kernel."""
@@ -286,26 +351,41 @@ async def execute_code(
 
     async def sse_generator() -> AsyncGenerator[str, None]:
         disconnect_task = asyncio.create_task(_watch_disconnect())
+        # Correlation ID: tags both the scratchpad command and the
+        # listener so we wait for *our* completion and ignore
+        # ``CompletedRun`` events from other commands on this session
+        # (e.g. the ``session.instantiate`` call above, or concurrent
+        # browser activity).
+        run_id = str(uuid4())
         try:
-            listener = ScratchCellListener()
+            listener = ScratchCellListener(run_id=run_id)
             with session.scoped(listener):
                 async with session.scratchpad_lock:
+                    http_req = HTTPRequest.from_request(request)
+                    server_url, auth_token = get_code_mode_credentials(
+                        app_state, request
+                    )
+                    http_req.meta[SCREENSHOT_SERVER_URL_KEY] = server_url
+                    http_req.meta[SCREENSHOT_AUTH_TOKEN_KEY] = auth_token
+                    notebook_cells, cell_outputs = snapshot_for_scratchpad(
+                        session
+                    )
                     session.put_control_request(
                         ExecuteScratchpadCommand(
                             code=body.code,
-                            request=HTTPRequest.from_request(request),
-                            notebook_cells=tuple(session.document.cells),
+                            request=http_req,
+                            notebook_cells=notebook_cells,
+                            cell_outputs=cell_outputs,
+                            run_id=run_id,
                         ),
                         from_consumer_id=None,
                     )
                     async for event in listener.stream():
                         yield event
 
-                yield build_done_event(session)
+                yield build_done_event(session, listener)
         finally:
-            disconnect_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await disconnect_task
+            await cancel_and_wait(disconnect_task)
 
     return StreamingResponse(sse_generator(), media_type="text/event-stream")
 
@@ -335,7 +415,7 @@ async def run_scratchpad(
                 application/json:
                     schema:
                         $ref: "#/components/schemas/SuccessResponse"
-    """  # noqa: E501
+    """
     return await dispatch_control_request(request, ExecuteScratchpadRequest)
 
 
@@ -364,7 +444,7 @@ async def run_post_mortem(
                 application/json:
                     schema:
                         $ref: "#/components/schemas/SuccessResponse"
-    """  # noqa: E501
+    """
     return await dispatch_control_request(request, DebugCellRequest)
 
 
@@ -388,7 +468,7 @@ async def restart_session(
                 application/json:
                     schema:
                         $ref: "#/components/schemas/SuccessResponse"
-    """  # noqa: E501
+    """
     app_state = AppState(request)
     session_manager = app_state.session_manager
 
@@ -399,9 +479,9 @@ async def restart_session(
     session_manager.close_session(session_id)
 
     # Close RTC doc if it exists
-    file_key: Optional[MarimoFileKey] = (
+    file_key: MarimoFileKey | None = (
         app_state.query_params(FILE_QUERY_PARAM_KEY)
-        or session_manager.file_router.get_unique_file_key()
+        or session_manager.workspace.get_unique_file_key()
         or session.app_file_manager.path
     )
     if file_key is not None:
@@ -436,7 +516,7 @@ async def shutdown(
     LOGGER.debug("Received shutdown request")
     app_state = AppState(request)
     session_manager = app_state.session_manager
-    file_router = session_manager.file_router
+    workspace = session_manager.workspace
 
     def shutdown_server() -> None:
         app_state.session_manager.shutdown()
@@ -445,7 +525,7 @@ async def shutdown(
     # If we are only operating on a single file (new or explicit file),
     # and there are no other sessions (user may have opened another notebook
     # from the file explorer) then we should shutdown the whole server
-    key = file_router.get_unique_file_key()
+    key = workspace.get_unique_file_key()
     if key and len(session_manager.sessions) <= 1:
         shutdown_server()
         return SuccessResponse()
@@ -489,35 +569,39 @@ async def takeover_endpoint(
     """
     app_state = AppState(request)
 
-    file_key: Optional[MarimoFileKey] = (
-        app_state.query_params(FILE_QUERY_PARAM_KEY)
-        or app_state.session_manager.file_router.get_unique_file_key()
-    )
-    if file_key is None:
-        LOGGER.error("No file key provided")
+    session_id = app_state.get_current_session_id()
+    if session_id is None:
+        LOGGER.error("Missing Marimo-Session-Id header")
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Cannot take over session."},
+        )
+    caller_id = ConsumerId(session_id)
+
+    session = app_state.get_current_session()
+    if not session:
+        LOGGER.error("No current session found")
         return JSONResponse(
             status_code=400,
             content={"error": "Cannot take over session."},
         )
 
-    # Find and close any existing sessions for this file
-    existing_session = app_state.session_manager.get_session_by_file_key(
-        file_key
-    )
-    if existing_session is not None:
-        # Send a disconnect message to the client
-        existing_session.notify(
-            AlertNotification(
-                title="Session taken over",
-                description="Another user has taken over this session.",
-                variant="danger",
-            ),
-            from_consumer_id=None,
+    caller = session.room.get_consumer(caller_id)
+    if not caller:
+        LOGGER.error("No consumer found for caller ID %s", caller_id)
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Cannot take over session."},
         )
-        # Wait 100ms to ensure the client has received the message
-        await asyncio.sleep(0.1)
-        existing_session.disconnect_main_consumer()
-    else:
-        LOGGER.warning("No existing session found for file key %s", file_key)
+
+    takeover_decision = can_take_over_editing(session, caller_id)
+    if takeover_decision != TakeoverDecision.ALLOW:
+        LOGGER.debug("Takeover denied by policy for consumer %s", caller_id)
+        return JSONResponse(
+            status_code=403,
+            content={"error": "Not allowed to take over session."},
+        )
+
+    session.room.promote_consumer_to_main(caller)
 
     return JSONResponse(status_code=200, content={"status": "ok"})

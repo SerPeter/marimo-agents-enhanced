@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Optional, final
+from typing import TYPE_CHECKING, Any, final
 
 from marimo import _loggers
 
@@ -15,7 +16,7 @@ LOGGER = _loggers.marimo_logger()
 
 class AsyncBackgroundTask(ABC):
     def __init__(self) -> None:
-        self.task: Optional[asyncio.Task[None]] = None
+        self.task: asyncio.Task[None] | None = None
         self.running: bool = False
         self._startup_event: asyncio.Event = asyncio.Event()
         self._shutdown_event: asyncio.Event = asyncio.Event()
@@ -26,21 +27,20 @@ class AsyncBackgroundTask(ABC):
         The main task routine that should be implemented by subclasses.
         This method contains the actual task logic.
         """
-        pass
 
     async def startup(self) -> None:
         """
         Optional startup routine that can be implemented by subclasses.
         This method is called before the main task starts.
         """
-        return None
+        return
 
     async def shutdown(self) -> None:
         """
         Optional shutdown routine that can be implemented by subclasses.
         This method is called after the main task stops.
         """
-        return None
+        return
 
     async def _task_wrapper(self) -> None:
         """
@@ -71,7 +71,7 @@ class AsyncBackgroundTask(ABC):
             self.task = asyncio.create_task(self._task_wrapper())
 
     @final
-    async def stop(self, timeout: Optional[float] = None) -> None:
+    async def stop(self, timeout: float | None = None) -> None:
         """
         Stops the background task.
 
@@ -93,26 +93,42 @@ class AsyncBackgroundTask(ABC):
                     pass
 
     @final
-    def stop_sync(self, timeout: Optional[float] = None) -> None:
+    def stop_sync(self, timeout: float | None = None) -> None:
         """
         Synchronous version of stop that can be called from non-async code.
         """
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # Can't run a new event loop while one is running
-                # Just set running to false and let the task complete naturally
-                self.running = False
-                return
-            loop.run_until_complete(self.stop(timeout))
-        except RuntimeError:
-            # If there's no event loop, create a new one
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(self.stop(timeout))
-            loop.close()
+        if self.task is None or self.task.done():
+            self.running = False
+            return
 
-    async def wait_for_startup(self, timeout: Optional[float] = None) -> None:
+        # Reuse the task's loop — a fresh loop via ``asyncio.run`` would
+        # error with "future attached to a different event loop".
+        task_loop = self.task.get_loop()
+
+        try:
+            on_task_thread = asyncio.get_running_loop() is task_loop
+        except RuntimeError:
+            on_task_thread = False
+
+        if on_task_thread:
+            # Blocking here would deadlock our own loop; signal cooperative
+            # shutdown and return.
+            self.running = False
+            return
+
+        if task_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(
+                self.stop(timeout), task_loop
+            )
+            try:
+                future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                self.running = False
+            return
+
+        task_loop.run_until_complete(self.stop(timeout))
+
+    async def wait_for_startup(self, timeout: float | None = None) -> None:
         """
         Waits for the task to start up.
 

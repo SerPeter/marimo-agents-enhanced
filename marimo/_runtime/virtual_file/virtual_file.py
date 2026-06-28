@@ -7,7 +7,7 @@ import mimetypes
 import random
 import string
 import threading
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -34,7 +34,7 @@ _ALPHABET = string.ascii_letters + string.digits
 
 
 def random_filename(ext: str) -> str:
-    # adapted from: https://stackoverflow.com/questions/13484726/safe-enough-8-character-short-unique-random-string  # noqa: E501
+    # adapted from: https://stackoverflow.com/questions/13484726/safe-enough-8-character-short-unique-random-string
     # TODO(akshayka): should callers redraw if they get a collision?
     try:
         tid = str(threading.get_native_id())
@@ -55,7 +55,7 @@ class VirtualFile:
         self,
         filename: str,
         buffer: bytes,
-        url: Optional[str] = None,
+        url: str | None = None,
         as_data_url: bool = False,
     ) -> None:
         self.filename = filename
@@ -130,7 +130,7 @@ class VirtualFileLifecycleItem(CellLifecycleItem):
         self.ext = _without_leading_dot(ext)
         self.buffer = buffer
         # Not resolved until added to registry
-        self._virtual_file: Optional[VirtualFile] = None
+        self._virtual_file: VirtualFile | None = None
 
     def add_to_cell_lifecycle_registry(self) -> None:
         from marimo._runtime.context import get_context
@@ -296,7 +296,7 @@ class VirtualFileRegistry:
 
 
 def _without_leading_dot(ext: str) -> str:
-    return ext[1:] if ext.startswith(".") else ext
+    return ext.removeprefix(".")
 
 
 def read_virtual_file(filename: str, byte_length: int) -> bytes:
@@ -310,16 +310,21 @@ def read_virtual_file(filename: str, byte_length: int) -> bytes:
 
 
 def read_virtual_file_chunked(
-    filename: str, byte_length: int
+    filename: str, byte_length: int, start: int = 0
 ) -> Iterator[bytes]:
     """Read a virtual file in chunks for streaming responses.
 
     Yields chunks of bytes, avoiding holding the entire file in memory
     as a single bytes object.
+
+    Args:
+        filename: virtual file name
+        byte_length: number of bytes to read (after applying `start`)
+        start: offset in bytes to begin reading from (for HTTP Range requests)
     """
     try:
         yield from VirtualFileStorageManager().read_chunked(
-            filename, byte_length
+            filename, byte_length, start=start
         )
     except KeyError as err:
         raise HTTPException(

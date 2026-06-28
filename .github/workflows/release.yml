@@ -13,8 +13,11 @@ on:
   workflow_dispatch: {}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # On main: unique group per run so nothing is cancelled (avoids a red X on the commit
+  # when a newer push supersedes this one). On tags: per-ref group with cancel-in-progress,
+  # preserving the original production-release behavior.
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # ── Production Release (tag push) ──────────────────────────────
@@ -39,12 +42,12 @@ jobs:
       id-token: write
     steps:
       - name: 📥 Download marimo dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: pypi-marimo
           path: dist/
       - name: 📤 Upload to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # release/v1
         with:
           skip-existing: true
           verbose: true
@@ -52,7 +55,7 @@ jobs:
       - name: 📢 Notify release result
         if: always()
         continue-on-error: true
-        uses: marimo-team/internal-gh-actions/release-notification@main
+        uses: marimo-team/internal-gh-actions/release-notification@ba06d4db1f3c5c9b86983ce409e57196f8376777 # main
         with:
           status: ${{ job.status }}
           slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_RELEASES }}
@@ -72,19 +75,67 @@ jobs:
 
   # ── Development Release (push to main) ─────────────────────────
 
+  # Skip the dev release chain if a newer commit has landed on main while this run was
+  # queued, so we don't burn a TestPyPI version on a superseded SHA. Downstream dev jobs
+  # (build_dev + publish_dev_*) skip automatically via their `needs:` chain.
+  check_dev_latest:
+    name: 🔍 Still tip of main?
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      is_latest: ${{ steps.check.outputs.is_latest }}
+    steps:
+      - id: check
+        env:
+          GH_SHA: ${{ github.sha }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          LATEST_SHA=$(git ls-remote "https://github.com/${GH_REPO}.git" refs/heads/main | awk '{print $1}')
+          if [ "$LATEST_SHA" = "$GH_SHA" ]; then
+            echo "is_latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_latest=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping dev release — superseded by a newer commit on main ($LATEST_SHA)."
+          fi
+
   build_dev:
     name: 🔧 Development Release
-    if: github.ref == 'refs/heads/main'
+    needs: check_dev_latest
+    if: github.ref == 'refs/heads/main' && needs.check_dev_latest.outputs.is_latest == 'true'
     uses: ./.github/workflows/release-dev.yml
     secrets: inherit
     permissions:
       contents: read # Required for checkout
       id-token: write # Required for nodejs OIDC
 
+  # Recheck after the build completes: the build takes several minutes, long enough that
+  # a newer commit may have landed during that window. Skipping here prevents a stale
+  # older run from publishing to TestPyPI after the newer run has already published.
+  recheck_dev_latest:
+    name: 🔍 Recheck still tip of main?
+    needs: build_dev
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      is_latest: ${{ steps.check.outputs.is_latest }}
+    steps:
+      - id: check
+        env:
+          GH_SHA: ${{ github.sha }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          LATEST_SHA=$(git ls-remote "https://github.com/${GH_REPO}.git" refs/heads/main | awk '{print $1}')
+          if [ "$LATEST_SHA" = "$GH_SHA" ]; then
+            echo "is_latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_latest=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping TestPyPI publish — superseded by a newer commit on main ($LATEST_SHA) during build."
+          fi
+
   publish_dev_pypi_marimo:
     name: 📤 Publish marimo to TestPyPI
-    if: github.ref == 'refs/heads/main'
-    needs: build_dev
+    if: github.ref == 'refs/heads/main' && needs.recheck_dev_latest.outputs.is_latest == 'true'
+    needs: [build_dev, recheck_dev_latest]
     runs-on: ubuntu-latest
     environment: testpypi
     permissions:
@@ -92,20 +143,20 @@ jobs:
       id-token: write
     steps:
       - name: 📥 Download marimo dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: pypi-marimo-dev
           path: dist/
       - name: 📤 Upload to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # release/v1
         with:
           verbose: true
           repository-url: https://test.pypi.org/legacy/
 
   publish_dev_pypi_marimo_base:
     name: 📤 Publish marimo-base to TestPyPI
-    if: github.ref == 'refs/heads/main'
-    needs: build_dev
+    if: github.ref == 'refs/heads/main' && needs.recheck_dev_latest.outputs.is_latest == 'true'
+    needs: [build_dev, recheck_dev_latest]
     runs-on: ubuntu-latest
     environment: testpypi
     permissions:
@@ -113,12 +164,12 @@ jobs:
       id-token: write
     steps:
       - name: 📥 Download marimo-base dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: pypi-marimo-base-dev
           path: dist/
       - name: 📤 Upload to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # release/v1
         with:
           verbose: true
           repository-url: https://test.pypi.org/legacy/
@@ -132,7 +183,7 @@ jobs:
       pull-requests: write
     steps:
       - name: 📝 Comment PR
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         continue-on-error: true
         env:
           MARIMO_VERSION: ${{ needs.build_dev.outputs.marimo_version }}

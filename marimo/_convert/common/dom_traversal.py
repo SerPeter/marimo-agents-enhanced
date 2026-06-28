@@ -5,12 +5,16 @@ import base64
 import mimetypes
 import re
 from html.parser import HTMLParser
-from typing import Callable, Optional, cast
+from typing import TYPE_CHECKING, cast
 
 from marimo import _loggers
 from marimo._messaging.mimetypes import KnownMimeType
 from marimo._runtime.virtual_file import read_virtual_file
 from marimo._utils.data_uri import build_data_url
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
 
 LOGGER = _loggers.marimo_logger()
 
@@ -41,7 +45,7 @@ class _HTMLAttributeReplacer(HTMLParser):
         self,
         allowed_tags: set[str],
         allowed_attributes: set[str],
-        replacer_fn: Callable[[str], Optional[str]],
+        replacer_fn: Callable[[str], str | None],
     ) -> None:
         """Initialize the HTML attribute replacer.
 
@@ -58,12 +62,12 @@ class _HTMLAttributeReplacer(HTMLParser):
         self._output: list[str] = []
 
     def handle_starttag(
-        self, tag: str, attrs: list[tuple[str, Optional[str]]]
+        self, tag: str, attrs: list[tuple[str, str | None]]
     ) -> None:
         """Handle opening tags, replacing attributes if applicable."""
         if tag.lower() in self.allowed_tags:
             # Process attributes for allowed tags
-            new_attrs: list[tuple[str, Optional[str]]] = []
+            new_attrs: list[tuple[str, str | None]] = []
             for attr_name, attr_value in attrs:
                 if attr_name.lower() in self.allowed_attributes and attr_value:
                     # Apply the replacer function
@@ -93,12 +97,12 @@ class _HTMLAttributeReplacer(HTMLParser):
         self._output.append(data)
 
     def handle_startendtag(
-        self, tag: str, attrs: list[tuple[str, Optional[str]]]
+        self, tag: str, attrs: list[tuple[str, str | None]]
     ) -> None:
         """Handle self-closing tags (e.g., <img />)."""
         if tag.lower() in self.allowed_tags:
             # Process attributes for allowed tags
-            new_attrs: list[tuple[str, Optional[str]]] = []
+            new_attrs: list[tuple[str, str | None]] = []
             for attr_name, attr_value in attrs:
                 if attr_name.lower() in self.allowed_attributes and attr_value:
                     # Apply the replacer function
@@ -139,7 +143,7 @@ class _HTMLAttributeReplacer(HTMLParser):
         """Preserve entity references like &nbsp;."""
         self._output.append(f"&{name};")
 
-    def _format_attrs(self, attrs: list[tuple[str, Optional[str]]]) -> str:
+    def _format_attrs(self, attrs: list[tuple[str, str | None]]) -> str:
         """Format attributes for output."""
         if not attrs:
             return ""
@@ -164,7 +168,7 @@ def replace_html_attributes(
     *,
     allowed_tags: set[str],
     allowed_attributes: set[str],
-    replacer_fn: Callable[[str], Optional[str]],
+    replacer_fn: Callable[[str], str | None],
 ) -> str:
     """Replace attribute values in HTML using a custom function.
 
@@ -220,7 +224,7 @@ def _is_virtual_file_url(url: str) -> bool:
     return VIRTUAL_FILE_PATTERN.match(url) is not None
 
 
-def _parse_virtual_file_url(url: str) -> Optional[tuple[int, str]]:
+def _parse_virtual_file_url(url: str) -> tuple[int, str] | None:
     """Parse a virtual file URL into its components.
 
     Args:
@@ -236,7 +240,7 @@ def _parse_virtual_file_url(url: str) -> Optional[tuple[int, str]]:
     return int(byte_length_str), filename
 
 
-def _virtual_file_to_data_uri(virtual_file_url: str) -> Optional[str]:
+def _virtual_file_to_data_uri(virtual_file_url: str) -> str | None:
     """Convert a virtual file URL to a data URI.
 
     Args:
@@ -269,8 +273,8 @@ def _virtual_file_to_data_uri(virtual_file_url: str) -> Optional[str]:
 def replace_virtual_files_with_data_uris(
     html: str,
     allowed_tags: set[str],
-    allowed_attributes: Optional[set[str]] = None,
-    max_inline_bytes: Optional[int] = None,
+    allowed_attributes: set[str] | None = None,
+    max_inline_bytes: int | None = None,
 ) -> tuple[str, set[str]]:
     """Replace virtual file URLs with data URIs in HTML.
 
@@ -304,7 +308,7 @@ def replace_virtual_files_with_data_uris(
 
     replaced_files: set[str] = set()
 
-    def replacer(value: str) -> Optional[str]:
+    def replacer(value: str) -> str | None:
         """Replace virtual file URLs with data URIs."""
         if _is_virtual_file_url(value):
             if max_inline_bytes is not None:
@@ -342,3 +346,124 @@ def replace_virtual_files_with_data_uris(
     )
 
     return processed_html, replaced_files
+
+
+# Public folder file pattern: public/{path} or ./public/{path}
+_PUBLIC_FILE_PATTERN = re.compile(r"^(?:\./)?public/(.+)$")
+
+
+def _resolve_public_file(public_dir: Path, relpath: str) -> Path | None:
+    """Resolve a `public/`-prefixed path against the public dir.
+
+    Returns the resolved path if it points to an existing regular file
+    strictly inside `public_dir`, or None otherwise. Rejects path traversal
+    and symlinks that escape the public directory.
+    """
+    try:
+        # `strict=True` ensures the file exists.
+        # `RuntimeError` covers symlink loops on Python 3.10–3.12.
+        candidate = (public_dir / relpath).resolve(strict=True)
+        public_resolved = public_dir.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+    # Containment check: the resolved file must live under the resolved
+    # public directory (catches path traversal and symlink escapes).
+    try:
+        candidate.relative_to(public_resolved)
+    except ValueError:
+        return None
+
+    if not candidate.is_file():
+        return None
+
+    return candidate
+
+
+def replace_public_files_with_data_uris(
+    html: str,
+    public_dir: Path,
+    *,
+    allowed_tags: set[str] | None = None,
+    allowed_attributes: set[str] | None = None,
+    max_inline_bytes: int | None = None,
+) -> tuple[str, set[str]]:
+    """Inline `public/`-prefixed file references as data URIs.
+
+    Scans `html` for media tag attributes (e.g. `<img src="public/...">`),
+    reads the referenced file from the notebook's `public/` folder, and
+    replaces the attribute value with a base64-encoded data URI so the
+    HTML can be served standalone. Paths that escape `public_dir` (via
+    `..` segments or symlinks) are rejected and left unchanged.
+
+    Args:
+        html: The HTML string to process.
+        public_dir: Path to the notebook's `public/` directory.
+        allowed_tags: Tags to scan. Defaults to {"img", "audio", "video",
+            "source"}.
+        allowed_attributes: Attributes to scan. Defaults to {"src"}.
+        max_inline_bytes: Maximum file size to inline. Larger files are
+            left as-is. None means no limit.
+
+    Returns:
+        Tuple of (processed_html, replaced_paths) where `replaced_paths`
+        is the set of attribute values that were successfully inlined.
+    """
+    if allowed_tags is None:
+        allowed_tags = {"img", "audio", "video", "source"}
+    if allowed_attributes is None:
+        allowed_attributes = {"src"}
+
+    replaced: set[str] = set()
+
+    # If the public directory does not exist, there is nothing to inline.
+    if not public_dir.exists():
+        return html, replaced
+
+    def replacer(value: str) -> str | None:
+        match = _PUBLIC_FILE_PATTERN.match(value)
+        if not match:
+            return None
+        relpath = match.group(1)
+        resolved = _resolve_public_file(public_dir, relpath)
+        if resolved is None:
+            return None
+        # Check size via stat() before reading so an oversized file never
+        # gets loaded into memory.
+        try:
+            file_size = resolved.stat().st_size
+        except OSError as e:
+            LOGGER.warning(
+                "Failed to stat public file %s during export: %s", value, e
+            )
+            return None
+        if max_inline_bytes is not None and file_size > max_inline_bytes:
+            LOGGER.info(
+                "Skipping public file %s (%d bytes exceeds %d byte inline"
+                " limit)",
+                value,
+                file_size,
+                max_inline_bytes,
+            )
+            return None
+        try:
+            file_bytes = resolved.read_bytes()
+        except OSError as e:
+            LOGGER.warning(
+                "Failed to read public file %s during export: %s", value, e
+            )
+            return None
+        mime_type = mimetypes.guess_type(resolved.name)[0] or "text/plain"
+        replaced.add(value)
+        return build_data_url(
+            cast(KnownMimeType, mime_type),
+            base64.b64encode(file_bytes),
+        )
+
+    processed_html = replace_html_attributes(
+        html=html,
+        allowed_tags=allowed_tags,
+        allowed_attributes=allowed_attributes,
+        replacer_fn=replacer,
+    )
+    return processed_html, replaced

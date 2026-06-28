@@ -78,7 +78,7 @@ def test_get_variable_preview() -> None:
     assert get_variable_preview([]) == "[]"
     assert get_variable_preview({}) == "{}"
     assert get_variable_preview(set()) == "{}"
-    assert get_variable_preview(tuple()) == "()"
+    assert get_variable_preview(()) == "()"
 
     # Test single-element containers
     assert get_variable_preview([1]) == "[1]"
@@ -178,8 +178,11 @@ def test_get_variable_preview_memory_numpy() -> None:
 
     mem_diff_mb = (mem_after - mem_before) / (1024 * 1024)
 
-    # Memory shouldn't increase significantly during preview
-    assert mem_diff_mb < 1, (
+    # Memory shouldn't increase significantly during preview.
+    # Threshold is well under the 100MB array size so we still catch
+    # full copies, but loose enough to absorb allocator noise on
+    # macOS arm64 runners.
+    assert mem_diff_mb < 5, (
         f"Memory increased by {mem_diff_mb}MB during preview"
     )
     assert preview == "[1. 1. 1. ... 1. 1. 1.]"
@@ -199,8 +202,11 @@ def test_get_variable_preview_bytesarray() -> None:
 
     mem_diff_mb = (mem_after - mem_before) / (1024 * 1024)
 
-    # Memory shouldn't increase significantly during preview
-    assert mem_diff_mb < 1, (
+    # Memory shouldn't increase significantly during preview.
+    # Threshold is well under the 100MB bytearray size so we still catch
+    # full copies, but loose enough to absorb allocator noise on
+    # macOS arm64 runners.
+    assert mem_diff_mb < 5, (
         f"Memory increased by {mem_diff_mb}MB during preview"
     )
     assert (
@@ -224,7 +230,9 @@ def test_get_variable_preview_dataframe(df: Any) -> None:
 
     mem_diff_mb = (mem_after - mem_before) / (1024 * 1024)
 
-    assert mem_diff_mb < 10, (
+    # Threshold is well under copying the 1M-row frame but loose enough to
+    # absorb allocator noise on macOS arm64 runners.
+    assert mem_diff_mb < 15, (
         f"Memory increased by {mem_diff_mb}MB during preview"
     )
     assert "2 columns" in preview

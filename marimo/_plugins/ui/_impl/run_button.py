@@ -1,12 +1,15 @@
 # Copyright 2026 Marimo. All rights reserved.
 from __future__ import annotations
 
-from typing import Any, Callable, Final, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Final, Literal, Union
 
 from marimo._output.rich_help import mddoc
 from marimo._plugins.ui._core.ui_element import UIElement
 from marimo._plugins.ui._impl.input import button
 from marimo._runtime.context.types import ContextNotInitializedError
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 @mddoc
@@ -47,9 +50,9 @@ class run_button(UIElement[Any, Any]):
         disabled (bool, optional): Whether the button is disabled. Defaults to False.
         tooltip (str, optional): A tooltip to display for the button. Defaults to None.
         auto_run (bool | Literal["once", "always"], optional): Automatically fire the
-            button without user interaction. ``False`` (default) disables auto-run.
-            ``True`` or ``"once"`` fires the button on the first notebook load only
-            (cell re-executions within the same session will not re-fire). ``"always"``
+            button without user interaction. `False` (default) disables auto-run.
+            `True` or `"once"` fires the button on the first notebook load only
+            (cell re-executions within the same session will not re-fire). `"always"`
             fires the button every time the containing cell executes, including when
             upstream dependencies change. Defaults to False.
         label (str, optional): Markdown label for the element. Defaults to "click to run".
@@ -68,13 +71,13 @@ class run_button(UIElement[Any, Any]):
         self,
         kind: Literal["neutral", "success", "warn", "danger"] = "neutral",
         disabled: bool = False,
-        tooltip: Optional[str] = None,
+        tooltip: str | None = None,
         *,
         auto_run: Union[bool, Literal["once", "always"]] = False,
         label: str = "click to run",
-        on_change: Optional[Callable[[Any], None]] = None,
+        on_change: Callable[[Any], None] | None = None,
         full_width: bool = False,
-        keyboard_shortcut: Optional[str] = None,
+        keyboard_shortcut: str | None = None,
     ) -> None:
         self._initial_value = False
         # Normalize True → "once" for the frontend
@@ -98,7 +101,7 @@ class run_button(UIElement[Any, Any]):
         )
 
     def _convert_value(self, value: Any) -> Any:
-        if value == 0:
+        if value == 0:  # noqa: SIM103
             # frontend's value == 0 only during initialization; first value
             # frontend will send is 1
             return False

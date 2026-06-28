@@ -1,5 +1,6 @@
 /* Copyright 2026 Marimo. All rights reserved. */
 
+import { useAtomValue } from "jotai";
 import {
   BracesIcon,
   BrickWallIcon,
@@ -8,18 +9,18 @@ import {
   TableIcon,
 } from "lucide-react";
 import React from "react";
-import { useLocale } from "react-aria";
+import { downloadSizeLimitAtom } from "./download-policy/atoms";
 import { logNever } from "@/utils/assertNever";
 import { cn } from "@/utils/cn";
 import { copyToClipboard } from "@/utils/copy";
-import { downloadByURL } from "@/utils/download";
+import { downloadByURL, withLoadingToast } from "@/utils/download";
 import { prettyError } from "@/utils/errors";
 import { Filenames } from "@/utils/filenames";
 import {
   jsonParseWithSpecialChar,
   jsonToMarkdown,
-  jsonToTSV,
 } from "@/utils/json/json-parser";
+import { MissingPackagePrompt } from "../datasources/missing-package-prompt";
 import { Button } from "../ui/button";
 import {
   DropdownMenu,
@@ -31,15 +32,6 @@ import {
 } from "../ui/dropdown-menu";
 import { Tooltip } from "../ui/tooltip";
 import { toast } from "../ui/use-toast";
-
-type DownloadFormat = "csv" | "json" | "parquet";
-
-export interface ExportActionProps {
-  downloadAs: (req: { format: DownloadFormat }) => Promise<{
-    url: string;
-    filename: string;
-  }>;
-}
 
 const FILE_TYPES = {
   CSV: {
@@ -74,7 +66,12 @@ const FILE_TYPES = {
   },
 } as const;
 
-const downloadOptions = [FILE_TYPES.CSV, FILE_TYPES.JSON, FILE_TYPES.PARQUET];
+const downloadOptions = [
+  FILE_TYPES.CSV,
+  FILE_TYPES.TSV,
+  FILE_TYPES.JSON,
+  FILE_TYPES.PARQUET,
+];
 const copyOptions = [
   FILE_TYPES.TSV,
   FILE_TYPES.JSON,
@@ -82,18 +79,62 @@ const copyOptions = [
   FILE_TYPES.MARKDOWN,
 ];
 
+type DownloadFormat = (typeof downloadOptions)[number]["format"];
+type CopyFormat = (typeof copyOptions)[number]["format"];
+
+// Each clipboard-copy format fetches from a backend download format, then
+// transforms the payload client-side as needed.
+const COPY_SOURCE_FORMAT: Record<CopyFormat, DownloadFormat> = {
+  csv: "csv",
+  tsv: "tsv",
+  json: "json",
+  markdown: "json",
+};
+
+export interface ExportActionProps {
+  downloadAs: (req: { format: DownloadFormat }) => Promise<{
+    url: string;
+    filename: string;
+    error?: string | null;
+    missing_packages?: string[] | null;
+  }>;
+  // JSON-serialized size of the currently-rendered data. Used together with
+  // downloadSizeLimitAtom to disable the Export button when a host (e.g.,
+  // marimo-lsp inside VS Code) declares a download size cap. Null/undefined
+  // means "no info" and the gate stays disabled (fail-open).
+  sizeBytes?: number | null;
+  sizeBytesIsLoading?: boolean;
+}
+
+const labelForDownloadFormat = (format: DownloadFormat): string =>
+  downloadOptions.find((opt) => opt.format === format)?.label ?? format;
+const labelForCopyFormat = (format: CopyFormat): string =>
+  copyOptions.find((opt) => opt.format === format)?.label ?? format;
+
 export const ExportMenu: React.FC<ExportActionProps> = (props) => {
-  const { locale } = useLocale();
-  const [open, setOpen] = React.useState(false);
+  const [downloadMenuOpen, setDownloadMenuOpen] = React.useState(false);
+  const policy = useAtomValue(downloadSizeLimitAtom);
+  const overLimit = !!(
+    policy &&
+    props.sizeBytes != null &&
+    props.sizeBytes > policy.limitBytes
+  );
+  const disabled = !!(policy && (props.sizeBytesIsLoading || overLimit));
+  const tooltipContent = !disabled
+    ? "Export"
+    : props.sizeBytesIsLoading
+      ? "Checking download size…"
+      : policy?.unavailableMessage;
 
   const button = (
     <Button
       data-testid="export-button"
       size="xs"
       variant="text"
+      disabled={disabled}
       className={cn(
         "print:hidden text-xs gap-1",
-        open ? "text-primary" : "text-muted-foreground",
+        downloadMenuOpen ? "text-primary" : "text-muted-foreground",
       )}
     >
       <DownloadIcon className="w-3.5 h-3.5" />
@@ -101,61 +142,140 @@ export const ExportMenu: React.FC<ExportActionProps> = (props) => {
     </Button>
   );
 
-  const getDownloadResult = (format: DownloadFormat) => {
-    return props.downloadAs({ format }).catch((error) => {
+  const resolveDownloadUrl = async (
+    format: DownloadFormat,
+    onRetry: () => void,
+  ): Promise<{
+    url: string;
+    filename: string;
+  } | null> => {
+    let response: Awaited<ReturnType<typeof props.downloadAs>>;
+    try {
+      response = await props.downloadAs({ format });
+    } catch (error) {
       toast({
         title: "Failed to download",
-        description: "message" in error ? error.message : String(error),
+        description:
+          error != null && typeof error === "object" && "message" in error
+            ? String(error.message)
+            : String(error),
       });
-      throw error;
-    });
-  };
-
-  const handleClipboardCopy = async (
-    format: (typeof copyOptions)[number]["format"],
-  ) => {
-    let text: string;
-
-    switch (format) {
-      case "tsv": {
-        const { url } = await getDownloadResult("json");
-        const json = await fetchJson(url);
-        text = jsonToTSV(json, locale);
-        break;
-      }
-      case "json": {
-        const { url } = await getDownloadResult("json");
-        const json = await fetchJson(url);
-        text = JSON.stringify(json, null, 2);
-        break;
-      }
-      case "csv": {
-        const { url } = await getDownloadResult("csv");
-        const csv = await fetchText(url);
-        text = csv;
-        break;
-      }
-      case "markdown": {
-        const { url } = await getDownloadResult("json");
-        const json = await fetchJson(url);
-        text = jsonToMarkdown(json);
-        break;
-      }
-      default:
-        logNever(format);
-        return;
+      return null;
     }
 
-    await copyToClipboard(text);
-    toast({
-      title: "Copied to clipboard",
-    });
+    if (response.missing_packages && response.missing_packages.length > 0) {
+      toast({
+        title: "Export failed",
+        description: (
+          <MissingPackagePrompt
+            packages={response.missing_packages}
+            featureName={`${labelForDownloadFormat(format)} export`}
+            description={response.error}
+            onInstall={onRetry}
+          />
+        ),
+      });
+      return null;
+    }
+
+    return {
+      url: response.url,
+      filename: response.filename,
+    };
+  };
+
+  const handleDownload = async (format: DownloadFormat) => {
+    const label = labelForDownloadFormat(format);
+    const ok = await withLoadingToast(
+      `Preparing ${label} export...`,
+      async () => {
+        const result = await resolveDownloadUrl(format, () => {
+          void handleDownload(format);
+        });
+        if (!result) {
+          return false;
+        }
+        const rawName = (result.filename ?? "").trim();
+        const baseName = Filenames.withoutExtension(rawName) || "download";
+        const downloadName = `${baseName}.${format}`;
+        // Append ?download=1 so the server returns Content-Disposition: attachment.
+        // This forces a save even when <a download> is ignored — e.g., inside
+        // sandboxed iframes that lack `allow-downloads`. Skip for data: URLs
+        // (used in pyodide/wasm) since query params would corrupt the payload.
+        let downloadUrl = result.url;
+        if (!downloadUrl.startsWith("data:")) {
+          const separator = downloadUrl.includes("?") ? "&" : "?";
+          const params = new URLSearchParams({
+            download: "1",
+            filename: downloadName,
+          });
+          downloadUrl = `${downloadUrl}${separator}${params.toString()}`;
+        }
+        downloadByURL(downloadUrl, downloadName);
+        return true;
+      },
+    );
+    if (ok) {
+      toast({ title: `${label} download started` });
+    }
+  };
+
+  const handleClipboardCopy = async (format: CopyFormat) => {
+    await withLoadingToast(
+      `Preparing ${labelForCopyFormat(format)} for clipboard...`,
+      async () => {
+        const sourceFormat = COPY_SOURCE_FORMAT[format];
+        const result = await resolveDownloadUrl(sourceFormat, () => {
+          void handleClipboardCopy(format);
+        });
+        if (!result) {
+          return;
+        }
+
+        let text: string;
+        switch (format) {
+          case "tsv":
+          case "csv":
+            text = await fetchText(result.url);
+            break;
+          case "json": {
+            const json = await fetchJson(result.url);
+            text = JSON.stringify(json, null, 2);
+            break;
+          }
+          case "markdown": {
+            const json = await fetchJson(result.url);
+            text = jsonToMarkdown(json);
+            break;
+          }
+          default:
+            logNever(format);
+            return;
+        }
+
+        await copyToClipboard(text);
+        toast({
+          title: "Copied to clipboard",
+        });
+      },
+    );
   };
 
   return (
-    <DropdownMenu modal={false} open={open} onOpenChange={setOpen}>
-      <Tooltip content="Export" open={open ? false : undefined}>
-        <DropdownMenuTrigger asChild={true}>{button}</DropdownMenuTrigger>
+    <DropdownMenu
+      modal={false}
+      open={downloadMenuOpen}
+      onOpenChange={setDownloadMenuOpen}
+    >
+      <Tooltip
+        content={tooltipContent}
+        open={downloadMenuOpen ? false : undefined}
+      >
+        <DropdownMenuTrigger asChild={true} disabled={disabled}>
+          <span tabIndex={disabled ? 0 : -1} className="inline-flex">
+            {button}
+          </span>
+        </DropdownMenuTrigger>
       </Tooltip>
       <DropdownMenuContent side="bottom" className="print:hidden">
         <DropdownMenuLabel className="text-xs text-muted-foreground">
@@ -164,13 +284,8 @@ export const ExportMenu: React.FC<ExportActionProps> = (props) => {
         {downloadOptions.map((option) => (
           <DropdownMenuItem
             key={option.label}
-            onSelect={async () => {
-              const { url, filename } = await getDownloadResult(option.format);
-              const ext = option.format;
-              const rawName = (filename ?? "").trim();
-              const baseName =
-                Filenames.withoutExtension(rawName) || "download";
-              downloadByURL(url, `${baseName}.${ext}`);
+            onSelect={() => {
+              void handleDownload(option.format);
             }}
           >
             <option.icon className="mo-dropdown-icon" />

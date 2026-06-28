@@ -86,6 +86,74 @@ describe("RuntimeManager", () => {
     });
   });
 
+  describe("cross-origin auth token in WS URLs", () => {
+    it("should add access_token to WS URL when cross-origin with authToken", () => {
+      // example.com is cross-origin relative to the test environment (localhost)
+      const runtime = new RuntimeManager(
+        {
+          url: "https://sandbox.example.com",
+          lazy: true,
+          authToken: "my-secret-token",
+        },
+        true,
+      );
+      const url = runtime.getWsURL("s_123" as SessionId);
+
+      expect(url.searchParams.get("access_token")).toBe("my-secret-token");
+      expect(url.searchParams.get("session_id")).toBe("s_123");
+    });
+
+    it("should not add access_token to WS URL when same-origin", () => {
+      const runtime = new RuntimeManager(
+        {
+          url: window.location.origin,
+          lazy: true,
+          authToken: "my-secret-token",
+        },
+        true,
+      );
+      const url = runtime.getWsURL("s_123" as SessionId);
+
+      expect(url.searchParams.get("access_token")).toBeNull();
+    });
+
+    it("should not add access_token when no authToken is configured", () => {
+      const runtime = new RuntimeManager(
+        {
+          url: "https://sandbox.example.com",
+          lazy: true,
+        },
+        true,
+      );
+      const url = runtime.getWsURL("s_123" as SessionId);
+
+      expect(url.searchParams.get("access_token")).toBeNull();
+    });
+
+    it("should add access_token to all WS URL types when cross-origin", () => {
+      const runtime = new RuntimeManager(
+        {
+          url: "https://sandbox.example.com",
+          lazy: true,
+          authToken: "my-secret-token",
+        },
+        true,
+      );
+
+      const wsUrl = runtime.getWsURL("s_123" as SessionId);
+      const wsSyncUrl = runtime.getWsSyncURL("s_123" as SessionId);
+      const terminalUrl = runtime.getTerminalWsURL();
+
+      expect(wsUrl.searchParams.get("access_token")).toBe("my-secret-token");
+      expect(wsSyncUrl.searchParams.get("access_token")).toBe(
+        "my-secret-token",
+      );
+      expect(terminalUrl.searchParams.get("access_token")).toBe(
+        "my-secret-token",
+      );
+    });
+  });
+
   describe("getWsSyncURL", () => {
     it("should return WebSocket Sync URL", () => {
       const runtime = new RuntimeManager(mockConfig);
@@ -117,12 +185,52 @@ describe("RuntimeManager", () => {
       expect(url.pathname).toBe("/lsp/pylsp");
     });
 
-    it("should return copilot URL", () => {
-      const runtime = new RuntimeManager(mockConfig);
+    it("should return copilot URL without non-auth query params", () => {
+      const runtime = new RuntimeManager({
+        url: "https://example.com?foo=bar&baz=qux",
+        lazy: true,
+      });
       const url = runtime.getLSPURL("copilot");
 
       expect(url.protocol).toBe("wss:");
       expect(url.pathname).toBe("/lsp/copilot");
+      expect(url.searchParams.get("foo")).toBeNull();
+      expect(url.searchParams.get("baz")).toBeNull();
+    });
+
+    it("should preserve access_token on copilot URL when cross-origin", () => {
+      const runtime = new RuntimeManager(
+        {
+          url: "https://sandbox.example.com?foo=bar",
+          lazy: true,
+          authToken: "my-secret-token",
+        },
+        true,
+      );
+      const url = runtime.getLSPURL("copilot");
+
+      expect(url.protocol).toBe("wss:");
+      expect(url.pathname).toBe("/lsp/copilot");
+      expect(url.searchParams.get("access_token")).toBe("my-secret-token");
+      // Other params should be stripped
+      expect(url.searchParams.get("foo")).toBeNull();
+    });
+
+    it("should not have access_token on copilot URL when same-origin", () => {
+      const runtime = new RuntimeManager(
+        {
+          url: window.location.origin,
+          lazy: true,
+          authToken: "my-secret-token",
+        },
+        true,
+      );
+      const url = runtime.getLSPURL("copilot");
+
+      expect(url.protocol).toBe("ws:");
+      expect(url.pathname).toBe("/lsp/copilot");
+      expect(url.searchParams.get("access_token")).toBeNull();
+      expect(url.search).toBe("");
     });
   });
 
@@ -167,14 +275,14 @@ describe("RuntimeManager", () => {
     });
   });
 
-  describe("isHealthy", () => {
+  describe("probeHealth", () => {
     it("should return true for successful health check", async () => {
       global.fetch = vi.fn().mockResolvedValue({
         ok: true,
       });
 
       const runtime = new RuntimeManager(mockConfig);
-      const result = await runtime.isHealthy();
+      const result = await runtime.probeHealth();
 
       expect(result).toBe(true);
       expect(fetch).toHaveBeenCalledWith("https://example.com/health");
@@ -186,7 +294,7 @@ describe("RuntimeManager", () => {
       });
 
       const runtime = new RuntimeManager(mockConfig);
-      const result = await runtime.isHealthy();
+      const result = await runtime.probeHealth();
 
       expect(result).toBe(false);
     });
@@ -196,9 +304,58 @@ describe("RuntimeManager", () => {
       global.fetch = vi.fn().mockRejectedValue(error);
 
       const runtime = new RuntimeManager(mockConfig);
-      const result = await runtime.isHealthy();
+      const result = await runtime.probeHealth();
 
       expect(result).toBe(false);
+    });
+
+    it("should not mutate config.url on redirect", async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        redirected: true,
+        url: "https://sandbox.example.com/health?some_value=abc123",
+      });
+
+      const runtime = new RuntimeManager(
+        {
+          ...mockConfig,
+          url: "https://backend.example.com/lazy?some_value=abc123",
+        },
+        true,
+      );
+      const result = await runtime.probeHealth();
+      expect(result).toBe(true);
+      expect(runtime.httpURL.hostname).toBe("backend.example.com");
+    });
+  });
+
+  describe("reconcileFromHealth", () => {
+    it("should update config.url on redirect, stripping /health from pathname", async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        redirected: true,
+        url: "https://sandbox.example.com/health?some_value=abc123",
+      });
+
+      const runtime = new RuntimeManager(
+        {
+          ...mockConfig,
+          url: "https://backend.example.com/lazy?some_value=abc123",
+        },
+        true, // lazy — don't call init() in constructor
+      );
+      const result = await runtime.reconcileFromHealth();
+
+      expect(result).toBe(true);
+      // Should strip /health from pathname but preserve query params
+      const wsUrl = runtime.getWsURL("s_test" as SessionId);
+      expect(wsUrl.pathname).toBe("/ws");
+      expect(wsUrl.hostname).toBe("sandbox.example.com");
+      expect(wsUrl.searchParams.get("some_value")).toBe("abc123");
+
+      // Clean up side effects
+      document.querySelectorAll("base").forEach((el) => el.remove());
+      global.fetch = vi.fn().mockResolvedValue({ ok: false });
     });
   });
 
@@ -206,7 +363,7 @@ describe("RuntimeManager", () => {
     it("should resolve immediately if healthy", async () => {
       const runtime = new RuntimeManager(mockConfig, true);
 
-      vi.spyOn(runtime, "isHealthy").mockResolvedValue(true);
+      vi.spyOn(runtime, "reconcileFromHealth").mockResolvedValue(true);
       runtime.init();
 
       await expect(runtime.waitForHealthy()).resolves.toBeUndefined();
@@ -215,7 +372,7 @@ describe("RuntimeManager", () => {
     it("should retry and eventually succeed", async () => {
       const runtime = new RuntimeManager(mockConfig, true);
       const healthySpy = vi
-        .spyOn(runtime, "isHealthy")
+        .spyOn(runtime, "reconcileFromHealth")
         .mockResolvedValueOnce(false)
         .mockResolvedValueOnce(false)
         .mockResolvedValueOnce(true);
@@ -228,7 +385,7 @@ describe("RuntimeManager", () => {
 
     it("should throw after max retries", async () => {
       const runtime = new RuntimeManager(mockConfig, true);
-      vi.spyOn(runtime, "isHealthy").mockResolvedValue(false);
+      vi.spyOn(runtime, "reconcileFromHealth").mockResolvedValue(false);
       runtime.init({ disableRetryDelay: true });
 
       await expect(runtime.waitForHealthy()).rejects.toThrow(
@@ -295,7 +452,7 @@ describe("RuntimeManager", () => {
       // Mock failed health check
       global.fetch = vi.fn().mockResolvedValue({ ok: false });
 
-      await runtime.isHealthy();
+      await runtime.reconcileFromHealth();
 
       baseElement = document.querySelector("base");
       expect(baseElement).toBeNull();
@@ -307,7 +464,7 @@ describe("RuntimeManager", () => {
       // Mock successful health check
       global.fetch = vi.fn().mockResolvedValue({ ok: true });
 
-      await runtime.isHealthy();
+      await runtime.reconcileFromHealth();
 
       const baseElement = document.querySelector("base");
       expect(baseElement).toBeTruthy();
@@ -325,7 +482,7 @@ describe("RuntimeManager", () => {
       // Mock successful health check
       global.fetch = vi.fn().mockResolvedValue({ ok: true });
 
-      await runtime.isHealthy();
+      await runtime.reconcileFromHealth();
 
       const baseElement = document.querySelector("base");
       expect(baseElement).toBe(existingBase); // Should be the same element
@@ -347,7 +504,7 @@ describe("RuntimeManager", () => {
       // Mock successful health check
       global.fetch = vi.fn().mockResolvedValue({ ok: true });
 
-      await runtime.isHealthy();
+      await runtime.reconcileFromHealth();
 
       const baseElement = document.querySelector("base");
       expect(baseElement).toBeTruthy();
@@ -388,11 +545,11 @@ describe("RuntimeManager", () => {
       });
 
       const wsUrl = runtime.getWsURL("test" as SessionId);
-      const httpUrl = runtime.formatHttpURL(
-        "api/test",
-        new URLSearchParams(),
-        false,
-      );
+      const httpUrl = runtime.formatHttpURL({
+        path: "api/test",
+        searchParams: new URLSearchParams(),
+        restrictToKnownQueryParams: false,
+      });
 
       // Should preserve base URL query params
       expect(wsUrl.searchParams.get("base_param")).toBe("existing");

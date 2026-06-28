@@ -12,6 +12,7 @@ import { Controls } from "@/components/editor/controls/Controls";
 import { AppHeader } from "@/components/editor/header/app-header";
 import { FilenameForm } from "@/components/editor/header/filename-form";
 import { MultiCellActionToolbar } from "@/components/editor/navigation/multi-cell-action-toolbar";
+import { ViewerBanner } from "@/components/editor/viewer-banner";
 import { cn } from "@/utils/cn";
 import { Paths } from "@/utils/paths";
 import { AppContainer } from "../components/editor/app-container";
@@ -19,6 +20,7 @@ import {
   useRunAllCells,
   useRunStaleCells,
 } from "../components/editor/cell/useRunCells";
+import { useSetCodeVisibility } from "../components/editor/actions/useSetCodeVisibility";
 import { CellArray } from "../components/editor/renderers/cell-array";
 import { CellsRenderer } from "../components/editor/renderers/cells-renderer";
 import { useHotkey } from "../hooks/useHotkey";
@@ -79,7 +81,7 @@ export const EditApp: React.FC<AppProps> = ({
     };
   }, []);
 
-  const { connection } = useMarimoKernelConnection({
+  const { connection, reconnect } = useMarimoKernelConnection({
     autoInstantiate: userConfig.runtime.auto_instantiate,
     setCells: (cells, layout) => {
       setCells(cells);
@@ -111,6 +113,7 @@ export const EditApp: React.FC<AppProps> = ({
   const runStaleCells = useRunStaleCells();
   const runAllCells = useRunAllCells();
   const togglePresenting = useTogglePresenting();
+  const setCodeVisibility = useSetCodeVisibility();
 
   // HOTKEYS
   useHotkey("global.runStale", () => {
@@ -125,6 +128,18 @@ export const EditApp: React.FC<AppProps> = ({
   useHotkey("global.runAll", () => {
     runAllCells();
   });
+  useHotkey("global.showAllCode", () => {
+    setCodeVisibility(false, "code");
+  });
+  useHotkey("global.hideAllCode", () => {
+    setCodeVisibility(true, "code");
+  });
+  useHotkey("global.showAllMarkdownCode", () => {
+    setCodeVisibility(false, "markdown");
+  });
+  useHotkey("global.hideAllMarkdownCode", () => {
+    setCodeVisibility(true, "markdown");
+  });
   useHotkey("global.collapseAllSections", () => {
     collapseAllCells();
   });
@@ -137,6 +152,7 @@ export const EditApp: React.FC<AppProps> = ({
       mode={viewState.mode}
       userConfig={userConfig}
       appConfig={appConfig}
+      hideControls={hideControls}
     />
   );
 
@@ -146,6 +162,7 @@ export const EditApp: React.FC<AppProps> = ({
         connection={connection}
         isRunning={isRunning}
         width={appConfig.width}
+        onReconnect={reconnect}
       >
         <AppHeader
           connection={connection}
@@ -155,12 +172,14 @@ export const EditApp: React.FC<AppProps> = ({
             "sticky left-0",
           )}
         >
-          {isEditing && (
+          {!hideControls && isEditing && (
             <div className="flex items-center justify-center container">
               <FilenameForm filename={filename} />
             </div>
           )}
         </AppHeader>
+
+        <ViewerBanner />
 
         {/* Don't render until we have a single cell */}
         {hasCells && (

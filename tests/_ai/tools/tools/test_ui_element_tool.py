@@ -47,10 +47,10 @@ class MockSession:
             return _AutoSignalCtx(listener)
 
         class _PassthroughCtx:
-            def __enter__(self_inner) -> object:  # noqa: N805
+            def __enter__(self_inner) -> object:
                 return listener
 
-            def __exit__(self_inner, *args: object) -> None:  # noqa: N805
+            def __exit__(self_inner, *args: object) -> None:
                 pass
 
         return _PassthroughCtx()

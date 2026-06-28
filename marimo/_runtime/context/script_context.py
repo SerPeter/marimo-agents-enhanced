@@ -5,7 +5,7 @@ import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from marimo._ast.app import AppKernelRunnerRegistry
 from marimo._cli.parse_args import args_from_argv
@@ -54,9 +54,7 @@ class ScriptRuntimeContext(RuntimeContext):
     @property
     def globals(self) -> dict[str, Any]:
         with patch_main_module_context(
-            create_main_module(
-                file=None, input_override=None, print_override=None
-            )
+            create_main_module(file=None, input_override=None)
         ) as module:
             glbls = module.__dict__
         glbls.update(sys.modules["__main__"].__dict__)
@@ -77,7 +75,7 @@ class ScriptRuntimeContext(RuntimeContext):
         return self._cached_config
 
     @property
-    def cell_id(self) -> Optional[CellId_t]:
+    def cell_id(self) -> CellId_t | None:
         """Get the cell id of the currently executing cell, if any."""
         if self.execution_context is not None:
             return self.execution_context.cell_id

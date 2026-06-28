@@ -12,16 +12,7 @@ from typing import TYPE_CHECKING, Optional, Protocol
 
 from marimo import _loggers
 from marimo._config.manager import MarimoConfigManager
-from marimo._messaging.notebook import DocumentChange
-from marimo._messaging.notebook.changes import (
-    CreateCell,
-    DeleteCell,
-    ReorderCells,
-    SetCode,
-    SetConfig,
-    SetName,
-    Transaction,
-)
+from marimo._messaging.notebook.changes import DeleteCell, Transaction
 from marimo._messaging.notification import (
     NotebookDocumentTransactionNotification,
     ReloadNotification,
@@ -44,20 +35,27 @@ class FileChangeResult:
     """Result of handling a file change."""
 
     handled: bool
-    error: Optional[str] = None
-    changed_cell_ids: Optional[set[CellId_t]] = None
+    error: str | None = None
+    changed_cell_ids: set[CellId_t] | None = None
 
 
 class ReloadStrategy(Protocol):
     """Protocol for file reload strategies."""
 
     def handle_reload(
-        self, session: Session, *, changed_cell_ids: set[CellId_t]
+        self,
+        session: Session,
+        *,
+        transaction: Transaction,
+        changed_cell_ids: set[CellId_t],
     ) -> None:
         """Handle reloading after file change.
 
         Args:
             session: The session to reload
+            transaction: Pre-built diff from the pre-reload document to the
+                post-reload state. Strategies that broadcast cell-level
+                changes use this; full-reload strategies can ignore it.
             changed_cell_ids: Set of cell IDs that changed
         """
         ...
@@ -74,7 +72,11 @@ class EditModeReloadStrategy(ReloadStrategy):
         self._config_manager = config_manager
 
     def handle_reload(
-        self, session: Session, *, changed_cell_ids: set[CellId_t]
+        self,
+        session: Session,
+        *,
+        transaction: Transaction,
+        changed_cell_ids: set[CellId_t],
     ) -> None:
         """Handle reload in edit mode with optional auto-run."""
         cell_manager = session.app_file_manager.app.cell_manager
@@ -87,58 +89,17 @@ class EditModeReloadStrategy(ReloadStrategy):
             f"changed_cell_ids: {changed_cell_ids}"
         )
 
-        # Build a transaction by diffing session.document vs new cell_manager.
-        doc = session.document
-        doc_ids = set(doc)
-        new_ids = set(cell_ids)
-        deleted = doc_ids - new_ids
+        deleted = {
+            change.cell_id
+            for change in transaction.changes
+            if isinstance(change, DeleteCell)
+        }
 
-        changes: list[DocumentChange] = []
-
-        # Deletes
-        for cid in deleted:
-            changes.append(DeleteCell(cell_id=cid))
-
-        # Creates and updates
-        for cd in cell_manager.cell_data():
-            if cd.cell_id not in doc_ids:
-                changes.append(
-                    CreateCell(
-                        cell_id=cd.cell_id,
-                        code=cd.code,
-                        name=cd.name,
-                        config=cd.config,
-                    )
-                )
-            else:
-                doc_cell = doc.get_cell(cd.cell_id)
-                if cd.code != doc_cell.code:
-                    changes.append(SetCode(cell_id=cd.cell_id, code=cd.code))
-                if cd.name != doc_cell.name:
-                    changes.append(SetName(cell_id=cd.cell_id, name=cd.name))
-                if cd.config != doc_cell.config:
-                    changes.append(
-                        SetConfig(
-                            cell_id=cd.cell_id,
-                            column=cd.config.column,
-                            disabled=cd.config.disabled,
-                            hide_code=cd.config.hide_code,
-                        )
-                    )
-
-        # Reorder if the lists differ
-        if tuple(cell_ids) != tuple(doc.cell_ids):
-            changes.append(ReorderCells(cell_ids=tuple(cell_ids)))
-
-        if changes:
-            # Broadcast transaction — document.apply() applies to
-            # document and stamps the version before forwarding.
-            transaction = Transaction(
-                changes=tuple(changes), source="file-watch"
-            )
-            applied = session.document.apply(transaction)
+        if transaction.changes:
             session.notify(
-                NotebookDocumentTransactionNotification(transaction=applied),
+                NotebookDocumentTransactionNotification(
+                    transaction=transaction
+                ),
                 from_consumer_id=None,
             )
 
@@ -150,7 +111,7 @@ class EditModeReloadStrategy(ReloadStrategy):
             changed_not_deleted = list(changed_cell_ids - deleted)
             session.put_control_request(
                 SyncGraphCommand(
-                    cells=dict(zip(cell_ids, codes)),
+                    cells=dict(zip(cell_ids, codes, strict=False)),
                     run_ids=changed_not_deleted,
                     delete_ids=sorted(deleted),
                 ),
@@ -161,7 +122,7 @@ class EditModeReloadStrategy(ReloadStrategy):
             # cells are cleaned up from the dependency graph.
             session.put_control_request(
                 SyncGraphCommand(
-                    cells=dict(zip(cell_ids, codes)),
+                    cells=dict(zip(cell_ids, codes, strict=False)),
                     run_ids=[],
                     delete_ids=sorted(deleted),
                 ),
@@ -169,17 +130,21 @@ class EditModeReloadStrategy(ReloadStrategy):
             )
 
 
-class RunModeReloadStrategy:
+class RunModeReloadStrategy(ReloadStrategy):
     """Reload strategy for run mode.
 
     In run mode, we simply send a reload operation to the frontend.
     """
 
     def handle_reload(
-        self, session: Session, *, changed_cell_ids: set[CellId_t]
+        self,
+        session: Session,
+        *,
+        transaction: Transaction,
+        changed_cell_ids: set[CellId_t],
     ) -> None:
         """Handle reload in run mode by sending Reload operation."""
-        del changed_cell_ids
+        del transaction, changed_cell_ids
         session.notify(ReloadNotification(), from_consumer_id=None)
 
 
@@ -201,7 +166,7 @@ class FileChangeCoordinator:
         Args:
             reload_strategy: Strategy for handling reloads
             debounce_seconds: Time to wait after the last file change before
-                triggering a reload. ``None`` or ``0`` disables debouncing.
+                triggering a reload. `None` or `0` disables debouncing.
         """
         self._reload_strategy = reload_strategy
         self._debounce_seconds = debounce_seconds or 0
@@ -281,30 +246,65 @@ class FileChangeCoordinator:
                 error=f"Session path mismatch: {session.app_file_manager.path} != {file_path}",
             )
 
-        # Check if the file content matches the last save
-        # to avoid reloading our own writes
-        if session.app_file_manager.file_content_matches_last_save():
-            LOGGER.debug(
-                f"File {file_path} content matches last save, skipping reload"
-            )
-            return FileChangeResult(handled=False)
-
-        # Reload the file manager to get the latest code
+        # Read the file once and run all pre-reload skip checks against
+        # the same snapshot. If the read itself fails, fall through to
+        # `reload()` which has its own error handling below.
         try:
-            changed_cell_ids = session.app_file_manager.reload()
+            current_content = session.app_file_manager.read_file()
+        except Exception as e:
+            LOGGER.debug(f"Error reading {file_path}: {e}")
+            current_content = None
+
+        if current_content is not None:
+            # Skip our own writes.
+            if session.app_file_manager.content_matches_last_save(
+                current_content
+            ):
+                LOGGER.debug(
+                    f"File {file_path} content matches last save, "
+                    "skipping reload"
+                )
+                return FileChangeResult(handled=False)
+
+            # Skip when the file is mid-merge so the notebook isn't replaced
+            # with unparsable cells while the user resolves conflicts (e.g.
+            # via git-mediate). See issue #9613.
+            if _has_conflict_markers(current_content):
+                LOGGER.warning(
+                    f"File {file_path} contains git conflict markers, "
+                    "skipping reload until conflicts are resolved"
+                )
+                return FileChangeResult(handled=False)
+
+        # Reload the file manager to get the latest code. `reload`
+        # mutates the existing document in place via `apply()` and
+        # returns the stamped transaction, so we just relay it.
+        try:
+            transaction, changed_cell_ids = session.app_file_manager.reload()
         except Exception as e:
             # If there are syntax errors, we just skip
             # and don't send the changes
             LOGGER.error(f"Error loading file: {e}")
             return FileChangeResult(handled=False, error=str(e))
 
-        # Delegate to the reload strategy
         self._reload_strategy.handle_reload(
-            session, changed_cell_ids=changed_cell_ids
+            session,
+            transaction=transaction,
+            changed_cell_ids=changed_cell_ids,
         )
         return FileChangeResult(
             handled=True, changed_cell_ids=changed_cell_ids
         )
+
+
+def _has_conflict_markers(content: str) -> bool:
+    """Return True if `content` contains a git conflict start marker.
+
+    Git writes `<<<<<<<` at the start of a line to mark the beginning of
+    a conflict hunk; that's a strong signal the file is mid-merge and
+    shouldn't be reparsed as Python.
+    """
+    return any(line.startswith("<<<<<<<") for line in content.splitlines())
 
 
 def create_reload_strategy(

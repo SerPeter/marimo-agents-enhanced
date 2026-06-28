@@ -8,7 +8,6 @@ from typing import (
     TYPE_CHECKING,
     Any,
     TypeVar,
-    Union,
     cast,
 )
 
@@ -18,19 +17,19 @@ from marimo._output.mime import MIME
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
-    from typing import Optional, TypeAlias
+    from typing import TypeAlias
 
-    JSONType: TypeAlias = Union[
-        Mapping[str, "JSONType"],
-        Sequence["JSONType"],
-        str,
-        int,
-        float,
-        bool,
-        object,
-        MIME,  # MIME is a JSONType since we have a custom JSONEncoder for it
-        None,
-    ]
+    JSONType: TypeAlias = (
+        Mapping[str, "JSONType"]
+        | Sequence["JSONType"]
+        | str
+        | int
+        | float
+        | bool
+        | object
+        | MIME
+        | None
+    )
 
 else:
     JSONType = Any
@@ -39,7 +38,16 @@ S = TypeVar("S", bound=JSONType)
 
 
 def _build_attr(name: str, value: JSONType) -> str:
-    processed = escape(encode_json_str(value))
+    encoded = encode_json_str(value)
+    # Encode `<` and `>` as JSON `\uXXXX` escapes so the parsed attribute
+    # value (post HTML unescaping) contains no literal `<` or `>`.
+    # DOMPurify's SAFE_FOR_XML rule strips any attribute whose value matches
+    # `]>` (or `</style>` etc.); without this, cell strings like `]>` or
+    # `]>>` (atom-mapped reaction SMILES) would silently drop plugin args.
+    # `JSON.parse` decodes `<`/`>` natively, so the frontend sees
+    # the original characters.
+    encoded = encoded.replace(">", "\\u003e").replace("<", "\\u003c")
+    processed = escape(encoded)
     # manual escapes for things html.escape doesn't escape
     #
     # - backslashes, when unescaped can lead to problems
@@ -52,8 +60,8 @@ def _build_attr(name: str, value: JSONType) -> str:
 
 def build_ui_plugin(
     component_name: str,
-    initial_value: Optional[JSONType],
-    label: Optional[str],
+    initial_value: JSONType | None,
+    label: str | None,
     args: dict[str, JSONType],
     slotted_html: str = "",
 ) -> str:

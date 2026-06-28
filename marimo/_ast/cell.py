@@ -7,7 +7,7 @@ import inspect
 import os
 from collections.abc import Awaitable, Mapping
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal
 
 import msgspec
 
@@ -38,7 +38,7 @@ class CellConfig(msgspec.Struct):
     This is not part of the public API.
     """
 
-    column: Optional[int] = None
+    column: int | None = None
 
     # If True, the cell and its descendants cannot be executed,
     # but they can still be added to the graph.
@@ -101,7 +101,7 @@ RuntimeStateType = Literal[
 
 @dataclasses.dataclass
 class RuntimeState:
-    state: Optional[RuntimeStateType] = None
+    state: RuntimeStateType | None = None
 
 
 # Statuses for a cell's attempted execution
@@ -121,8 +121,8 @@ RunResultStatusType = Literal[
 
 @dataclasses.dataclass
 class RunResultStatus:
-    state: Optional[RunResultStatusType] = None
-    exception: Optional[Exception] = None
+    state: RunResultStatusType | None = None
+    exception: Exception | None = None
 
 
 @dataclasses.dataclass
@@ -135,7 +135,7 @@ class ImportWorkspace:
     imported_defs: set[Name] = dataclasses.field(default_factory=set)
 
 
-def _is_coroutine(code: Optional[CodeType]) -> bool:
+def _is_coroutine(code: CodeType | None) -> bool:
     if code is None:
         return False
     return inspect.CO_COROUTINE & code.co_flags == inspect.CO_COROUTINE
@@ -167,15 +167,20 @@ class CellImpl:
     # metadata about definitions
     variable_data: dict[Name, list[VariableData]]
     deleted_refs: set[Name]
-    body: Optional[CodeType]
-    last_expr: Optional[CodeType]
+    body: CodeType | None
+    last_expr: CodeType | None
     # whether this cell is Python or SQL
     language: Language
     # unique id
     cell_id: CellId_t
 
+    # Subset of `temporaries` that are closed over (transitively) by a
+    # function, lambda, or class defined in this cell, and so must be retained
+    # in the kernel globals for those closures to be callable.
+    closed_over_temporaries: set[Name] = dataclasses.field(default_factory=set)
+
     # Markdown content of the cell if it exists
-    markdown: Optional[str] = None
+    markdown: str | None = None
 
     # ------------------ Mutable fields --------------------------------------
     #
@@ -206,7 +211,7 @@ class CellImpl:
         return self
 
     @property
-    def runtime_state(self) -> Optional[RuntimeStateType]:
+    def runtime_state(self) -> RuntimeStateType | None:
         """Gets the current runtime state of the cell.
 
         Returns:
@@ -220,7 +225,7 @@ class CellImpl:
         return self._status.state
 
     @property
-    def run_result_status(self) -> Optional[RunResultStatusType]:
+    def run_result_status(self) -> RunResultStatusType | None:
         return self._run_result_status.state
 
     def _get_sqls(self, raw: bool = False) -> list[str]:
@@ -274,9 +279,9 @@ class CellImpl:
     @property
     def imported_namespaces(self) -> set[Name]:
         """Return a set of the namespaces imported by this cell."""
-        return set(
+        return {
             import_data.module.split(".")[0] for import_data in self.imports
-        )
+        }
 
     def namespace_to_variable(self, namespace: str) -> Name | None:
         """Returns the variable name corresponding to an imported namespace
@@ -296,7 +301,7 @@ class CellImpl:
         return _is_coroutine(self.body) or _is_coroutine(self.last_expr)
 
     @property
-    def toplevel_variable(self) -> Optional[VariableData]:
+    def toplevel_variable(self) -> VariableData | None:
         """Return the single, scoped, toplevel variable defined if found."""
         try:
             tree = ast_parse(self.code)
@@ -322,7 +327,7 @@ class CellImpl:
         # Check that def matches the single definition
         name = tree.body[0].name
         ast_name = unmangle_local(variables.pop()).name
-        if not (name == ast_name):
+        if name != ast_name:
             return None
 
         if name.startswith("_"):
@@ -334,7 +339,7 @@ class CellImpl:
         ):
             return None
 
-        return list(variable_data)[0]
+        return next(iter(variable_data))
 
     @property
     def init_variable_data(self) -> dict[Name, VariableData]:
@@ -456,7 +461,7 @@ class Cell:
     # Whether to expose this cell as a test cell.
     _test_allowed: bool = False
 
-    _expected_signature: Optional[tuple[str, ...]] = None
+    _expected_signature: tuple[str, ...] | None = None
 
     @property
     def name(self) -> str:
@@ -481,8 +486,12 @@ class Cell:
         if hasattr(self, "_is_coro_cached"):
             return self._is_coro_cached
         assert self._app is not None
-        self._is_coro_cached: bool = self._app.runner.is_coroutine(
-            self._cell.cell_id
+        from marimo._runtime.runner import by_refs
+
+        # Currently expensive since `graph` triggers _maybe_initialize on the
+        # underlying App.
+        self._is_coro_cached: bool = by_refs.is_coroutine(
+            self._app.graph, self._cell.cell_id
         )
         return self._is_coro_cached
 
@@ -656,6 +665,8 @@ class Cell:
                 refs = {**from_setup, **refs}
 
         try:
+            # TODO(dmadisetti): consider recomputing since caching doesn't close
+            # closure over the correct set of refs, but this is also expensive.
             if self._is_coroutine:
                 return self._app.run_cell_async(cell=self, kwargs=refs)
             else:
@@ -678,7 +689,9 @@ class Cell:
         arg_names = sorted((self._cell.refs - allowed_refs) - self._cell.defs)
         argc = len(arg_names)
 
-        call_args = {name: arg for name, arg in zip(arg_names, args)}
+        call_args = {
+            name: arg for name, arg in zip(arg_names, args, strict=False)
+        }
         call_args.update(kwargs)
         call_argc = len(call_args.keys()) + len(self._pytest_reserved)
 

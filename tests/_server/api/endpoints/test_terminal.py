@@ -24,6 +24,8 @@ from marimo._server.session_manager import SessionManager
 from marimo._session.model import SessionMode
 from tests._server.mocks import get_session_manager
 
+TERMINAL_WS_URL = "/terminal/ws?access_token=fake-token"
+
 if TYPE_CHECKING:
     from starlette.testclient import TestClient
 
@@ -33,7 +35,7 @@ is_mac = sys.platform == "darwin"
 
 @pytest.mark.skipif(is_windows, reason="Skip on Windows")
 def test_terminal_ws(client: TestClient) -> None:
-    with client.websocket_connect("/terminal/ws") as websocket:
+    with client.websocket_connect(TERMINAL_WS_URL) as websocket:
         # Send echo message
         websocket.send_text("echo hello")
         data = websocket.receive_text()
@@ -44,17 +46,37 @@ def test_terminal_ws_not_allowed_in_run(client: TestClient) -> None:
     session_manager: SessionManager = get_session_manager(client)
     session_manager.mode = SessionMode.RUN
     with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect("/terminal/ws") as websocket:
+        with client.websocket_connect(TERMINAL_WS_URL) as websocket:
             websocket.send_text("echo hello")
     session_manager.mode = SessionMode.EDIT
+
+
+def test_terminal_ws_unauthorized(client: TestClient) -> None:
+    """Test terminal websocket rejects unauthenticated connections."""
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect("/terminal/ws"):
+            pass
+    assert exc_info.value.code == 3000
+
+
+def test_terminal_ws_wrong_token(client: TestClient) -> None:
+    """Test terminal websocket rejects wrong token."""
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect("/terminal/ws?access_token=wrong-token"):
+            pass
+    assert exc_info.value.code == 3000
 
 
 # Unit tests for terminal utility functions
 
 
 class TestCreateShellEnvironment:
-    def test_create_shell_environment_default_cwd(self) -> None:
+    def test_create_shell_environment_default_cwd(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Test shell environment creation with default working directory."""
+        monkeypatch.delenv("SHELL", raising=False)
+
         shell, env = _create_shell_environment()
 
         assert shell in ["/bin/bash", "/bin/zsh", "/bin/sh"]
@@ -62,8 +84,12 @@ class TestCreateShellEnvironment:
         assert "LANG" in env
         assert "LC_ALL" in env
 
-    def test_create_shell_environment_custom_cwd(self) -> None:
+    def test_create_shell_environment_custom_cwd(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Test shell environment creation with custom working directory."""
+        monkeypatch.delenv("SHELL", raising=False)
+
         with tempfile.TemporaryDirectory() as temp_dir:
             shell, env = _create_shell_environment(cwd=temp_dir)
 
@@ -73,9 +99,14 @@ class TestCreateShellEnvironment:
     @patch("os.getcwd")
     @patch("pathlib.Path.home")
     def test_create_shell_environment_fallback_cwd(
-        self, mock_home: Mock, mock_getcwd: Mock
+        self,
+        mock_home: Mock,
+        mock_getcwd: Mock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Test shell environment creation when getcwd fails."""
+        monkeypatch.delenv("SHELL", raising=False)
+
         mock_getcwd.side_effect = OSError("No such directory")
         mock_home.return_value = Path("/home/user")
 
@@ -87,9 +118,14 @@ class TestCreateShellEnvironment:
     @patch("os.getcwd")
     @patch("pathlib.Path.home")
     def test_create_shell_environment_ultimate_fallback(
-        self, mock_home: Mock, mock_getcwd: Mock
+        self,
+        mock_home: Mock,
+        mock_getcwd: Mock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Test shell environment creation when both getcwd and home fail."""
+        monkeypatch.delenv("SHELL", raising=False)
+
         mock_getcwd.side_effect = OSError("No such directory")
         mock_home.side_effect = Exception("No home directory")
 
@@ -404,7 +440,7 @@ class TestCommandBufferEdgeCases:
 @pytest.mark.skipif(is_windows, reason="Skip on Windows")
 def test_terminal_ws_unicode_input(client: TestClient) -> None:
     """Test terminal websocket with unicode input."""
-    with client.websocket_connect("/terminal/ws") as websocket:
+    with client.websocket_connect(TERMINAL_WS_URL) as websocket:
         # Send unicode command
         websocket.send_text("echo 'Hello 🌍'")
         websocket.send_text("\r")
@@ -423,7 +459,7 @@ def test_terminal_ws_invalid_session_mode(client: TestClient) -> None:
         # Test with RUN mode
         session_manager.mode = SessionMode.RUN
         with pytest.raises(WebSocketDisconnect):
-            with client.websocket_connect("/terminal/ws"):
+            with client.websocket_connect(TERMINAL_WS_URL):
                 pass  # Should fail immediately
 
     finally:

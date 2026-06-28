@@ -4,7 +4,8 @@ from __future__ import annotations
 import functools
 from collections import defaultdict
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Optional, Union, cast
+from itertools import zip_longest
+from typing import TYPE_CHECKING, Any, cast
 
 from marimo._data.models import BinValue, ColumnStats, ExternalDataType
 from marimo._dependencies.dependencies import DependencyManager
@@ -35,17 +36,18 @@ from marimo._plugins.ui._impl.tables.table_manager import (
     TableManager,
 )
 
-JsonTableData = Union[
-    Sequence[Union[str, int, float, bool, MIME, None]],
-    Sequence[JSONType],
-    list[JSONType],
-    dict[str, Sequence[Union[str, int, float, bool, MIME, None]]],
-    dict[str, JSONType],
-]
+JsonTableData = (
+    Sequence[str | int | float | bool | MIME | None]
+    | Sequence[JSONType]
+    | list[JSONType]
+    | dict[str, Sequence[str | int | float | bool | MIME | None]]
+    | dict[str, JSONType]
+)
 
 # For non-column-oriented data, we use "key" and "value" as the column names
 KEY = "key"
 VALUE = "value"
+MAX_ROWS_TO_SCAN = 1000  # only scan first 1000 rows to infer column names
 
 
 class DefaultTableManager(TableManager[JsonTableData]):
@@ -55,16 +57,8 @@ class DefaultTableManager(TableManager[JsonTableData]):
         self.data = data
         self.is_column_oriented = _is_column_oriented(data)
 
-    def supports_download(self) -> bool:
-        # If we have pandas/polars/pyarrow, we can convert to CSV or JSON
-        return (
-            DependencyManager.pandas.has()
-            or DependencyManager.polars.has()
-            or DependencyManager.pyarrow.has()
-        )
-
     def apply_formatting(
-        self, format_mapping: Optional[FormatMapping]
+        self, format_mapping: FormatMapping | None
     ) -> TableManager[JsonTableData]:
         if not format_mapping:
             return self
@@ -92,21 +86,33 @@ class DefaultTableManager(TableManager[JsonTableData]):
 
     def to_csv_str(
         self,
-        format_mapping: Optional[FormatMapping] = None,
+        format_mapping: FormatMapping | None = None,
         separator: str | None = None,
     ) -> str:
-        if isinstance(self.data, dict) and not self.is_column_oriented:
-            return DefaultTableManager(
-                self._normalize_data(self.data)
-            ).to_csv_str(format_mapping, separator=separator)
+        import csv
+        import io
 
-        return self._as_table_manager().to_csv_str(
-            format_mapping, separator=separator
+        formatted = self.apply_formatting(format_mapping)
+        rows = self._normalize_data(formatted.data)
+        columns = self.get_column_names()
+        buf = io.StringIO()
+
+        writer = csv.DictWriter(
+            buf,
+            fieldnames=columns,
+            delimiter=separator or ",",
+            lineterminator="\n",
         )
+        writer.writeheader()
+        writer.writerows(
+            {col: _to_csv_cell(row.get(col)) for col in columns}
+            for row in rows
+        )
+        return buf.getvalue()
 
     def to_json_str(
         self,
-        format_mapping: Optional[FormatMapping] = None,
+        format_mapping: FormatMapping | None = None,
         strict_json: bool = False,
         ensure_ascii: bool = True,
     ) -> str:
@@ -141,19 +147,16 @@ class DefaultTableManager(TableManager[JsonTableData]):
         return DefaultTableManager([self.data[i] for i in indices])
 
     def select_columns(self, columns: list[str]) -> DefaultTableManager:
-        column_set = set(columns)
         # Column major data
         if isinstance(self.data, dict):
             new_data: dict[str, Any] = {
-                key: value
-                for key, value in self.data.items()
-                if key in column_set
+                key: self.data[key] for key in columns if key in self.data
             }
             return DefaultTableManager(new_data)
         # Row major data
         return DefaultTableManager(
             [
-                {key: row[key] for key in column_set}
+                {key: row.get(key) for key in columns}
                 for row in self._normalize_data(self.data)
             ]
         )
@@ -213,9 +216,11 @@ class DefaultTableManager(TableManager[JsonTableData]):
         return selected_cells
 
     def drop_columns(self, columns: list[str]) -> DefaultTableManager:
-        return self.select_columns(
-            list(set(self.get_column_names()) - set(columns))
-        )
+        to_drop = set(columns)
+        new_cols = [
+            col for col in self.get_column_names() if col not in to_drop
+        ]
+        return self.select_columns(new_cols)
 
     def take(self, count: int, offset: int) -> DefaultTableManager:
         if count < 0:
@@ -247,7 +252,7 @@ class DefaultTableManager(TableManager[JsonTableData]):
             mask: list[bool] = [
                 any(
                     query in str(cast(list[Any], self.data[key])[row]).lower()
-                    for key in self.data.keys()
+                    for key in self.data
                 )
                 for row in range(self.get_num_rows() or 0)
             ]
@@ -348,8 +353,11 @@ class DefaultTableManager(TableManager[JsonTableData]):
         del force
         if isinstance(self.data, dict):
             if self.is_column_oriented:
-                first = next(iter(self.data.values()), None)
-                return len(cast(list[Any], first))
+                # iterate on all columns to find longest
+                return max(
+                    (len(cast(list[Any], v)) for v in self.data.values()),
+                    default=0,
+                )
             else:
                 return len(self.data)
         return len(self.data)
@@ -360,10 +368,21 @@ class DefaultTableManager(TableManager[JsonTableData]):
     def get_column_names(self) -> list[str]:
         if isinstance(self.data, dict):
             if not self.is_column_oriented:
+                # i.e. the dict is a mapping of key-value pairs, not column-oriented data
                 return [KEY, VALUE]
             return list(self.data.keys())
-        first = next(iter(self.data), None)
-        return list(first.keys()) if isinstance(first, dict) else ["value"]
+
+        if not self.data or not isinstance(self.data[0], dict):
+            return ["value"]
+
+        seen: dict[str, None] = {}
+        # iterate on first 1000 rows to find column names
+        for row in self.data[:MAX_ROWS_TO_SCAN]:
+            if isinstance(row, dict):
+                for key in row:
+                    seen.setdefault(key)
+
+        return list(seen)
 
     def get_unique_column_values(self, column: str) -> list[str | int | float]:
         return sorted(
@@ -467,8 +486,11 @@ class DefaultTableManager(TableManager[JsonTableData]):
             column_values = data.values()
             column_names = list(data.keys())
             return [
-                dict(zip(column_names, row_values))
-                for row_values in zip(*column_values)
+                dict(zip(column_names, row_values, strict=False))
+                for row_values in zip_longest(
+                    *column_values,  # type: ignore[arg-type]
+                    fillvalue=None,  # fills shorter rows with None
+                )
             ]
 
         # If its a dictionary, convert to key-value pairs
@@ -495,7 +517,7 @@ class DefaultTableManager(TableManager[JsonTableData]):
 
             # we're going to assume that data has the right shape, after
             # having checked just the first entry
-            casted = cast(list[Union[str, int, float, bool, MIME, None]], data)
+            casted = cast(list[str | int | float | bool | MIME | None], data)
             return [{"value": datum} for datum in casted]
         # Sequence of dicts
         return cast(list[dict[str, Any]], data)
@@ -505,3 +527,11 @@ def _is_column_oriented(data: JsonTableData) -> bool:
     return isinstance(data, dict) and all(
         isinstance(value, (list, tuple)) for value in data.values()
     )
+
+
+def _to_csv_cell(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list, tuple)):
+        return str(encode_json_str(SuperJson(value)))
+    return str(value)

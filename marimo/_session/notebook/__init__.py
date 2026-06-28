@@ -8,6 +8,10 @@ from marimo._session.notebook.file_manager import (
     read_css_file,
     read_html_head_file,
 )
+from marimo._session.notebook.loader import (
+    load_notebook,
+    new_notebook,
+)
 from marimo._session.notebook.serializer import (
     MarkdownNotebookSerializer,
     NotebookSerializer,
@@ -21,10 +25,12 @@ from marimo._session.notebook.storage import (
 __all__ = [
     "AppFileManager",
     "FilesystemStorage",
-    "NotebookSerializer",
     "MarkdownNotebookSerializer",
+    "NotebookSerializer",
     "PythonNotebookSerializer",
     "StorageInterface",
+    "load_notebook",
+    "new_notebook",
     "read_css_file",
     "read_html_head_file",
 ]

@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import functools
 import io
+import json
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import narwhals.stable.v2 as nw
 
 from marimo import _loggers
 from marimo._data.models import ExternalDataType
 from marimo._dependencies.dependencies import DependencyManager
+from marimo._messaging.msgspec_encoder import enc_hook
 from marimo._output.data.data import sanitize_json_bigint
 from marimo._plugins.ui._impl.tables.format import (
     FormatMapping,
@@ -28,6 +30,8 @@ from marimo._plugins.ui._impl.tables.table_manager import (
 
 if TYPE_CHECKING:
     import pandas as pd
+
+    from marimo._plugins.ui._impl.table import SortArgs
 
 LOGGER = _loggers.marimo_logger()
 
@@ -71,6 +75,28 @@ def _resolve_index_column_conflicts(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _extension_column_needs_stringify(series: pd.Series[Any]) -> bool:
+    """Whether an extension-array column should be cast to str for JSON."""
+    from pandas.api.types import is_extension_array_dtype
+
+    try:
+        if not is_extension_array_dtype(series.dtype):
+            return False
+
+        notna = series.notna()
+        if not notna.any():
+            return False
+
+        # Position-based sample: avoids dropna() copies and .at on
+        # duplicate labels (which can return a Series instead of a scalar).
+        sample = series.iat[int(notna.to_numpy().argmax())]
+        serialized = json.loads(json.dumps(sample, default=enc_hook))
+        return not isinstance(serialized, (str, int, float, bool, type(None)))
+    except Exception:
+        # Conservative fallback: stringify if sampling or serialization fails.
+        return True
+
+
 def _maybe_convert_geopandas_to_pandas(data: pd.DataFrame) -> pd.DataFrame:
     # Convert to pandas dataframe since geopandas will fail on
     # certain operations (like to_json(orient="records"))
@@ -107,11 +133,56 @@ class PandasTableManagerFactory(TableManagerFactory):
             def schema(self) -> pd.Series[Any]:
                 return self._original_data.dtypes  # type: ignore
 
+            def sort_values(self, by: list[SortArgs]) -> TableManager[Any]:
+                if not by:
+                    return self
+
+                columns = [sort_arg.by for sort_arg in by]
+                descending = [sort_arg.descending for sort_arg in by]
+
+                # Object-dtype columns may contain mixed Python types
+                # (e.g. int + str) that can't be compared directly.
+                # Cast those to string via temp columns before sorting.
+                dtypes = self._original_data.dtypes
+                mixed_cols = [
+                    col for col in columns if dtypes[col] == "object"
+                ]
+
+                if not mixed_cols:
+                    return super().sort_values(by)
+
+                df = self.data
+                temp_cols: list[str] = []
+                sort_cols: list[str] = []
+                for col in columns:
+                    if col in mixed_cols:
+                        temp = f"__sort_{col}"
+                        # Preserve nulls so nulls_last=True works.
+                        # On pandas <3.0, cast(String) turns None
+                        # into the string "None" instead of null.
+                        df = df.with_columns(
+                            nw.when(nw.col(col).is_null())
+                            .then(None)
+                            .otherwise(nw.col(col).cast(nw.String))
+                            .alias(temp)
+                        )
+                        temp_cols.append(temp)
+                        sort_cols.append(temp)
+                    else:
+                        sort_cols.append(col)
+
+                df = df.sort(
+                    sort_cols,
+                    descending=descending,
+                    nulls_last=True,
+                ).drop(temp_cols)
+                return self.with_new_data(df)
+
             # We override narwhals's to_csv_str to handle pandas
             # headers
             def to_csv_str(
                 self,
-                format_mapping: Optional[FormatMapping] = None,
+                format_mapping: FormatMapping | None = None,
                 separator: str | None = None,
             ) -> str:
                 has_headers = len(self.get_row_headers()) > 0
@@ -126,7 +197,7 @@ class PandasTableManagerFactory(TableManagerFactory):
 
             def to_json_str(
                 self,
-                format_mapping: Optional[FormatMapping] = None,
+                format_mapping: FormatMapping | None = None,
                 strict_json: bool = False,
                 ensure_ascii: bool = True,
             ) -> str:
@@ -169,6 +240,11 @@ class PandasTableManagerFactory(TableManagerFactory):
                         # We want to preserve the original display
                         if is_complex_dtype(dtype):
                             result[col] = result[col].apply(str)
+                        if _extension_column_needs_stringify(result[col]):
+                            # Extension arrays with rich Python values (e.g.
+                            # pint-pandas) serialize to nested dicts via
+                            # to_dict; stringify to preserve display.
+                            result[col] = result[col].astype(str)
                         if is_timedelta64_dtype(
                             dtype
                         ) or is_timedelta64_ns_dtype(dtype):
@@ -179,9 +255,8 @@ class PandasTableManagerFactory(TableManagerFactory):
                             inferred_dtype = self._infer_dtype(col)
                             if inferred_dtype == "date":
                                 result[col] = result[col].apply(str)
-
-                            # Cast bytes to string to avoid overflow error
-                            if self._infer_dtype(col) == "bytes":
+                            elif inferred_dtype == "bytes":
+                                # Cast bytes to string to avoid overflow error
                                 result[col] = result[col].apply(str)
 
                 except Exception as e:
@@ -260,7 +335,7 @@ class PandasTableManagerFactory(TableManagerFactory):
                 return out.getvalue()
 
             def apply_formatting(
-                self, format_mapping: Optional[FormatMapping]
+                self, format_mapping: FormatMapping | None
             ) -> PandasTableManager:
                 if not format_mapping:
                     return self
@@ -371,7 +446,7 @@ class PandasTableManagerFactory(TableManagerFactory):
 
                     # Restore the original index structure
                     native_df = native_df.set_index(index_columns)
-                    native_df.index.names = original_names
+                    native_df.index = native_df.index.set_names(original_names)
                     return PandasTableManager(native_df)
                 result = super().search(query)
                 native_df = nw.to_native(result.data)
@@ -425,9 +500,7 @@ class PandasTableManagerFactory(TableManagerFactory):
 
                 if lower_dtype.startswith("interval"):
                     return ("string", dtype)
-                if lower_dtype.startswith("int") or lower_dtype.startswith(
-                    "uint"
-                ):
+                if lower_dtype.startswith(("int", "uint")):
                     return ("integer", dtype)
                 if lower_dtype.startswith("float"):
                     return ("number", dtype)

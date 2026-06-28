@@ -1,8 +1,9 @@
 # Copyright 2026 Marimo. All rights reserved.
 from __future__ import annotations
 
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
 from marimo._messaging.cell_output import CellChannel, CellOutput
@@ -12,7 +13,6 @@ from marimo._types.ids import CellId_t
 if TYPE_CHECKING:
     from collections import deque
     from threading import Condition
-    from typing import Optional
 
     from marimo._messaging.types import Stream
 
@@ -28,6 +28,13 @@ class ConsoleMsg:
     cell_id: CellId_t
     data: str
     mimetype: ConsoleMimeType
+
+
+@dataclass
+class FlushMarker:
+    """Sentinel that tells the buffered writer to flush immediately."""
+
+    done: threading.Event = field(default_factory=threading.Event)
 
 
 def _write_console_output(
@@ -62,11 +69,7 @@ def _add_output_to_buffer(
     outputs_buffered_per_cell: dict[CellId_t, list[ConsoleMsg]],
 ) -> None:
     cell_id = console_output.cell_id
-    buffer = (
-        outputs_buffered_per_cell[cell_id]
-        if cell_id in outputs_buffered_per_cell
-        else None
-    )
+    buffer = outputs_buffered_per_cell.get(cell_id, None)
     if buffer and _can_merge_outputs(buffer[-1], console_output):
         buffer[-1].data += console_output.data
     elif buffer:
@@ -75,8 +78,24 @@ def _add_output_to_buffer(
         outputs_buffered_per_cell[cell_id] = [console_output]
 
 
+def _flush_outputs(
+    outputs_buffered_per_cell: dict[CellId_t, list[ConsoleMsg]],
+    stream: Stream,
+) -> None:
+    for cell_id, buffer in outputs_buffered_per_cell.items():
+        for output in buffer:
+            _write_console_output(
+                stream,
+                output.stream,
+                cell_id,
+                output.data,
+                output.mimetype,
+            )
+    outputs_buffered_per_cell.clear()
+
+
 def buffered_writer(
-    msg_queue: deque[ConsoleMsg | None],
+    msg_queue: deque[ConsoleMsg | FlushMarker | None],
     stream: Stream,
     cv: Condition,
 ) -> None:
@@ -89,15 +108,17 @@ def buffered_writer(
     was noticeably faster than the builtin queue.Queue in testing.)
 
     A `None` passed to `msg_queue` signals the writer should terminate.
+    A `FlushMarker` forces an immediate flush and signals the caller.
     """
 
     # only have a non-None timer when there's at least one output buffered
     #
     # when the timer expires, all buffered outputs are flushed
-    timer: Optional[float] = None
+    timer: float | None = None
 
     outputs_buffered_per_cell: dict[CellId_t, list[ConsoleMsg]] = {}
     while True:
+        flush_marker: FlushMarker | None = None
         with cv:
             # We wait for messages until the timer (if any) expires
             while timer is None or timer > 0:
@@ -111,7 +132,12 @@ def buffered_writer(
                     msg = msg_queue.popleft()
                     if msg is None:
                         return
+                    if isinstance(msg, FlushMarker):
+                        flush_marker = msg
+                        break
                     _add_output_to_buffer(msg, outputs_buffered_per_cell)
+                if flush_marker is not None:
+                    break
                 if outputs_buffered_per_cell and timer is None:
                     # start the timeout timer
                     timer = TIMEOUT_S
@@ -119,15 +145,8 @@ def buffered_writer(
                     time_waited = time.time() - time_started_waiting
                     timer -= time_waited
 
-        # the timer has expired: flush the outputs
-        for cell_id, buffer in outputs_buffered_per_cell.items():
-            for output in buffer:
-                _write_console_output(
-                    stream,
-                    output.stream,
-                    cell_id,
-                    output.data,
-                    output.mimetype,
-                )
-        outputs_buffered_per_cell = {}
+        # the timer has expired (or a flush was requested): flush the outputs
+        _flush_outputs(outputs_buffered_per_cell, stream)
+        if flush_marker is not None:
+            flush_marker.done.set()
         timer = None

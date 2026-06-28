@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import sys
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any
 
 from marimo._messaging.mimetypes import KnownMimeType
 from marimo._output import formatting
@@ -22,7 +22,72 @@ if TYPE_CHECKING:
 def is_structures_formatter(
     formatter: formatting.Formatter[object] | None,
 ) -> bool:
-    return formatter is formatting.get_formatter(tuple())
+    return formatter is formatting.get_formatter(())
+
+
+_KEY_STR_PREFIX = "text/plain+"
+_KEY_STR_ESCAPE = "text/plain+str:"
+
+
+def _key_formatter(k: object) -> object:
+    """Encode a dict key so it survives a JSON round-trip without colliding.
+
+    JSON object keys are always strings, so a Python dict key that is a
+    non-string primitive (e.g. `2`, `True`) stringifies to something that
+    can collide with an equal-looking `str` key (`"2"`, `"true"`) — and
+    `JSON.parse` on the frontend silently drops duplicates.
+
+    Non-string keys are encoded with a mimetype prefix so the frontend
+    renderer can restore the original type. String keys that happen to
+    start with our prefix are escaped so they round-trip unchanged.
+    """
+    # bool is an int subclass in Python; check it first.
+    if isinstance(k, bool):
+        return f"text/plain+bool:{k}"
+    if isinstance(k, str):
+        if k.startswith(_KEY_STR_PREFIX):
+            return f"{_KEY_STR_ESCAPE}{k}"
+        return k
+    if k is None:
+        return "text/plain+none:"
+    if isinstance(k, int):
+        # No bigint/int split for keys: the numeric payload lives inside
+        # a string, so there's no JS `Number` precision concern.
+        return f"text/plain+int:{k}"
+    if isinstance(k, float):
+        # Cover the JSON-spec-violating NaN/Inf cases; json.dumps would
+        # emit bare `NaN`/`Infinity` which `JSON.parse` rejects.
+        import math
+
+        if math.isnan(k):
+            return "text/plain+float:nan"
+        if math.isinf(k):
+            return "text/plain+float:inf" if k > 0 else "text/plain+float:-inf"
+        return f"text/plain+float:{k}"
+    if isinstance(k, tuple):
+        try:
+            return f"text/plain+tuple:{json.dumps(list(k))}"
+        except TypeError:
+            return _escape_fallback(str(k))
+    if isinstance(k, frozenset):
+        try:
+            return f"text/plain+frozenset:{json.dumps(list(k))}"
+        except TypeError:
+            return _escape_fallback(str(k))
+    return _escape_fallback(str(k))
+
+
+def _escape_fallback(s: str) -> str:
+    """Prevent a stringified fallback key from decoding as a typed key.
+
+    The fallback path runs `str(k)` on unusual key types (non-JSON-safe
+    tuple contents, custom hashables, etc.). If that happens to produce
+    a string starting with `text/plain+`, the frontend would decode it
+    as a typed key. Apply the same escape we use for literal string keys.
+    """
+    if s.startswith(_KEY_STR_PREFIX):
+        return f"{_KEY_STR_ESCAPE}{s}"
+    return s
 
 
 def _leaf_formatter(
@@ -49,8 +114,23 @@ def _leaf_formatter(
         return f"text/plain+float:{value}"
     if value is None:
         return value
+    if isinstance(value, frozenset):
+        # Separate branch from `set` so the frontend can emit the right
+        # literal — `{1, 2}` for set, `frozenset({1, 2})` for frozenset,
+        # and `set()` / `frozenset()` for the empty cases.
+        try:
+            return f"text/plain+frozenset:{json.dumps(list(value))}"
+        except TypeError:
+            return f"text/plain:{value}"
     if isinstance(value, set):
-        return f"text/plain+set:{str(value)}"
+        # Emit a JSON-list payload so the frontend uses the same
+        # double-quoted element rendering as every other encoded type
+        # (tuples, frozensets as keys, etc.). Falls back to Python's
+        # `str()` form for sets containing non-JSON-safe elements.
+        try:
+            return f"text/plain+set:{json.dumps(list(value))}"
+        except TypeError:
+            return f"text/plain+set:{value!s}"
     if isinstance(value, tuple):
         return f"text/plain+tuple:{json.dumps(value)}"
 
@@ -61,15 +141,18 @@ def _leaf_formatter(
 
 
 def format_structure(
-    t: Union[tuple[Any, ...], list[Any], dict[str, Any]],
-) -> Union[tuple[Any, ...], list[Any], dict[str, Any]]:
+    t: tuple[Any, ...] | list[Any] | dict[str, Any],
+) -> tuple[Any, ...] | list[Any] | dict[str, Any]:
     """Format the leaves of a structure.
 
     Returns a structure of the same shape as `t` with formatted
     leaves.
     """
     flattened, repacker = flatten(
-        t, json_compat_keys=True, flatten_formattable_subclasses=False
+        t,
+        json_compat_keys=True,
+        flatten_formattable_subclasses=False,
+        key_formatter=_key_formatter,
     )
     return repacker([_leaf_formatter(v) for v in flattened])
 
@@ -119,12 +202,10 @@ class StructuresFormatter(FormatterFactory):
         @formatting.formatter(dict)
         @formatting.formatter(defaultdict)
         def _format_structure(
-            t: Union[
-                tuple[Any, ...],
-                list[Any],
-                dict[str, Any],
-                defaultdict[Any, Any],
-            ],
+            t: tuple[Any, ...]
+            | list[Any]
+            | dict[str, Any]
+            | defaultdict[Any, Any],
         ) -> tuple[KnownMimeType, str]:
             # Some objects extend list/tuple/dict, but also have _repr_ methods
             # that we want to use preferentially.

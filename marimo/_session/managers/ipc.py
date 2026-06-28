@@ -12,7 +12,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Union, cast
+from typing import TYPE_CHECKING, cast
 
 from marimo import _loggers
 from marimo._cli.sandbox import (
@@ -35,6 +35,7 @@ from marimo._session._venv import (
 from marimo._session.model import SessionMode
 from marimo._session.queue import ProcessLike, QueueType, route_control_request
 from marimo._session.types import KernelManager, QueueManager
+from marimo._utils.subprocess import try_kill_process_and_group
 from marimo._utils.typed_connection import TypedConnection
 
 if TYPE_CHECKING:
@@ -99,16 +100,16 @@ class IPCQueueManagerImpl(QueueManager):
     @property
     def stream_queue(  # type: ignore[override]
         self,
-    ) -> QueueType[Union[KernelMessage, None]]:
+    ) -> QueueType[KernelMessage | None]:
         return cast(
-            QueueType[Union[KernelMessage, None]],
+            QueueType[KernelMessage | None],
             self._ipc.stream_queue,
         )
 
     @property
     def win32_interrupt_queue(  # type: ignore[override]
         self,
-    ) -> Optional[QueueType[bool]]:
+    ) -> QueueType[bool] | None:
         return self._ipc.win32_interrupt_queue
 
     def close_queues(self) -> None:
@@ -137,10 +138,10 @@ def construct_kernel_env(
     """Build environment variables for a kernel subprocess.
 
     Args:
-        base_env: Starting environment (typically ``os.environ.copy()``).
+        base_env: Starting environment (typically `os.environ.copy()`).
         venv_python: Path to the Python executable in the target venv.
         is_ephemeral_sandbox: Whether this is an ephemeral sandbox venv
-            built by ``build_sandbox_venv``.
+            built by `build_sandbox_venv`.
         writable: Whether the kernel venv supports package installs.
         kernel_pythonpath: Extra PYTHONPATH entries for read-only
             configured venvs that don't have marimo installed.
@@ -188,7 +189,6 @@ class IPCKernelManagerImpl(KernelManager):
         configs: dict[CellId_t, CellConfig],
         app_metadata: AppMetadata,
         config_manager: MarimoConfigReader,
-        virtual_files_supported: bool = True,
         redirect_console_to_browser: bool = True,
     ) -> None:
         self.queue_manager = queue_manager
@@ -197,7 +197,6 @@ class IPCKernelManagerImpl(KernelManager):
         self.configs = configs
         self.app_metadata = app_metadata
         self.config_manager = config_manager
-        self.virtual_files_supported = virtual_files_supported
         self.redirect_console_to_browser = redirect_console_to_browser
 
         self._process: subprocess.Popen[bytes] | None = None
@@ -217,8 +216,8 @@ class IPCKernelManagerImpl(KernelManager):
             profile_path=None,
             connection_info=self.connection_info,
             is_run_mode=self.mode == SessionMode.RUN,
-            virtual_files_supported=self.virtual_files_supported,
             redirect_console_to_browser=self.redirect_console_to_browser,
+            parent_pid=os.getpid(),
         )
 
         venv_config = _get_venv_config(self.config_manager)
@@ -398,14 +397,13 @@ class IPCKernelManagerImpl(KernelManager):
                 commands.StopKernelCommand()
             )
             self.queue_manager.close_queues()
-
-            # Terminate process if still alive
-            if self._process.poll() is None:
-                self._process.terminate()
+            if self._process.poll() is None and self.kernel_task is not None:
                 try:
-                    self._process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self._process.kill()
+                    try_kill_process_and_group(self.kernel_task)
+                except ProcessLookupError:
+                    pass
+                except Exception as e:
+                    LOGGER.warning(e)
 
         # Always attempt cleanup, even if _process is None
         cleanup_sandbox_dir(self._sandbox_dir)
@@ -429,6 +427,11 @@ class _SubprocessWrapper(ProcessLike):
     def pid(self) -> int | None:
         return self._process.pid
 
+    @property
+    def exitcode(self) -> int | None:
+        """Mirror multiprocessing.Process.exitcode for exit diagnostics."""
+        return self._process.poll()
+
     def is_alive(self) -> bool:
         return self._process.poll() is None
 
@@ -438,5 +441,5 @@ class _SubprocessWrapper(ProcessLike):
     def kill(self) -> None:
         self._process.kill()
 
-    def join(self, timeout: Optional[float] = None) -> None:
+    def join(self, timeout: float | None = None) -> None:
         self._process.wait(timeout=timeout)

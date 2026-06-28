@@ -4,7 +4,7 @@ from __future__ import annotations
 import io
 import os
 import wave
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any
 
 import marimo._output.data.data as mo_data
 from marimo._dependencies.dependencies import DependencyManager
@@ -25,7 +25,7 @@ def convert_numpy_to_wav(
 
     def get_normalization_factor(
         max_abs_value: float, normalize: bool
-    ) -> Union[float, int]:
+    ) -> float | int:
         if not normalize and max_abs_value > 1:
             raise ValueError(
                 "Audio data must be between -1 and 1 when normalize=False."
@@ -59,10 +59,10 @@ def convert_numpy_to_wav(
 
 
 def get_resolved_src(
-    src: Union[str, io.BytesIO, NDArray[Any]],
-    rate: Optional[int],
+    src: str | io.BytesIO | NDArray[Any],
+    rate: int | None,
     normalize: bool,
-) -> Optional[str]:
+) -> str | None:
     """Determines the correct URL for the given audio source."""
 
     if isinstance(src, (io.BufferedReader, io.BytesIO)):
@@ -83,12 +83,12 @@ def get_resolved_src(
     if DependencyManager.numpy.imported():
         import numpy as np
 
-        if isinstance(src, np.ndarray):
+        if isinstance(src, np.ndarray) or hasattr(src, "__array__"):
             if rate is None:
                 raise ValueError(
-                    "rate must be specified when data is a numpy array of audio samples."
+                    "rate must be specified when data is an array of audio samples."
                 )
-            wav_data = convert_numpy_to_wav(src, rate, normalize)
+            wav_data = convert_numpy_to_wav(np.asarray(src), rate, normalize)
             return mo_data.audio(wav_data).url
 
     return io_to_data_url(src, fallback_mime_type="audio/wav")
@@ -96,8 +96,8 @@ def get_resolved_src(
 
 @mddoc
 def audio(
-    src: Union[str, io.BytesIO, NDArray[Any]],
-    rate: Optional[int] = None,
+    src: str | io.BytesIO | NDArray[Any],
+    rate: int | None = None,
     normalize: bool = True,
 ) -> Html:
     """Render an audio file as HTML.
@@ -106,7 +106,8 @@ def audio(
         src: a path or URL to an audio `file`, `bytes`,
             or a file-like object opened in binary mode,
             `1D numpy array` → Mono waveform,
-            `2D numpy array` → Multi-channel waveform (Shape: `[NCHAN, NSAMPLES]`).
+            `2D numpy array` → Multi-channel waveform (Shape: `[NCHAN, NSAMPLES]`),
+            or any array-like implementing the `__array__` protocol (e.g. `torch.Tensor`).
         rate: Sampling rate (required only for NumPy arrays).
         normalize: Whether to rescale NumPy array audio to its max range (`True` by default).
             If `False`, values must be in `[-1, 1]`, or an error is raised.

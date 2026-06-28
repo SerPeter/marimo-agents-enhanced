@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Optional, Union
+from typing import Literal
 
 import msgspec
 
@@ -24,8 +24,8 @@ class CreateCell(
     code: str
     name: str
     config: CellConfig
-    before: Optional[CellId_t] = None
-    after: Optional[CellId_t] = None
+    before: CellId_t | None = None
+    after: CellId_t | None = None
 
 
 class DeleteCell(
@@ -40,8 +40,8 @@ class MoveCell(msgspec.Struct, frozen=True, tag="move-cell", rename="camel"):
     """Reposition a cell in the notebook."""
 
     cell_id: CellId_t
-    before: Optional[CellId_t] = None
-    after: Optional[CellId_t] = None
+    before: CellId_t | None = None
+    after: CellId_t | None = None
 
 
 class ReorderCells(
@@ -49,7 +49,7 @@ class ReorderCells(
 ):
     """Replace the full cell ordering.
 
-    Cell IDs present in the document but missing from ``cell_ids``
+    Cell IDs present in the document but missing from `cell_ids`
     are appended at the end. IDs not in the document are ignored.
     """
 
@@ -76,31 +76,41 @@ class SetName(msgspec.Struct, frozen=True, tag="set-name", rename="camel"):
 
 
 class SetConfig(msgspec.Struct, frozen=True, tag="set-config", rename="camel"):
-    """Partially update a cell's config. None fields are unchanged."""
+    """Replace a cell's config."""
 
     cell_id: CellId_t
-    column: Optional[int] = None
-    disabled: Optional[bool] = None
-    hide_code: Optional[bool] = None
+    column: int | None
+    disabled: bool
+    hide_code: bool
 
 
-DocumentChange = Union[
-    CreateCell, DeleteCell, MoveCell, ReorderCells, SetCode, SetName, SetConfig
-]
+DocumentChange = (
+    CreateCell
+    | DeleteCell
+    | MoveCell
+    | ReorderCells
+    | SetCode
+    | SetName
+    | SetConfig
+)
 
 # ------------------------------------------------------------------
 # Transaction
 # ------------------------------------------------------------------
 
+TransactionSource = Literal[
+    "frontend", "kernel", "code-mode", "file-watch", "cell-manager"
+]
+
 
 class Transaction(msgspec.Struct, frozen=True, rename="camel"):
     """An atomic batch of changes applied to a NotebookDocument.
 
-    ``source`` identifies the writer (e.g. ``"frontend"``, ``"kernel"``).
-    ``version`` is ``None`` when created and stamped by
-    ``NotebookDocument.apply()``.
+    `source` identifies the writer (e.g. `"frontend"`, `"kernel"`).
+    `version` is `None` when created and stamped by
+    `NotebookDocument.apply()`.
     """
 
     changes: tuple[DocumentChange, ...]
-    source: str
-    version: Optional[int] = None
+    source: TransactionSource
+    version: int | None = None

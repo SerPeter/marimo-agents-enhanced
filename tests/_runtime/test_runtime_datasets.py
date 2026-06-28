@@ -281,6 +281,45 @@ class TestPreviewSQLSchemaList:
             )
         ]
 
+    async def test_nested_schema_path_echoed(
+        self,
+        mocked_kernel: MockedKernel,
+        connection_requests: list[ExecuteCellCommand],
+    ) -> None:
+        """A request with a schema_path lists the child schemas at that path
+        and echoes the path in the response metadata. Catalog engines without
+        hierarchical namespaces return an empty list."""
+        k = mocked_kernel.k
+        stream = mocked_kernel.stream
+
+        await k.run(connection_requests)
+
+        preview_sql_schema_list_request = ListSQLSchemasCommand(
+            request_id=RequestId("0"),
+            engine=DUCKDB_CONN,
+            database="test",
+            schema_path=["sub"],
+        )
+        await k.handle_message(preview_sql_schema_list_request)
+
+        results = [
+            op
+            for op in stream.operations
+            if isinstance(op, SQLSchemaListPreviewNotification)
+        ]
+        assert results == [
+            SQLSchemaListPreviewNotification(
+                request_id=RequestId("0"),
+                schemas=[],
+                error=None,
+                metadata=SQLDatabaseMetadata(
+                    connection=DUCKDB_CONN,
+                    database="test",
+                    schema_path=["sub"],
+                ),
+            )
+        ]
+
 
 @pytest.mark.skipif(not HAS_SQL, reason="SQL deps not available")
 class TestPreviewSQLTableList:
@@ -399,6 +438,38 @@ class TestPreviewDatasourceConnection:
             if isinstance(op, DataSourceConnectionsNotification)
         ]
         assert preview_datasource_connection_results == []
+
+    @pytest.mark.skipif(not HAS_SQL, reason="SQL deps not available")
+    async def test_query_only_engine_is_broadcast(
+        self,
+        mocked_kernel: MockedKernel,
+        connection_requests: list[ExecuteCellCommand],
+    ) -> None:
+        """Regression: query-only engines (QueryEngine, not EngineCatalog) must broadcast."""
+        k = mocked_kernel.k
+        stream = mocked_kernel.stream
+
+        await k.run(connection_requests)
+
+        baseline = sum(
+            1
+            for op in stream.operations
+            if isinstance(op, DataSourceConnectionsNotification)
+        )
+
+        await k.handle_message(
+            ListDataSourceConnectionCommand(engine=SQLITE_CONN)
+        )
+
+        results = [
+            op
+            for op in stream.operations
+            if isinstance(op, DataSourceConnectionsNotification)
+        ]
+        assert len(results) == baseline + 1
+        connection = results[-1].connections[0]
+        assert connection.name == SQLITE_CONN
+        assert connection.databases == []
 
     @pytest.mark.xfail(
         reason="Should have only 2 connections (duckdb and sqlite)"

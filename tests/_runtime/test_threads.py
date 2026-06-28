@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import time
+from typing import cast
 
+from marimo._ast.app import App, InternalApp
+from marimo._pyodide.streams import PyodideStream
 from marimo._runtime.commands import DeleteCellCommand
+from marimo._runtime.context import get_context
+from marimo._runtime.context.script_context import (
+    ScriptRuntimeContext,
+    initialize_script_context,
+)
+from marimo._runtime.context.types import teardown_context
 from marimo._runtime.runtime import Kernel
+from marimo._runtime.threads import Thread
+from marimo._types.ids import CellId_t
 from tests._messaging.mocks import MockStream
 from tests.conftest import ExecReqProvider
 
@@ -64,6 +76,41 @@ async def test_thread_has_own_stream(
     assert stream.cell_id == k.globals["cell_id"]
 
 
+def test_thread_copies_pyodide_stream_in_script_context() -> None:
+    stream = PyodideStream(
+        pipe=lambda _message: None,
+        input_queue=asyncio.Queue(),
+        cell_id=CellId_t("script-cell"),
+    )
+    observed_contexts: list[ScriptRuntimeContext] = []
+
+    teardown_context()
+    initialize_script_context(InternalApp(App()), stream, filename=None)
+    ctx = cast(ScriptRuntimeContext, get_context())
+    ctx.query_params["source"] = "parent"
+    try:
+
+        def target() -> None:
+            observed_contexts.append(cast(ScriptRuntimeContext, get_context()))
+
+        thread = Thread(target=target)
+        thread.start()
+        thread.join(timeout=1)
+
+        assert not thread.is_alive()
+        assert len(observed_contexts) == 1
+        copied_ctx = observed_contexts[0]
+        copied = cast(PyodideStream, copied_ctx.stream)
+        assert copied is not stream
+        assert copied.pipe is stream.pipe
+        assert copied.input_queue is stream.input_queue
+        assert copied.cell_id == stream.cell_id
+        assert copied_ctx.query_params is ctx.query_params
+        assert copied_ctx.query_params.get("source") == "parent"
+    finally:
+        teardown_context()
+
+
 async def test_thread_output_append(
     k: Kernel, exec_req: ExecReqProvider
 ) -> None:
@@ -102,6 +149,51 @@ async def test_thread_output_append(
     ).cell_notifications
     assert "hello" in thread_stream_cell_notifications[0].output.data
     assert "world" in thread_stream_cell_notifications[1].output.data
+
+
+async def test_print_is_builtin_without_threads(
+    k: Kernel, exec_req: ExecReqProvider
+) -> None:
+    """Thread-free notebooks keep the real builtin `print` that numba and
+    similar libraries require (#9765)."""
+    await k.run(
+        [
+            exec_req.get(
+                """
+                import builtins
+                is_builtin = print is builtins.print
+                print_in_globals = "print" in globals()
+                """
+            ),
+        ]
+    )
+
+    assert not k.errors
+    assert k.globals["is_builtin"] is True
+    # Not shadowed in cell globals; resolves to the real builtin via __builtins__.
+    assert k.globals["print_in_globals"] is False
+
+
+async def test_print_overridden_after_thread(
+    k: Kernel, exec_req: ExecReqProvider
+) -> None:
+    """Creating a mo.Thread lazily patches `print` so thread output is routed."""
+    await k.run(
+        [
+            exec_req.get("import builtins; import marimo as mo"),
+            exec_req.get("before = print is builtins.print"),
+            exec_req.get(
+                """
+                t = mo.Thread(target=lambda: None)
+                after = print is builtins.print
+                """
+            ),
+        ]
+    )
+
+    assert not k.errors
+    assert k.globals["before"] is True
+    assert k.globals["after"] is False
 
 
 async def test_thread_print(k: Kernel, exec_req: ExecReqProvider) -> None:

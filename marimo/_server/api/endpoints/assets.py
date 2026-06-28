@@ -4,9 +4,10 @@ from __future__ import annotations
 import mimetypes
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
+from urllib.parse import urlencode
 
-from starlette.authentication import requires
+from starlette.authentication import has_required_scope, requires
 from starlette.exceptions import HTTPException
 from starlette.responses import (
     FileResponse,
@@ -20,17 +21,21 @@ from starlette.staticfiles import StaticFiles
 from marimo import _loggers
 from marimo._cli.sandbox import SandboxMode
 from marimo._config.manager import get_default_config_manager
+from marimo._config.reader import find_nearest_pyproject_toml
+from marimo._config.settings import GLOBAL_SETTINGS
 from marimo._output.utils import uri_decode_component, uri_encode_component
 from marimo._runtime.virtual_file import (
     EMPTY_VIRTUAL_FILE,
     read_virtual_file_chunked,
 )
+from marimo._server.api.auth import TOKEN_QUERY_PARAM
 from marimo._server.api.deps import AppState
 from marimo._server.files.path_validator import PathValidator
 from marimo._server.router import APIRouter
 from marimo._server.templates.templates import (
     home_page_template,
     inject_script,
+    json_script,
     notebook_page_template,
 )
 from marimo._session.model import SessionMode
@@ -61,6 +66,18 @@ server_config = (
 
 assets_dir = root / "assets"
 follow_symlinks = server_config.get("follow_symlink", False)
+
+
+def _missing_index_html_detail() -> str:
+    repo_root = marimo_package_path().parent
+    if (repo_root / "frontend").exists() and (
+        repo_root / "pyproject.toml"
+    ).exists():
+        return (
+            "index.html not found. Did you run `make fe`? "
+            "Restart marimo after building."
+        )
+    return "index.html not found and no asset_url configured"
 
 
 def _has_symlinks(directory: Path) -> bool:
@@ -107,6 +124,65 @@ except RuntimeError:
 
 FILE_QUERY_PARAM_KEY = "file"
 
+# Hardening headers for HTML page responses in edit/home mode. These
+# supplement the token-stripping redirect below by preventing any outbound
+# fetch from the HTML page from leaking a transiently-present access_token
+# via `Referer`, and by disabling MIME sniffing on the HTML response.
+#
+# Use "same-origin" instead of "no-referrer" to avoid Chrome 147+ on macOS
+# treating localhost pages as private-network requests without a valid
+# referrer, which triggers Local Network Access checks and "Error code 5".
+# "same-origin" still prevents cross-origin referrer leakage while
+# preserving the referrer for same-origin navigations.
+# See: https://github.com/marimo-team/marimo/issues/9455
+_HTML_SECURITY_HEADERS: dict[str, str] = {
+    "Referrer-Policy": "same-origin",
+    "X-Content-Type-Options": "nosniff",
+}
+
+
+def _strip_access_token_redirect(request: Request) -> RedirectResponse:
+    """Build a redirect to the current URL with access_token removed.
+
+    By the time this runs, `validate_auth` has already matched the query
+    param against the server's auth token and promoted it to a session
+    cookie. Redirecting before any JavaScript runs prevents a
+    pre-execution XSS, a third-party subresource, or browser history from
+    capturing the plaintext token.
+    """
+    stripped = request.url.remove_query_params(TOKEN_QUERY_PARAM)
+    target = stripped.path
+    if stripped.query:
+        target = f"{target}?{stripped.query}"
+    return RedirectResponse(
+        url=target,
+        status_code=303,
+        headers=_HTML_SECURITY_HEADERS,
+    )
+
+
+def _login_redirect(request: Request) -> RedirectResponse:
+    """Build a relative redirect to the login page for unauthenticated users.
+
+    Starlette's built-in `@requires(redirect=...)` builds the Location from
+    `request.url_for(...)` and embeds `str(request.url)` as `next=`. Both
+    of those use the request's `Host` header, so behind a reverse proxy
+    that doesn't rewrite `Host` the browser is sent to an internal
+    address. Emitting a relative `Location` sidesteps that — browsers
+    resolve it against the URL they themselves used, regardless of what
+    the proxy forwarded.
+
+    See https://github.com/marimo-team/marimo/issues/9249.
+    """
+    next_url = request.url.path
+    if request.url.query:
+        next_url = f"{next_url}?{request.url.query}"
+    login_path = request.app.url_path_for("auth:login_page")
+    return RedirectResponse(
+        url=f"{login_path}?{urlencode({'next': next_url})}",
+        status_code=303,
+    )
+
 
 @router.get("/og/thumbnail", include_in_schema=False)
 @requires("read")
@@ -126,16 +202,14 @@ def og_thumbnail(*, request: Request) -> Response:
     app_state = AppState(request)
     file_key = (
         app_state.query_params(FILE_QUERY_PARAM_KEY)
-        or app_state.session_manager.file_router.get_unique_file_key()
+        or app_state.session_manager.workspace.get_unique_file_key()
     )
     if not file_key:
         raise HTTPException(
             status_code=HTTPStatus.NOT_FOUND, detail="File not found"
         )
 
-    notebook_path = app_state.session_manager.file_router.resolve_file_path(
-        file_key
-    )
+    notebook_path = app_state.session_manager.workspace.resolve(file_key)
     if notebook_path is None:
         raise HTTPException(
             status_code=HTTPStatus.NOT_FOUND, detail="File not found"
@@ -199,7 +273,7 @@ def og_thumbnail(*, request: Request) -> Response:
 
 async def _fetch_index_html_from_url(asset_url: str) -> str:
     """Fetch index.html from the given asset URL."""
-    import marimo._utils.requests as requests
+    from marimo._utils import requests
     from marimo._version import __version__
 
     # Replace {version} placeholder if present
@@ -225,15 +299,27 @@ async def _fetch_index_html_from_url(asset_url: str) -> str:
 
 
 @router.get("/")
-@requires("read", redirect="auth:login_page")
-async def index(request: Request) -> HTMLResponse:
+async def index(request: Request) -> Response:
+    # Manual auth guard instead of `@requires(redirect=...)` so the
+    # Location is relative — see `_login_redirect` for the reasoning.
+    if not has_required_scope(request, ["read"]):
+        return _login_redirect(request)
+
+    # Auth has already passed at this point — either via the session cookie
+    # or by validating `access_token` in the query string (which also set
+    # the cookie). If the token is still in the URL, redirect to strip it
+    # before serving HTML. The Set-Cookie header rides the 303 response, so
+    # the browser lands on a clean URL with an authenticated session.
+    if TOKEN_QUERY_PARAM in request.query_params:
+        return _strip_access_token_redirect(request)
+
     app_state = AppState(request)
     index_html = root / "index.html"
 
     file_key_from_query = app_state.query_params(FILE_QUERY_PARAM_KEY)
     file_key = (
         file_key_from_query
-        or app_state.session_manager.file_router.get_unique_file_key()
+        or app_state.session_manager.workspace.get_unique_file_key()
     )
 
     # Try local index.html first, fallback to asset_url if local file doesn't exist
@@ -248,7 +334,7 @@ async def index(request: Request) -> HTMLResponse:
     else:
         raise HTTPException(
             status_code=500,
-            detail="index.html not found and no asset_url configured",
+            detail=_missing_index_html_detail(),
         )
 
     if not file_key:
@@ -293,9 +379,11 @@ async def index(request: Request) -> HTMLResponse:
                 except Exception:
                     LOGGER.debug("Failed to pre-compute notebook snapshot")
 
-        # Make filename relative to file router's directory if possible
         filename = app_manager.filename
-        directory = app_state.session_manager.file_router.directory
+        directory = app_state.session_manager.workspace.directory
+        lsp_workspace = _resolve_lsp_workspace(filename, directory)
+
+        # Make filename relative to file router's directory if possible
         if filename and directory:
             try:
                 filename = str(Path(filename).relative_to(directory))
@@ -311,6 +399,7 @@ async def index(request: Request) -> HTMLResponse:
             app_config=app_config,
             filename=filename,
             filepath=absolute_filepath,
+            lsp_workspace=lsp_workspace,
             mode=app_state.mode,
             notebook_snapshot=notebook_snapshot,
             runtime_config=[{"url": app_state.remote_url}]
@@ -323,17 +412,54 @@ async def index(request: Request) -> HTMLResponse:
         # Inject service worker registration with the notebook ID
         html = _inject_service_worker(html, file_key)
 
-    return HTMLResponse(html)
+    return HTMLResponse(html, headers=_HTML_SECURITY_HEADERS)
+
+
+DEFAULT_NOTEBOOK_NAME = "__marimo_notebook__.py"
+
+
+class LspWorkspace(TypedDict):
+    rootUri: str
+    documentUri: str
+
+
+def _resolve_lsp_workspace(
+    filename: str | None, directory: str | None
+) -> LspWorkspace:
+    directory_path = Path(directory or ".").absolute()
+
+    if filename:
+        document_path = Path(filename)
+        if not document_path.is_absolute():
+            document_path = directory_path.joinpath(filename)
+        start_path = document_path.parent
+    else:
+        document_path = directory_path.joinpath(DEFAULT_NOTEBOOK_NAME)
+        start_path = directory_path
+
+    if pyproject_path := find_nearest_pyproject_toml(start_path):
+        root_path = pyproject_path.parent
+    else:
+        root_path = directory_path if directory else start_path
+
+    return {
+        "rootUri": root_path.as_uri(),
+        "documentUri": document_path.as_uri(),
+    }
 
 
 def _inject_service_worker(html: str, file_key: str) -> str:
+    # `file_key` is user-controlled, so emit it as a JSON string literal rather
+    # than interpolating it directly into the JS source. It stays URI-encoded
+    # so it round-trips through the `X-Notebook-Id` header and
+    # `uri_decode_component` on the server.
     return inject_script(
         html,
         # Register service worker with the notebook ID
         # Potentially update the service worker and send the notebook ID again.
         f"""
             if ('serviceWorker' in navigator) {{
-                const notebookId = '{uri_encode_component(file_key)}';
+                const notebookId = {json_script(uri_encode_component(file_key))};
                 function sendNotebookId(registration) {{
                     if (registration.active) {{
                         registration.active.postMessage({{ notebookId }});
@@ -382,7 +508,6 @@ STATIC_FILES = [
 
 
 @router.get("/@file/{filename_and_length:path}")
-@requires("read")
 def virtual_file(
     request: Request,
 ) -> Response:
@@ -406,6 +531,14 @@ def virtual_file(
         404:
             description: Invalid byte length in virtual file request
     """
+    # Auth is normally required via `@requires("read")`, but can be bypassed
+    # with the `_MARIMO_DISABLE_AUTH_ON_VIRTUAL_FILES` env var for
+    # sandboxed/embedded deployments where virtual file URLs must be
+    # fetched without session auth.
+    if not GLOBAL_SETTINGS.DISABLE_AUTH_ON_VIRTUAL_FILES:
+        if not has_required_scope(request, ["read"]):
+            raise HTTPException(status_code=403)
+
     filename_and_length = request.path_params["filename_and_length"]
 
     LOGGER.debug("Getting virtual file: %s", filename_and_length)
@@ -417,26 +550,97 @@ def virtual_file(
             detail="Invalid virtual file request",
         )
 
-    byte_length, filename = filename_and_length.split("-", 1)
-    if not byte_length.isdigit():
+    byte_length_str, filename = filename_and_length.split("-", 1)
+    if not byte_length_str.isdigit():
         raise HTTPException(
             status_code=404,
             detail="Invalid byte length in virtual file request",
         )
+    total_size = int(byte_length_str)
 
-    chunks = read_virtual_file_chunked(filename, int(byte_length))
     mimetype, _ = mimetypes.guess_type(filename)
-    # Do NOT set Content-Length here. StreamingResponse with an explicit
-    # Content-Length causes h11 LocalProtocolError ("Too little data for
-    # declared Content-Length") for large files. Omitting it lets h11 use
+    headers = {
+        "Cache-Control": "max-age=86400",
+        # Advertise range support so Safari (which requires it for media
+        # playback) will load <audio>/<video> sources. See #9460.
+        "Accept-Ranges": "bytes",
+    }
+    # When ?download=1 is set, force a save dialog. This bypasses cases
+    # where <a download> is ignored (e.g., sandboxed iframes without
+    # allow-downloads, or some Permissions-Policy configurations).
+    if request.query_params.get("download") == "1":
+        from marimo._convert.common.filename import make_download_headers
+
+        download_filename = request.query_params.get("filename") or filename
+        headers.update(make_download_headers(download_filename))
+
+    range_header = request.headers.get("range")
+    if range_header is not None:
+        parsed = _parse_range_header(range_header, total_size)
+        if parsed is None:
+            return Response(
+                status_code=416,
+                headers={**headers, "Content-Range": f"bytes */{total_size}"},
+            )
+        start, end = parsed
+        length = end - start + 1
+        chunks = read_virtual_file_chunked(filename, length, start=start)
+        partial_headers = {
+            **headers,
+            "Content-Range": f"bytes {start}-{end}/{total_size}",
+            "Content-Length": str(length),
+        }
+        return StreamingResponse(
+            content=chunks,
+            status_code=206,
+            media_type=mimetype,
+            headers=partial_headers,
+        )
+
+    # Do NOT set Content-Length on full responses. StreamingResponse with an
+    # explicit Content-Length causes h11 LocalProtocolError ("Too little data
+    # for declared Content-Length") for large files. Omitting it lets h11 use
     # chunked transfer encoding instead. See #8917.
+    chunks = read_virtual_file_chunked(filename, total_size)
     return StreamingResponse(
         content=chunks,
         media_type=mimetype,
-        headers={
-            "Cache-Control": "max-age=86400",
-        },
+        headers=headers,
     )
+
+
+_RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$", re.IGNORECASE)
+
+
+def _parse_range_header(
+    range_header: str, total_size: int
+) -> tuple[int, int] | None:
+    """Parse a single-range HTTP `Range` header.
+
+    Returns `(start, end)` byte offsets (inclusive) on success, or
+    `None` if the range is unsatisfiable. Multi-range requests are
+    treated as unsatisfiable since marimo only supports single ranges.
+    """
+    match = _RANGE_RE.match(range_header.strip())
+    if match is None or total_size == 0:
+        return None
+    start_str, end_str = match.group(1), match.group(2)
+    if start_str == "" and end_str == "":
+        return None
+    if start_str == "":
+        # Suffix range: last N bytes.
+        suffix = int(end_str)
+        if suffix == 0:
+            return None
+        start = max(total_size - suffix, 0)
+        end = total_size - 1
+    else:
+        start = int(start_str)
+        end = int(end_str) if end_str else total_size - 1
+    if start >= total_size or end < start:
+        return None
+    end = min(end, total_size - 1)
+    return start, end
 
 
 @router.get("/public-files-sw.js")
@@ -492,14 +696,26 @@ async def serve_public_file(request: Request) -> Response:
         public_dir = notebook_dir / "public"
         file_path = public_dir / filepath
 
-        # Security check: ensure file is inside public directory
+        # Security check: ensure file is inside public directory.
+        # validate_inside_directory preserves symlinks, so also verify the
+        # resolved target stays within public_dir to avoid symlinks in
+        # public/ pointing at files outside the notebook's public directory.
         try:
             PathValidator().validate_inside_directory(public_dir, file_path)
         except HTTPException:
             return Response(status_code=403, content="Access denied")
 
-        if file_path.is_file():
-            return FileResponse(file_path)
+        try:
+            resolved_file = file_path.resolve(strict=True)
+            resolved_public = public_dir.resolve(strict=True)
+            resolved_file.relative_to(resolved_public)
+        except (OSError, ValueError):
+            raise HTTPException(
+                status_code=404, detail="File not found"
+            ) from None
+
+        if resolved_file.is_file():
+            return FileResponse(resolved_file)
 
     raise HTTPException(status_code=404, detail="File not found")
 
@@ -508,7 +724,15 @@ async def serve_public_file(request: Request) -> Response:
 @router.get("/{path:path}")
 async def serve_static(request: Request) -> FileResponse:
     path = str(request.path_params["path"])
-    if any(re.match(pattern, path) for pattern in STATIC_FILES):
-        return FileResponse(root / path)
+    if any(re.fullmatch(pattern, path) for pattern in STATIC_FILES):
+        file_path = Path(path)
+        try:
+            PathValidator().validate_inside_directory(root, file_path)
+        except Exception:
+            raise HTTPException(status_code=404, detail="Not Found") from None
+        resolved = root / path
+        if not resolved.is_file():
+            raise HTTPException(status_code=404, detail="Not Found")
+        return FileResponse(resolved)
 
     raise HTTPException(status_code=404, detail="Not Found")

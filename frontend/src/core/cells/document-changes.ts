@@ -25,6 +25,7 @@ import type { NotebookDocumentTransactionRequest } from "../network/types";
 import { store } from "../state/jotai";
 import type { CellActions, NotebookState } from "./cells";
 import type { CellId } from "./ids";
+import { SCRATCH_CELL_ID } from "./ids";
 import type { CellData } from "./types";
 
 export type DocumentChange =
@@ -155,10 +156,13 @@ function columnChanges(
   for (const [cellId, newCol] of newColumns) {
     const prevCol = prevColumns.get(cellId);
     if (prevCol !== newCol) {
+      const cell = getCell(cellId, newState);
       changes.push({
         type: "set-config",
         cellId: cellId,
         column: newCol,
+        disabled: cell?.config.disabled ?? false,
+        hideCode: cell?.config.hide_code ?? false,
       });
     }
   }
@@ -214,12 +218,14 @@ export function toDocumentChanges(
       ];
     }
 
-    // dropCellOverCell/dropCellOverColumn → set-config + reorder-cells
+    // dropCellOverCell/dropCellOverColumn/moveCellToIndex/moveCellsRelativeTo → set-config + reorder-cells
     // Drag-and-drop reorders can move cells within or across columns.
     // We emit config changes for cells whose column changed, then
     // the full ordering.
     case "dropCellOverCell":
     case "dropCellOverColumn":
+    case "moveCellToIndex":
+    case "moveCellsRelativeTo":
       return columnChanges(prevState, newState);
 
     // updateCellCode → set-code
@@ -255,18 +261,21 @@ export function toDocumentChanges(
     }
 
     // updateCellConfig → set-config
-    // Maps CellConfig's snake_case hide_code to the change's camelCase hideCode.
-    // Only includes fields that were actually specified in the partial config
-    // (from the action payload, not the full cell config).
+    // SetConfig is full-replacement: emit the cell's complete config from
+    // newState (which already merged the action's partial payload).
     case "updateCellConfig": {
-      const { cellId, config } = action.payload;
+      const { cellId } = action.payload;
+      const cell = getCell(cellId, newState);
+      if (!cell) {
+        return [];
+      }
       return [
         {
           type: "set-config",
           cellId: cellId,
-          ...(config.hide_code != null && { hideCode: config.hide_code }),
-          ...(config.disabled != null && { disabled: config.disabled }),
-          ...(config.column != null && { column: config.column }),
+          column: cell.config.column ?? null,
+          disabled: cell.config.disabled ?? false,
+          hideCode: cell.config.hide_code ?? false,
         },
       ];
     }
@@ -294,6 +303,10 @@ export function toDocumentChanges(
     case "undoDeleteCell": {
       const changes = newCellChanges(prevState, newState);
       const colChanges = columnChanges(prevState, newState);
+      // Undo-cut has no new cells — always emit reorder to sync the move.
+      if (changes.length === 0) {
+        return colChanges;
+      }
       // Only include column changes if layout actually changed
       // (colChanges always has at least a reorder-cells change)
       return colChanges.length > 1 ? [...changes, ...colChanges] : changes;
@@ -347,6 +360,7 @@ export function toDocumentChanges(
     case "prepareForRun":
     case "handleCellMessage":
     case "setCellIds":
+    case "rebuildCellColumns":
     case "setCellCodes":
     case "setCells":
     case "setStdinResponse":
@@ -535,18 +549,15 @@ export function fromDocumentChanges(
         break;
 
       // set-config → updateCellConfig
-      // Maps the change's camelCase hideCode back to CellConfig's snake_case
-      // hide_code. Only includes fields that are non-null (null means
-      // "not specified" on the wire, not "clear the value").
       case "set-config":
         actions.push({
           type: "updateCellConfig",
           payload: {
             cellId: change.cellId,
             config: {
-              ...(change.hideCode != null && { hide_code: change.hideCode }),
-              ...(change.disabled != null && { disabled: change.disabled }),
-              ...(change.column != null && { column: change.column }),
+              column: change.column,
+              disabled: change.disabled,
+              hide_code: change.hideCode,
             },
           },
         });
@@ -558,22 +569,91 @@ export function fromDocumentChanges(
 }
 
 // ---------------------------------------------------------------------------
+// Coalescing: reduce a buffered change sequence to its net effect
+// ---------------------------------------------------------------------------
+
+const COLLAPSIBLE_TYPES = new Set(["set-code", "set-name", "set-config"]);
+const DROPPABLE_ON_DELETE = new Set([
+  "set-code",
+  "set-name",
+  "set-config",
+  "move-cell",
+]);
+
+/**
+ * Reduce a buffered sequence of changes to an equivalent batch that reflects
+ * net effect rather than edit history. The server applies a transaction
+ * atomically and rejects internally contradictory batches (e.g. updating a
+ * cell that is also deleted in the same transaction), so a debounced sequence
+ * of edits must be reconciled before it is sent.
+ *
+ * Two reductions, both order-preserving:
+ * - For any cell deleted in the batch, drop its property/move changes. The
+ *   `create-cell` and `delete-cell` are kept so anchors referencing the cell
+ *   stay resolvable on the server; create+delete applies to a net no-op.
+ * - Collapse repeated `set-code`/`set-name`/`set-config` for a surviving cell
+ *   to the last occurrence.
+ */
+export function coalesceChanges(changes: DocumentChange[]): DocumentChange[] {
+  const deletedIds = new Set<CellId>();
+  for (const change of changes) {
+    if (change.type === "delete-cell") {
+      deletedIds.add(change.cellId);
+    }
+  }
+
+  const withoutEditsToDeletedCells = changes.filter(
+    (change) =>
+      !(
+        DROPPABLE_ON_DELETE.has(change.type) &&
+        "cellId" in change &&
+        deletedIds.has(change.cellId)
+      ),
+  );
+
+  const lastIndexByKey = new Map<string, number>();
+  withoutEditsToDeletedCells.forEach((change, index) => {
+    if (COLLAPSIBLE_TYPES.has(change.type) && "cellId" in change) {
+      lastIndexByKey.set(`${change.type}:${change.cellId}`, index);
+    }
+  });
+
+  return withoutEditsToDeletedCells.filter((change, index) => {
+    if (COLLAPSIBLE_TYPES.has(change.type) && "cellId" in change) {
+      return lastIndexByKey.get(`${change.type}:${change.cellId}`) === index;
+    }
+    return true;
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Middleware: debounced change dispatch to the server
 // ---------------------------------------------------------------------------
 
 let pendingChanges: DocumentChange[] = [];
 
 const flushChanges = debounce(() => {
-  if (pendingChanges.length === 0) {
+  const changes = coalesceChanges(pendingChanges);
+  pendingChanges = [];
+  if (changes.length === 0) {
     return;
   }
-  const changes = pendingChanges;
-  pendingChanges = [];
   void getRequestClient().sendDocumentTransaction({ changes });
 }, 400);
 
+function isScratchChange(change: DocumentChange): boolean {
+  if ("cellId" in change && change.cellId === SCRATCH_CELL_ID) {
+    return true;
+  }
+  return false;
+}
+
 function enqueue(change: DocumentChange) {
   if (store.get(kioskModeAtom)) {
+    return;
+  }
+  // The scratchpad cell is local-only — don't sync it to the document.
+  if (isScratchChange(change)) {
     return;
   }
   pendingChanges.push(change);
@@ -611,7 +691,24 @@ export function applyTransactionChanges(
 ): void {
   const cancelled = cancelledCellIds(changes);
 
-  for (const change of changes) {
+  // Process set-config changes after everything else. The tree must be fully
+  // restructured (create-cell, delete-cell, reorder-cells, move-cell) before
+  // we start applying column metadata, since the follow-up rebuildCellColumns
+  // step interprets each cell's config.column against the *final* flat order.
+  // Sorting is stable within each group.
+  const sortedChanges: TransactionChange[] = [
+    ...changes.filter((c) => c.type !== "set-config"),
+    ...changes.filter((c) => c.type === "set-config"),
+  ];
+
+  // Track whether any change updated a cell's column, and remember the final
+  // flat order produced by a reorder-cells change (if any). After all changes
+  // are applied, these are used to rebuild the MultiColumn tree so that cells
+  // physically move to the column their metadata says they belong in.
+  let hasColumnChange = false;
+  let reorderOrder: CellId[] | null = null;
+
+  for (const change of sortedChanges) {
     if (
       cancelled.size > 0 &&
       "cellId" in change &&
@@ -619,10 +716,25 @@ export function applyTransactionChanges(
     ) {
       continue;
     }
+    if (change.type === "set-config") {
+      hasColumnChange = true;
+    }
+    if (change.type === "create-cell" && change.config?.column != null) {
+      hasColumnChange = true;
+    }
+    if (change.type === "reorder-cells") {
+      reorderOrder = change.cellIds as CellId[];
+    }
     for (const action of fromDocumentChanges([change], getCurrentCellIds)) {
       // @ts-expect-error - TypeScript is not smart enough to know we have correctly mapped type -> payload
       actions[action.type](action.payload);
     }
+  }
+
+  if (hasColumnChange) {
+    actions.rebuildCellColumns({
+      cellIds: reorderOrder ?? getCurrentCellIds(),
+    });
   }
 }
 

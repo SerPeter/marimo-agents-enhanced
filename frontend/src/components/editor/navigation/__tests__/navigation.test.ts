@@ -44,6 +44,11 @@ vi.mock("../../cell/useRunCells", () => ({
   useRunCells: vi.fn(),
 }));
 
+vi.mock("../../cell/useDeleteCell", () => ({
+  useDeleteCellCallback: vi.fn(),
+  useDeleteManyCellsCallback: vi.fn(),
+}));
+
 vi.mock("../clipboard", () => ({
   useCellClipboard: vi.fn(),
 }));
@@ -112,6 +117,7 @@ const mockSaveIfNotebookIsPersistent = vi.fn();
 const mockSaveNotebook = vi.fn();
 const mockRunCell = vi.fn();
 const mockCopyCell = vi.fn();
+const mockCutCell = vi.fn().mockResolvedValue(undefined);
 const mockPasteCell = vi.fn();
 
 const mockCellActions = MockNotebook.cellActions({
@@ -165,7 +171,9 @@ describe("useCellNavigationProps", () => {
     mockUseRunCells.mockReturnValue(mockRunCell);
     mockUseCellClipboard.mockReturnValue({
       copyCells: mockCopyCell,
+      cutCells: mockCutCell,
       pasteAtCell: mockPasteCell,
+      clearPendingCut: vi.fn(),
     });
 
     // Setup default config in store
@@ -234,6 +242,45 @@ describe("useCellNavigationProps", () => {
       });
 
       expect(mockCopyCell).toHaveBeenCalledWith([mockCellId]);
+      expect(mockEvent.preventDefault).toHaveBeenCalled();
+    });
+
+    it("should cut cell when 'x' key is pressed", async () => {
+      const { result } = renderWithProvider(() =>
+        useCellNavigationProps(mockCellId, options),
+      );
+
+      const mockEvent = Mocks.keyboardEvent({ key: "x" });
+
+      await act(async () => {
+        result.current.onKeyDown?.(mockEvent);
+        await Promise.resolve();
+      });
+
+      expect(mockCutCell).toHaveBeenCalledWith([mockCellId]);
+      expect(mockEvent.preventDefault).toHaveBeenCalled();
+    });
+
+    it("should cut multiple selected cells when 'x' key is pressed", async () => {
+      const selectionActions = setupSelection();
+      selectionActions.select({ cellId: cellId1 });
+      selectionActions.extend({
+        cellId: cellId2,
+        allCellIds: store.get(notebookAtom).cellIds,
+      });
+
+      const { result } = renderWithProvider(() =>
+        useCellNavigationProps(cellId1, options),
+      );
+
+      const mockEvent = Mocks.keyboardEvent({ key: "x" });
+
+      await act(async () => {
+        result.current.onKeyDown?.(mockEvent);
+        await Promise.resolve();
+      });
+
+      expect(mockCutCell).toHaveBeenCalledWith([cellId1, cellId2]);
       expect(mockEvent.preventDefault).toHaveBeenCalled();
     });
 
@@ -775,6 +822,29 @@ describe("useCellNavigationProps", () => {
       expect(mockEvent.preventDefault).toHaveBeenCalled();
     });
 
+    it("should cut multiple cells when multiple cells selected", () => {
+      // Set up selection of multiple cells
+      const selectionActions = setupSelection();
+      selectionActions.select({ cellId: cellId1 });
+      selectionActions.extend({
+        cellId: cellId3,
+        allCellIds: store.get(notebookAtom).cellIds,
+      });
+
+      const { result } = renderWithProvider(() =>
+        useCellNavigationProps(cellId2, options),
+      );
+
+      const mockEvent = Mocks.keyboardEvent({ key: "x" });
+
+      act(() => {
+        result.current.onKeyDown?.(mockEvent);
+      });
+
+      expect(mockCutCell).toHaveBeenCalledWith([cellId1, cellId2, cellId3]);
+      expect(mockEvent.preventDefault).toHaveBeenCalled();
+    });
+
     it("should move multiple cells up when multiple cells selected", () => {
       // Set up selection of multiple cells
       const selectionActions = setupSelection();
@@ -1137,6 +1207,21 @@ describe("useCellNavigationProps", () => {
   });
 
   describe("AI completion functionality", () => {
+    beforeEach(() => {
+      const config = defaultUserConfig();
+      store.set(userConfigAtom, {
+        ...config,
+        ai: {
+          ...config.ai,
+          models: {
+            displayed_models: [],
+            custom_models: [],
+            edit_model: "openai/gpt-4o",
+          },
+        },
+      });
+    });
+
     it("should toggle AI completion when shortcut is pressed", () => {
       const { result } = renderWithProvider(() =>
         useCellNavigationProps(cellId1, optionsWithMockEditor),

@@ -1,5 +1,11 @@
 /* Copyright 2026 Marimo. All rights reserved. */
-import { describe, expect, test } from "vitest";
+import type { ExtractAtomValue } from "jotai";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { hasRunAnyCellAtom } from "@/components/editor/cell/useRunCells";
+import { userConfigAtom } from "@/core/config/config";
+import { parseUserConfig } from "@/core/config/config-schema";
+import { initialModeAtom } from "@/core/mode";
+import { store } from "@/core/state/jotai";
 import { visibleForTesting } from "../RenderHTML";
 
 const { parseHtml } = visibleForTesting;
@@ -52,6 +58,60 @@ describe("parseHtml", () => {
         }
       />
     `);
+  });
+
+  test("img has key derived from src so React remounts on src change", () => {
+    const html = '<img src="https://cdn.example.com/a.png" alt="a">';
+    const result = parseHtml({ html }) as React.ReactElement;
+    expect(result.key).toBe("https://cdn.example.com/a.png-0");
+  });
+
+  test("multiple imgs each get distinct keys", () => {
+    const html =
+      '<div><img src="https://cdn.example.com/a.png"><img src="https://cdn.example.com/b.png"></div>';
+    const result = parseHtml({ html }) as React.ReactElement<{
+      children: React.ReactElement[];
+    }>;
+    const children = result.props.children;
+    expect(children[0].key).toBe("https://cdn.example.com/a.png-0");
+    expect(children[1].key).toBe("https://cdn.example.com/b.png-1");
+  });
+
+  test("img without src is left alone", () => {
+    const html = "<img>";
+    const result = parseHtml({ html }) as React.ReactElement;
+    expect(result.key).toBeNull();
+  });
+
+  test("img with data: URI is not keyed (inline, no network fetch)", () => {
+    const longPayload = "A".repeat(10_000);
+    const html = `<img src="data:image/png;base64,${longPayload}">`;
+    const result = parseHtml({ html }) as React.ReactElement;
+    // No remount-on-src needed for inline images, so we leave the key
+    // unset rather than bloat it with the base64 payload.
+    expect(result.key).toBeNull();
+  });
+
+  test("img with uppercase DATA: URI is also skipped (scheme is case-insensitive)", () => {
+    const html = `<img src="DATA:image/png;base64,${"A".repeat(100)}">`;
+    const result = parseHtml({ html }) as React.ReactElement;
+    expect(result.key).toBeNull();
+  });
+
+  test("img wrapped by data-tooltip is still keyed by src", () => {
+    const html =
+      '<img src="https://cdn.example.com/a.png" data-tooltip="hi" alt="a">';
+    const result = parseHtml({ html }) as React.ReactElement;
+    // Outer Tooltip carries the src-based key so it remounts on src change,
+    // forcing the inner <img> to remount as well.
+    expect(result.key).toBe("https://cdn.example.com/a.png-0");
+  });
+
+  test("img wrapped by data-marimo-doc is still keyed by src", () => {
+    const html =
+      '<img src="https://cdn.example.com/b.png" data-marimo-doc="foo.bar">';
+    const result = parseHtml({ html }) as React.ReactElement;
+    expect(result.key).toBe("https://cdn.example.com/b.png-0");
   });
 
   test("codehilite with copy button", () => {
@@ -197,6 +257,85 @@ describe("parseHtml", () => {
   });
 });
 
+describe("replaceSrcScripts trust gate", () => {
+  let previousHasRunAnyCell: ExtractAtomValue<typeof hasRunAnyCellAtom>;
+  let previousConfig: ExtractAtomValue<typeof userConfigAtom>;
+  let previousMode: ExtractAtomValue<typeof initialModeAtom>;
+  const windowWithExport = window as Window & {
+    __MARIMO_EXPORT_CONTEXT__?: unknown;
+  };
+
+  function clearTrustSignals() {
+    const cleared = parseUserConfig({});
+    store.set(hasRunAnyCellAtom, false);
+    store.set(userConfigAtom, {
+      ...cleared,
+      runtime: { ...cleared.runtime, auto_instantiate: false },
+    });
+    store.set(initialModeAtom, "edit");
+    delete windowWithExport.__MARIMO_EXPORT_CONTEXT__;
+  }
+
+  beforeEach(() => {
+    previousHasRunAnyCell = store.get(hasRunAnyCellAtom);
+    previousConfig = store.get(userConfigAtom);
+    previousMode = store.get(initialModeAtom);
+    clearTrustSignals();
+    for (const s of document.head.querySelectorAll(
+      'script[src^="https://cdn.example.com/"]',
+    )) {
+      s.remove();
+    }
+  });
+
+  afterEach(() => {
+    store.set(hasRunAnyCellAtom, previousHasRunAnyCell);
+    store.set(userConfigAtom, previousConfig);
+    store.set(initialModeAtom, previousMode);
+    delete windowWithExport.__MARIMO_EXPORT_CONTEXT__;
+    for (const s of document.head.querySelectorAll(
+      'script[src^="https://cdn.example.com/"]',
+    )) {
+      s.remove();
+    }
+  });
+
+  test("drops <script src> in untrusted edit mode", () => {
+    parseHtml({
+      html: '<script src="https://cdn.example.com/unrun.js"></script>',
+    });
+    expect(
+      document.head.querySelector(
+        'script[src="https://cdn.example.com/unrun.js"]',
+      ),
+    ).toBeNull();
+  });
+
+  test("loads <script src> once a cell has been run", () => {
+    store.set(hasRunAnyCellAtom, true);
+    parseHtml({
+      html: '<script src="https://cdn.example.com/ok.js"></script>',
+    });
+    expect(
+      document.head.querySelector(
+        'script[src="https://cdn.example.com/ok.js"]',
+      ),
+    ).not.toBeNull();
+  });
+
+  test("loads <script src> when a trusted export context is installed", () => {
+    windowWithExport.__MARIMO_EXPORT_CONTEXT__ = { trusted: true };
+    parseHtml({
+      html: '<script src="https://cdn.example.com/export.js"></script>',
+    });
+    expect(
+      document.head.querySelector(
+        'script[src="https://cdn.example.com/export.js"]',
+      ),
+    ).not.toBeNull();
+  });
+});
+
 describe("wrapTooltipTargets", () => {
   test("data-tooltip wraps element in Tooltip component", () => {
     const html = '<span data-tooltip="Hello world">Hover me</span>';
@@ -238,6 +377,33 @@ describe("wrapTooltipTargets", () => {
         </Tooltip>
          text
       </p>
+    `);
+  });
+
+  test("data-tooltip on marimo custom elements is not wrapped", () => {
+    const html =
+      '<marimo-button data-tooltip="&quot;Run clicky&quot;">click</marimo-button>';
+    expect(parseHtml({ html })).toMatchInlineSnapshot(`
+      <marimo-button
+        data-tooltip=""Run clicky""
+      >
+        click
+      </marimo-button>
+    `);
+  });
+
+  test("data-tooltip on non-marimo custom elements is still wrapped", () => {
+    const html = '<my-widget data-tooltip="info">content</my-widget>';
+    expect(parseHtml({ html })).toMatchInlineSnapshot(`
+      <Tooltip
+        content="info"
+      >
+        <my-widget
+          data-tooltip="info"
+        >
+          content
+        </my-widget>
+      </Tooltip>
     `);
   });
 });

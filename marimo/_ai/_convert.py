@@ -3,9 +3,7 @@ from __future__ import annotations
 
 import base64
 import dataclasses
-import json
-import uuid
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Literal, Union
 
 from marimo import _loggers
 from marimo._ai._types import (
@@ -110,11 +108,9 @@ def convert_to_openai_messages(
             continue
 
         current_parts: list[
-            Union[
-                ChatCompletionContentPartTextParam,
-                ChatCompletionContentPartParam,
-                ContentArrayOfContentPart,
-            ]
+            ChatCompletionContentPartTextParam
+            | ChatCompletionContentPartParam
+            | ContentArrayOfContentPart
         ] = []
         for part in message.parts:
             if isinstance(part, TextPart):
@@ -166,8 +162,13 @@ def convert_to_openai_messages(
 
                 # Reset parts since we've added the messages
                 current_parts = []
-            else:
+            elif dataclasses.is_dataclass(part) and not isinstance(part, type):
                 current_parts.append(dataclasses.asdict(part))  # type: ignore
+            else:
+                LOGGER.debug(
+                    "Dropping unsupported part %s during OpenAI conversion",
+                    type(part).__name__,
+                )
 
         if current_parts:
             openai_messages.append(
@@ -472,93 +473,3 @@ def _extract_data(url: str) -> str:
         return url.split(",")[1]
     else:
         return url
-
-
-def convert_to_ai_sdk_messages(
-    content_text: Union[str, dict[str, Any]],
-    content_type: Literal[
-        "text",
-        "text_start",
-        "text_end",
-        "reasoning",
-        "reasoning_start",
-        "reasoning_end",
-        "reasoning_signature",
-        "tool_call_start",
-        "tool_call_delta",
-        "tool_call_end",
-        "tool_result",
-        "finish_reason",
-        "error",
-    ],
-    text_id: Optional[str] = None,
-) -> str:
-    """
-    Format events for the AI SDK v5 stream protocol using Server-Sent Events.
-    This follows the data-stream v1 protocol with SSE format.
-    See: https://ai-sdk.dev/docs/ai-sdk-ui/stream-protocol
-    """
-
-    # Text events - use start/delta/end pattern with unique IDs
-    if content_type == "text" and isinstance(content_text, str):
-        if text_id is None:
-            text_id = f"text_{uuid.uuid4().hex}"
-        return f"data: {json.dumps({'type': 'text-delta', 'id': text_id, 'delta': content_text})}\n\n"
-
-    elif content_type == "text_start":
-        if text_id is None:
-            text_id = f"text_{uuid.uuid4().hex}"
-        return f"data: {json.dumps({'type': 'text-start', 'id': text_id})}\n\n"
-
-    elif content_type == "text_end" and text_id is not None:
-        return f"data: {json.dumps({'type': 'text-end', 'id': text_id})}\n\n"
-
-    # Reasoning events - use start/delta/end pattern with unique IDs
-    elif content_type == "reasoning" and isinstance(content_text, str):
-        if text_id is None:
-            text_id = f"reasoning_{uuid.uuid4().hex}"
-        return f"data: {json.dumps({'type': 'reasoning-delta', 'id': text_id, 'delta': content_text})}\n\n"
-
-    elif content_type == "reasoning_start":
-        if text_id is None:
-            text_id = f"reasoning_{uuid.uuid4().hex}"
-        return f"data: {json.dumps({'type': 'reasoning-start', 'id': text_id})}\n\n"
-
-    elif content_type == "reasoning_end" and text_id is not None:
-        return (
-            f"data: {json.dumps({'type': 'reasoning-end', 'id': text_id})}\n\n"
-        )
-
-    # Tool use events
-    elif content_type == "tool_call_start" and isinstance(content_text, dict):
-        return f"data: {json.dumps({'type': 'tool-input-start', **content_text})}\n\n"
-
-    elif content_type == "tool_call_delta" and isinstance(content_text, dict):
-        return f"data: {json.dumps({'type': 'tool-input-delta', **content_text})}\n\n"
-
-    elif content_type == "tool_call_end" and isinstance(content_text, dict):
-        return f"data: {json.dumps({'type': 'tool-input-available', **content_text})}\n\n"
-
-    elif content_type == "tool_result" and isinstance(content_text, dict):
-        return f"data: {json.dumps({'type': 'tool-output-available', **content_text})}\n\n"
-
-    # Finish events
-    elif content_type == "finish_reason":
-        return f"data: {json.dumps({'type': 'finish'})}\n\n"
-
-    # Error events
-    elif content_type == "error" and isinstance(content_text, str):
-        return f"data: {json.dumps({'type': 'error', 'errorText': content_text})}\n\n"
-
-    # Reasoning signature (for Anthropic thinking models)
-    elif content_type == "reasoning_signature" and isinstance(
-        content_text, dict
-    ):
-        # This might be handled differently in the new protocol
-        return f"data: {json.dumps({'type': 'data-reasoning-signature', 'data': content_text})}\n\n"
-
-    else:
-        # Default to text delta for unknown types
-        if text_id is None:
-            text_id = f"text_{uuid.uuid4().hex}"
-        return f"data: {json.dumps({'type': 'text-delta', 'id': text_id, 'delta': str(content_text)})}\n\n"

@@ -3,8 +3,18 @@
 import { describe, expect, it } from "vitest";
 import type { SQLTableContext } from "@/core/datasets/data-source-connections";
 import { DUCKDB_ENGINE } from "@/core/datasets/engines";
-import type { DataTable, DataTableColumn } from "@/core/kernel/messages";
-import { sqlCode } from "../utils";
+import type {
+  Database,
+  DatabaseSchema,
+  DataTable,
+  DataTableColumn,
+} from "@/core/kernel/messages";
+import {
+  schemaSubtreeMatchesSearch,
+  shouldExpandDatabaseForSearch,
+  sqlCode,
+  tableUniqueId,
+} from "../utils";
 
 describe("sqlCode", () => {
   const mockTable: DataTable = {
@@ -313,6 +323,26 @@ describe("sqlCode", () => {
       );
     });
 
+    it("should preserve dots inside quoted schema names", () => {
+      const sqlTableContext: SQLTableContext = {
+        engine: "postgres",
+        schema: "analytics.events",
+        defaultSchema: "public",
+        defaultDatabase: "mydb",
+        database: "remote",
+        dialect: "postgres",
+      };
+
+      const result = sqlCode({
+        table: mockTable,
+        columnName: mockColumn.name,
+        sqlTableContext,
+      });
+      expect(result).toBe(
+        '_df = mo.sql(f"""\nSELECT "email" FROM "remote"."analytics.events"."users" LIMIT 100\n""", engine=postgres)',
+      );
+    });
+
     it("should not quote * column name", () => {
       const sqlTableContext: SQLTableContext = {
         engine: "postgres",
@@ -330,6 +360,68 @@ describe("sqlCode", () => {
       });
       expect(result).toBe(
         '_df = mo.sql(f"""\nSELECT * FROM "users" LIMIT 100\n""", engine=postgres)',
+      );
+    });
+  });
+
+  describe("Dremio dialect", () => {
+    it("should quote reserved column names and table path parts", () => {
+      const sqlTableContext: SQLTableContext = {
+        engine: "dremio_conn",
+        schema: "operations",
+        defaultSchema: "",
+        defaultDatabase: "",
+        database: "lakehouse",
+        dialect: "dremio",
+      };
+
+      const result = sqlCode({
+        table: { ...mockTable, name: "shipments" as const },
+        columnName: "order",
+        sqlTableContext,
+      });
+      expect(result).toBe(
+        '_df = mo.sql(f"""\nSELECT "order" FROM "lakehouse"."operations"."shipments" LIMIT 100\n""", engine=dremio_conn)',
+      );
+    });
+
+    it("should not quote * column name", () => {
+      const sqlTableContext: SQLTableContext = {
+        engine: "dremio_conn",
+        schema: "operations",
+        defaultSchema: "",
+        defaultDatabase: "",
+        database: "lakehouse",
+        dialect: "dremio",
+      };
+
+      const result = sqlCode({
+        table: { ...mockTable, name: "customers" as const },
+        columnName: "*",
+        sqlTableContext,
+      });
+      expect(result).toBe(
+        '_df = mo.sql(f"""\nSELECT * FROM "lakehouse"."operations"."customers" LIMIT 100\n""", engine=dremio_conn)',
+      );
+    });
+
+    it("should preserve dots inside quoted schema names", () => {
+      const sqlTableContext: SQLTableContext = {
+        engine: "dremio_conn",
+        schema: "samples.dremio.com",
+        defaultSchema: "",
+        defaultDatabase: "",
+        database: "Samples",
+        dialect: "dremio",
+      };
+
+      const result = sqlCode({
+        table: { ...mockTable, name: "airlines" as const },
+        columnName: "*",
+        sqlTableContext,
+      });
+      expect(result).toBe(
+        '_df = mo.sql(f"""\nSELECT * FROM "Samples"."samples.dremio.com"."airlines" LIMIT 100\n""", engine=dremio_conn)',
       );
     });
   });
@@ -374,5 +466,181 @@ describe("sqlCode", () => {
         '_df = mo.sql(f"""\nSELECT email FROM users LIMIT 100\n""", engine=postgres)',
       );
     });
+  });
+});
+
+describe("tableUniqueId", () => {
+  const ctx = (
+    overrides: Partial<SQLTableContext> & { database: string; schema: string },
+  ): SQLTableContext => ({
+    engine: "e",
+    dialect: "duckdb",
+    ...overrides,
+  });
+
+  it("returns just the table name without a context", () => {
+    expect(tableUniqueId(undefined, "t")).toBe("t");
+  });
+
+  it("uses database + schema for flat engines", () => {
+    expect(tableUniqueId(ctx({ database: "db", schema: "public" }), "t")).toBe(
+      "db.public.t",
+    );
+  });
+
+  it("does not duplicate the leaf schema for nested namespaces", () => {
+    // Regression: previously produced "top.nested.nested.t".
+    expect(
+      tableUniqueId(
+        ctx({ database: "top", schema: "nested", schemaPath: ["nested"] }),
+        "t",
+      ),
+    ).toBe("top.nested.t");
+  });
+
+  it("includes the full schema path for deeply nested namespaces", () => {
+    expect(
+      tableUniqueId(
+        ctx({
+          database: "top",
+          schema: "deep",
+          schemaPath: ["nested", "deep"],
+        }),
+        "t",
+      ),
+    ).toBe("top.nested.deep.t");
+  });
+
+  it("falls back to the flat schema when schemaPath is empty", () => {
+    expect(
+      tableUniqueId(
+        ctx({ database: "db", schema: "public", schemaPath: [] }),
+        "t",
+      ),
+    ).toBe("db.public.t");
+  });
+
+  it("does not emit a double dot for schemaless tables", () => {
+    expect(
+      tableUniqueId(ctx({ database: "db", schema: "", schemaPath: [] }), "t"),
+    ).toBe("db.t");
+    expect(tableUniqueId(ctx({ database: "db", schema: "" }), "t")).toBe(
+      "db.t",
+    );
+  });
+});
+
+function makeTable(name: string): DataTable {
+  return {
+    name,
+    columns: [],
+    source: "memory",
+    source_type: "local",
+    type: "table",
+    engine: null,
+    indexes: null,
+    num_columns: null,
+    num_rows: null,
+    variable_name: null,
+    primary_keys: null,
+  };
+}
+
+function makeSchema(opts: {
+  name: string;
+  tables: DataTable[];
+  tables_resolved?: boolean;
+  child_schemas?: DatabaseSchema[];
+  child_schemas_resolved?: boolean;
+}): DatabaseSchema {
+  return {
+    name: opts.name,
+    tables: opts.tables,
+    tables_resolved: opts.tables_resolved ?? true,
+    child_schemas: opts.child_schemas ?? [],
+    child_schemas_resolved: opts.child_schemas_resolved ?? true,
+  };
+}
+
+function makeDatabase(
+  name: string,
+  schemas: DatabaseSchema[],
+  schemas_resolved = true,
+): Database {
+  return { name, dialect: "duckdb", schemas, schemas_resolved, engine: null };
+}
+
+describe("schemaSubtreeMatchesSearch", () => {
+  it("returns false for an empty query", () => {
+    const schema = makeSchema({ name: "main", tables: [makeTable("users")] });
+    expect(schemaSubtreeMatchesSearch(schema, "")).toBe(false);
+    expect(schemaSubtreeMatchesSearch(schema, "   ")).toBe(false);
+    expect(schemaSubtreeMatchesSearch(schema, undefined)).toBe(false);
+  });
+
+  it("matches a table name case-insensitively", () => {
+    const schema = makeSchema({ name: "main", tables: [makeTable("Users")] });
+    expect(schemaSubtreeMatchesSearch(schema, "user")).toBe(true);
+    expect(schemaSubtreeMatchesSearch(schema, "orders")).toBe(false);
+  });
+
+  it("matches a table in a resolved child schema", () => {
+    const schema = makeSchema({
+      name: "parent",
+      tables: [],
+      child_schemas: [
+        makeSchema({ name: "child", tables: [makeTable("orders")] }),
+      ],
+    });
+    expect(schemaSubtreeMatchesSearch(schema, "orders")).toBe(true);
+  });
+
+  it("ignores deferred tables so search never triggers a fetch", () => {
+    const schema = makeSchema({
+      name: "main",
+      tables: [makeTable("users")],
+      tables_resolved: false,
+    });
+    expect(schemaSubtreeMatchesSearch(schema, "users")).toBe(false);
+  });
+
+  it("ignores deferred child schemas", () => {
+    const schema = makeSchema({
+      name: "parent",
+      tables: [],
+      child_schemas: [
+        makeSchema({ name: "child", tables: [makeTable("orders")] }),
+      ],
+      child_schemas_resolved: false,
+    });
+    expect(schemaSubtreeMatchesSearch(schema, "orders")).toBe(false);
+  });
+});
+
+describe("shouldExpandDatabaseForSearch", () => {
+  it("returns false for an empty query", () => {
+    const db = makeDatabase("memory", [
+      makeSchema({ name: "main", tables: [makeTable("users")] }),
+    ]);
+    expect(shouldExpandDatabaseForSearch(db, "")).toBe(false);
+    expect(shouldExpandDatabaseForSearch(db, undefined)).toBe(false);
+  });
+
+  it("expands when a loaded schema contains a matching table", () => {
+    const db = makeDatabase("memory", [
+      makeSchema({ name: "main", tables: [makeTable("users")] }),
+      makeSchema({ name: "other", tables: [makeTable("orders")] }),
+    ]);
+    expect(shouldExpandDatabaseForSearch(db, "user")).toBe(true);
+    expect(shouldExpandDatabaseForSearch(db, "nomatch")).toBe(false);
+  });
+
+  it("does not expand when the schema list itself is deferred", () => {
+    const db = makeDatabase(
+      "memory",
+      [makeSchema({ name: "main", tables: [makeTable("users")] })],
+      /* schemas_resolved */ false,
+    );
+    expect(shouldExpandDatabaseForSearch(db, "users")).toBe(false);
   });
 });

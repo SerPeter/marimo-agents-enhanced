@@ -39,6 +39,7 @@ def _setup_test_sleep():
 
 # these tests use random filenames for modules because they share
 # the same sys.modules object, and each test needs fresh modules
+@pytest.mark.flaky(reruns=3)
 async def test_reload_function(
     tmp_path: pathlib.Path,
     py_modname: str,
@@ -77,7 +78,16 @@ async def test_reload_function(
     )
 
     # wait for the watcher to pick up the change
-    await asyncio.sleep(INTERVAL * 3)
+    retries = 0
+    while retries < 10:
+        await asyncio.sleep(INTERVAL)
+        retries += 1
+        if (
+            k.graph.cells[er_1.cell_id].stale
+            and k.graph.cells[er_2.cell_id].stale
+        ):
+            break
+
     assert k.graph.cells[er_1.cell_id].stale
     assert k.graph.cells[er_2.cell_id].stale
     assert not k.graph.cells[er_3.cell_id].stale
@@ -141,7 +151,16 @@ async def test_disable_and_reenable_reload(
     )
 
     # wait for the watcher to pick up the change
-    await asyncio.sleep(INTERVAL * 3)
+    retries = 0
+    while retries < 10:
+        await asyncio.sleep(INTERVAL)
+        retries += 1
+        if (
+            k.graph.cells[er_1.cell_id].stale
+            and k.graph.cells[er_2.cell_id].stale
+        ):
+            break
+
     assert k.graph.cells[er_1.cell_id].stale
     assert k.graph.cells[er_2.cell_id].stale
     assert not k.graph.cells[er_3.cell_id].stale
@@ -152,6 +171,7 @@ async def test_disable_and_reenable_reload(
     assert k.globals["x"] == 2
 
 
+@pytest.mark.flaky(reruns=3)
 async def test_reload_nested_module_function(
     tmp_path: pathlib.Path,
     py_modname: str,
@@ -196,7 +216,16 @@ async def test_reload_nested_module_function(
     update_file(nested_module, "func = lambda : 2")
 
     # wait for the watcher to pick up the change
-    await asyncio.sleep(INTERVAL * 3)
+    retries = 0
+    while retries < 10:
+        await asyncio.sleep(INTERVAL)
+        retries += 1
+        if (
+            k.graph.cells[er_1.cell_id].stale
+            and k.graph.cells[er_2.cell_id].stale
+        ):
+            break
+
     assert k.graph.cells[er_1.cell_id].stale
     assert k.graph.cells[er_2.cell_id].stale
     assert not k.graph.cells[er_3.cell_id].stale
@@ -207,6 +236,7 @@ async def test_reload_nested_module_function(
     assert k.globals["x"] == 2
 
 
+@pytest.mark.flaky(reruns=3)
 async def test_reload_nested_module_import_module(
     tmp_path: pathlib.Path,
     py_modname: str,
@@ -251,7 +281,16 @@ async def test_reload_nested_module_import_module(
     update_file(nested_module, "func = lambda : 2")
 
     # wait for the watcher to pick up the change
-    await asyncio.sleep(INTERVAL * 3)
+    retries = 0
+    while retries < 10:
+        await asyncio.sleep(INTERVAL)
+        retries += 1
+        if (
+            k.graph.cells[er_1.cell_id].stale
+            and k.graph.cells[er_2.cell_id].stale
+        ):
+            break
+
     assert k.graph.cells[er_1.cell_id].stale
     assert k.graph.cells[er_2.cell_id].stale
     assert not k.graph.cells[er_3.cell_id].stale
@@ -325,6 +364,7 @@ async def test_reload_nested_module_import_module_autorun(
     assert k.globals["x"] == 2
 
 
+@pytest.mark.flaky(reruns=3)
 async def test_reload_package(
     tmp_path: pathlib.Path,
     execution_kernel: Kernel,
@@ -358,7 +398,16 @@ async def test_reload_package(
     update_file(nested_module, "func = lambda : 2")
 
     # wait for the watcher to pick up the change
-    await asyncio.sleep(INTERVAL * 3)
+    retries = 0
+    while retries < 10:
+        await asyncio.sleep(INTERVAL)
+        retries += 1
+        if (
+            k.graph.cells[er_1.cell_id].stale
+            and k.graph.cells[er_2.cell_id].stale
+        ):
+            break
+
     assert k.graph.cells[er_1.cell_id].stale
     assert k.graph.cells[er_2.cell_id].stale
     assert not k.graph.cells[er_3.cell_id].stale
@@ -431,6 +480,7 @@ async def test_reload_third_party(
     assert k.globals["x"] == 2
 
 
+@pytest.mark.flaky(reruns=3)
 async def test_reload_with_modified_cell(
     tmp_path: pathlib.Path,
     py_modname: str,
@@ -469,7 +519,16 @@ async def test_reload_with_modified_cell(
     )
 
     # wait for the watcher to pick up the change
-    await asyncio.sleep(INTERVAL * 3)
+    retries = 0
+    while retries < 10:
+        await asyncio.sleep(INTERVAL)
+        retries += 1
+        if (
+            k.graph.cells[er_1.cell_id].stale
+            and k.graph.cells[er_2.cell_id].stale
+        ):
+            break
+
     assert k.graph.cells[er_1.cell_id].stale
     assert k.graph.cells[er_2.cell_id].stale
     assert not k.graph.cells[er_3.cell_id].stale
@@ -885,13 +944,14 @@ class TestModuleWatcherStop:
         await asyncio.sleep(INTERVAL)
 
         # Stop the watcher
-        assert k.module_watcher is not None
-        assert not k.module_watcher.should_exit.is_set()
+        watcher = k.autoreload_manager.watcher
+        assert watcher is not None
+        assert not watcher.should_exit.is_set()
 
-        k.module_watcher.stop()
+        watcher.stop()
 
         # should_exit should be set
-        assert k.module_watcher.should_exit.is_set()
+        assert watcher.should_exit.is_set()
 
     async def test_module_watcher_processes_flag(
         self, execution_kernel: Kernel, exec_req: ExecReqProvider
@@ -906,14 +966,16 @@ class TestModuleWatcherStop:
         # Give watcher time to start
         await asyncio.sleep(INTERVAL)
 
-        assert k.module_watcher is not None
+        watcher = k.autoreload_manager.watcher
+        assert watcher is not None
         # Initially should be set (no run in flight)
-        assert k.module_watcher.run_is_processed.is_set()
+        assert watcher.run_is_processed.is_set()
 
 
 class TestModuleWatcherEdgeCases:
     """Tests for edge cases in module watching"""
 
+    @pytest.mark.flaky(reruns=3)
     async def test_module_watcher_handles_deleted_cell(
         self,
         tmp_path: pathlib.Path,
@@ -959,12 +1021,18 @@ class TestModuleWatcherEdgeCases:
         )
 
         # Wait for watcher to pick up change
-        await asyncio.sleep(INTERVAL * 3)
+        retries = 0
+        while retries < 10:
+            await asyncio.sleep(INTERVAL)
+            retries += 1
+            if k.graph.cells[er_1.cell_id].stale:
+                break
 
         # Only er_1 should be stale (er_2 was deleted)
         assert k.graph.cells[er_1.cell_id].stale
         assert er_2.cell_id not in k.graph.cells
 
+    @pytest.mark.flaky(reruns=3)
     async def test_module_watcher_cache_invalidation(
         self,
         tmp_path: pathlib.Path,
@@ -989,7 +1057,13 @@ class TestModuleWatcherEdgeCases:
         update_file(py_file, "def foo(): return 2")
 
         # Wait for watcher
-        await asyncio.sleep(INTERVAL * 3)
+        retries = 0
+        while retries < 10:
+            await asyncio.sleep(INTERVAL)
+            retries += 1
+            if k.graph.cells[er_1.cell_id].stale:
+                break
+
         assert k.graph.cells[er_1.cell_id].stale
 
         # Run stale cells
@@ -1003,3 +1077,83 @@ class TestModuleWatcherEdgeCases:
 
         # The cache should handle the modified imports correctly
         assert not k.graph.cells[er_1.cell_id].stale
+
+
+class TestAutoreloadManagerLifecycle:
+    """Tests for AutoreloadManager responding to runtime.auto_reload changes."""
+
+    async def test_mode_swap_replaces_watcher(
+        self, execution_kernel: Kernel, exec_req: ExecReqProvider
+    ):
+        del exec_req
+        k = execution_kernel
+        config = copy.deepcopy(DEFAULT_CONFIG)
+
+        config["runtime"]["auto_reload"] = "lazy"
+        k.set_user_config(UpdateUserConfigCommand(config=config))
+        lazy_watcher = k.autoreload_manager.watcher
+        assert lazy_watcher is not None
+        assert lazy_watcher.mode == "lazy"
+
+        config["runtime"]["auto_reload"] = "autorun"
+        k.set_user_config(UpdateUserConfigCommand(config=config))
+        autorun_watcher = k.autoreload_manager.watcher
+        assert autorun_watcher is not None
+        assert autorun_watcher.mode == "autorun"
+        assert autorun_watcher is not lazy_watcher
+        assert lazy_watcher.should_exit.is_set()
+
+    async def test_reloader_persists_across_mode_swap(
+        self, execution_kernel: Kernel, exec_req: ExecReqProvider
+    ):
+        """Switching between lazy and autorun must not throw away the
+        reloader's mtime state — otherwise every swap would force a reload
+        of all already-tracked modules."""
+        del exec_req
+        k = execution_kernel
+        config = copy.deepcopy(DEFAULT_CONFIG)
+
+        config["runtime"]["auto_reload"] = "lazy"
+        k.set_user_config(UpdateUserConfigCommand(config=config))
+        reloader = k.autoreload_manager.reloader
+        assert reloader is not None
+
+        config["runtime"]["auto_reload"] = "autorun"
+        k.set_user_config(UpdateUserConfigCommand(config=config))
+        assert k.autoreload_manager.reloader is reloader
+
+    async def test_disable_clears_manager_state(
+        self, execution_kernel: Kernel, exec_req: ExecReqProvider
+    ):
+        del exec_req
+        k = execution_kernel
+        config = copy.deepcopy(DEFAULT_CONFIG)
+
+        config["runtime"]["auto_reload"] = "lazy"
+        k.set_user_config(UpdateUserConfigCommand(config=config))
+        assert k.autoreload_manager.watcher is not None
+        assert k.autoreload_manager.reloader is not None
+
+        config["runtime"]["auto_reload"] = "off"
+        k.set_user_config(UpdateUserConfigCommand(config=config))
+        assert k.autoreload_manager.watcher is None
+        assert k.autoreload_manager.reloader is None
+
+    async def test_run_rearms_watcher_run_is_processed(
+        self, execution_kernel: Kernel, exec_req: ExecReqProvider
+    ):
+        """The on_finish hook fires for every kernel run, not just
+        `_run_stale_cells`. This is a deliberate semantic change from the
+        pre-extraction code, which only set the flag at the end of stale-cell
+        runs."""
+        k = execution_kernel
+        config = copy.deepcopy(DEFAULT_CONFIG)
+        config["runtime"]["auto_reload"] = "lazy"
+        k.set_user_config(UpdateUserConfigCommand(config=config))
+
+        watcher = k.autoreload_manager.watcher
+        assert watcher is not None
+
+        watcher.run_is_processed.clear()
+        await k.run([exec_req.get("x = 1")])
+        assert watcher.run_is_processed.is_set()

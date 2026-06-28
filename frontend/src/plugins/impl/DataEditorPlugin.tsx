@@ -1,10 +1,6 @@
 /* Copyright 2026 Marimo. All rights reserved. */
 
 import glideCss from "@glideapps/glide-data-grid/dist/index.css?inline";
-import { Tooltip } from "radix-ui";
-
-const TooltipProvider = Tooltip.Provider;
-
 import React, { useState } from "react";
 import { z } from "zod";
 import { inferFieldTypes } from "@/components/data-table/columns";
@@ -63,16 +59,14 @@ export const DataEditorPlugin = createPlugin<Edits>("marimo-data-editor", {
   .withFunctions({})
   .renderer((props) => {
     return (
-      <TooltipProvider>
-        <LoadingDataEditor
-          data={props.data.data}
-          fieldTypes={props.data.fieldTypes}
-          edits={props.value}
-          onEdits={props.setValue}
-          host={props.host}
-          editableColumns={props.data.editableColumns}
-        />
-      </TooltipProvider>
+      <LoadingDataEditor
+        data={props.data.data}
+        fieldTypes={props.data.fieldTypes}
+        edits={props.value}
+        onEdits={props.setValue}
+        host={props.host}
+        editableColumns={props.data.editableColumns}
+      />
     );
   });
 
@@ -89,19 +83,23 @@ interface Props extends Omit<
 
 const LoadingDataEditor = (props: Props) => {
   const [data, setData] = useState<unknown[]>([]);
-  const [columnFields, setColumnFields] = useState<FieldTypes>({});
+  const [columnFields, setColumnFields] = useState<FieldTypes>(new Map());
 
   // Load the data
   const { error } = useAsyncData(async () => {
     const withoutExternalTypes = toFieldTypes(props.fieldTypes ?? []);
 
     // If we already have the data, return it
-    // Otherwise, load the data from the URL
+    // Otherwise, load the data from the URL. Vega's CSV parser takes a
+    // plain `Record`; column order doesn't matter for parsing.
     const localData = Array.isArray(props.data)
       ? props.data
       : await vegaLoadData(
           props.data,
-          { type: "csv", parse: getVegaFieldTypes(withoutExternalTypes) },
+          {
+            type: "csv",
+            parse: getVegaFieldTypes(Object.fromEntries(withoutExternalTypes)),
+          },
           { handleBigIntAndNumberLike: true },
         );
 

@@ -1,28 +1,69 @@
 # Copyright 2026 Marimo. All rights reserved.
 from __future__ import annotations
 
-from collections.abc import Sequence
+import re
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
     Any,
-    Callable,
     Final,
     Literal,
-    Optional,
     TypedDict,
-    Union,
 )
 
 from marimo import _loggers
 from marimo._output.rich_help import mddoc
 from marimo._plugins.ui._core.ui_element import UIElement
-from marimo._plugins.validators import validate_one_of
 from marimo._runtime.functions import Function
 from marimo._utils.files import natural_sort
 from marimo._utils.paths import is_cloudpath, normalize_path
 
 LOGGER = _loggers.marimo_logger()
+
+
+_VALID_KINDS: Final[frozenset[str]] = frozenset({"file", "directory"})
+
+
+def _normalize_selection_mode(
+    value: object,
+) -> frozenset[str]:
+    """Normalize `selection_mode` to a frozenset of selectable kinds.
+
+    Accepted inputs:
+        - `"file"`      -> `{"file"}`
+        - `"directory"` -> `{"directory"}`
+        - `"all"`       -> `{"file", "directory"}`
+        - list/tuple containing `"file"` and/or `"directory"` (deduped)
+    """
+    if isinstance(value, str):
+        if value == "all":
+            return frozenset(_VALID_KINDS)
+        if value in _VALID_KINDS:
+            return frozenset({value})
+        raise ValueError(
+            f"Invalid selection_mode {value!r}. "
+            f"Expected one of 'file', 'directory', 'all', "
+            f"or a list of 'file'/'directory'."
+        )
+
+    if isinstance(value, (list, tuple)):
+        if len(value) == 0:
+            raise ValueError("selection_mode list must not be empty.")
+        kinds: set[str] = set()
+        for kind in value:
+            if not isinstance(kind, str) or kind not in _VALID_KINDS:
+                raise ValueError(
+                    f"Invalid selection_mode entry {kind!r}. "
+                    f"Each entry must be 'file' or 'directory'."
+                )
+            kinds.add(kind)
+        return frozenset(kinds)
+
+    raise ValueError(
+        f"selection_mode must be a string or a list of strings, "
+        f"got {type(value).__name__}."
+    )
 
 
 @dataclass
@@ -73,6 +114,16 @@ class file_browser(
         file_browser.name(index=0)
         ```
 
+        Selecting both files and directories (useful for formats like
+        deltalake that are stored as directories):
+        ```python
+        file_browser = mo.ui.file_browser(
+            initial_path=Path("path/to/dir"),
+            selection_mode="all",
+            # Equivalent: selection_mode=["file", "directory"]
+        )
+        ```
+
         Connecting to an S3 (or GCS, Azure) bucket:
         ```python
         from cloudpathlib import S3Path
@@ -117,8 +168,16 @@ class file_browser(
         filetypes (Sequence[str], optional): The file types to display in each
             directory; for example, filetypes=[".txt", ".csv"]. If None, all
             files are displayed. Defaults to None.
-        selection_mode (Literal["file", "directory"], optional): Either "file" or "directory". Defaults to
-            "file".
+        filter (str | re.Pattern | Callable[[Path], bool], optional): An
+            additional filter applied to files (directories are always shown
+            for navigation). Accepts a regex string or compiled pattern
+            matched against the filename, or a callable that receives the
+            file's `Path` and returns `True` to include it. Applied together
+            with `filetypes` (both must match). Defaults to None.
+        selection_mode (str | Sequence[str], optional): Which kinds of entries
+            the user can select. Accepts one of "file" (default), "directory",
+            "all", or a list/tuple containing "file" and/or "directory".
+            "all" is equivalent to ["file", "directory"]. Defaults to "file".
         multiple (bool, optional): If True, allow the user to select multiple
             files. Defaults to True.
         restrict_navigation (bool, optional): If True, prevent the user from
@@ -141,20 +200,21 @@ class file_browser(
 
     def __init__(
         self,
-        initial_path: Union[str, Path] = "",
-        filetypes: Optional[Sequence[str]] = None,
-        selection_mode: Literal["file", "directory"] = "file",
+        initial_path: str | Path = "",
+        filetypes: Sequence[str] | None = None,
+        selection_mode: Literal["file", "directory", "all"]
+        | Sequence[Literal["file", "directory"]] = "file",
         multiple: bool = True,
         restrict_navigation: bool = False,
         *,
-        limit: Optional[int] = None,
+        filter: str | re.Pattern[str] | Callable[[Path], bool] | None = None,  # noqa: A002
+        limit: int | None = None,
         label: str = "",
-        on_change: Optional[
-            Callable[[Sequence[FileBrowserFileInfo]], None]
-        ] = None,
+        on_change: Callable[[Sequence[FileBrowserFileInfo]], None]
+        | None = None,
         ignore_empty_dirs: bool = False,
     ) -> None:
-        validate_one_of(selection_mode, ["file", "directory"])
+        self._selection_mode = _normalize_selection_mode(selection_mode)
 
         # Save the Path class of the initial path
         self._path_cls: type[Path]
@@ -180,7 +240,6 @@ class file_browser(
                 f"Initial path {initial_path} is not a directory."
             )
 
-        self._selection_mode = selection_mode
         # Normalize filetypes: ensure lowercase and dot prefix for case-insensitive matching
         if filetypes:
             normalized_filetypes = set()
@@ -196,6 +255,20 @@ class file_browser(
         self._restrict_navigation = restrict_navigation
         self._ignore_empty_dirs = ignore_empty_dirs
 
+        if filter is None:
+            self._filter: re.Pattern[str] | Callable[[Path], bool] | None = (
+                None
+            )
+        elif isinstance(filter, str):
+            self._filter = re.compile(filter)
+        elif isinstance(filter, re.Pattern) or callable(filter):
+            self._filter = filter
+        else:
+            raise ValueError(
+                f"filter must be a string, re.Pattern, or callable, "
+                f"got {type(filter).__name__}."
+            )
+
         # Smart default limit based on path type
         if limit is None:
             if is_cloudpath(self._initial_path):
@@ -205,13 +278,18 @@ class file_browser(
 
         self._limit = limit
 
+        if self._selection_mode == _VALID_KINDS:
+            wire_selection_mode = "all"
+        else:
+            (wire_selection_mode,) = self._selection_mode
+
         super().__init__(
             component_name=file_browser._name,
             initial_value=[],
             label=label,
             args={
                 "initial-path": str(self._initial_path),
-                "selection-mode": selection_mode,
+                "selection-mode": wire_selection_mode,
                 "filetypes": filetypes if filetypes is not None else [],
                 "multiple": multiple,
                 "restrict-navigation": restrict_navigation,
@@ -237,6 +315,28 @@ class file_browser(
 
         path = self._path_cls(path_str, **kwargs)
         return path
+
+    def _passes_filter(self, file: Path) -> bool:
+        """Return True if `file` passes the configured `filter`.
+
+        Centralizes filter evaluation so `_list_directory` and
+        `_has_files_recursive` stay in sync.
+
+        A regex filter is applied with `re.Pattern.search`, so it matches
+        anywhere within the filename; anchor with `^`/`$` to match the whole
+        name. A callable filter that raises an `OSError` (e.g. a broken symlink)
+        is treated as "does not match" so one bad file can't take down the
+        listing of the other files; any other exception propagates.
+        """
+        if self._filter is None:
+            return True
+        if isinstance(self._filter, re.Pattern):
+            return self._filter.search(file.name) is not None
+        try:
+            return self._filter(file)
+        except OSError as e:
+            LOGGER.debug(f"file_browser filter could not evaluate {file}: {e}")
+            return False
 
     def _has_files_recursive(
         self, directory: Path, max_depth: int = 100
@@ -274,6 +374,9 @@ class file_browser(
                         and item.suffix.lower() not in self._filetypes
                     ):
                         continue
+                    # Apply regex or callable filter
+                    if not self._passes_filter(item):
+                        continue
                     return True
                 elif item.is_dir() and not item.is_symlink():
                     # Skip directory symlinks to avoid infinite loops
@@ -297,16 +400,22 @@ class file_browser(
         # such as CloudPath
         path = self._create_path(args.path)
 
-        if self._restrict_navigation and path in self._initial_path.parents:
-            raise RuntimeError(
-                "Navigation is restricted; navigating to a parent of initial path is not allowed."
-            )
+        if self._restrict_navigation:
+            try:
+                path.resolve(strict=True).relative_to(
+                    self._initial_path.resolve()
+                )
+            # NB. RuntimeError vs OSError depends on the version of python.
+            except (ValueError, RuntimeError, OSError):
+                raise RuntimeError(
+                    "Navigation is restricted; navigating outside the initial path is not allowed."
+                ) from None
         folders: list[TypedFileBrowserFileInfo] = []
         files: list[TypedFileBrowserFileInfo] = []
 
         # Sort based on natural sort (alpha, then num)
         all_file_paths = sorted(
-            list(path.iterdir()), key=lambda f: natural_sort(f.name)
+            path.iterdir(), key=lambda f: natural_sort(f.name)
         )
         is_truncated = False
 
@@ -314,14 +423,19 @@ class file_browser(
             extension = file.suffix
             is_directory = file.is_dir()  # Expensive call for cloud paths
 
-            # Skip non-directories if selection mode is directory
-            if self._selection_mode == "directory" and not is_directory:
+            # Directories are always shown so the user can navigate into
+            # them. Files are hidden when files aren't selectable.
+            if not is_directory and "file" not in self._selection_mode:
                 continue
 
             # Skip non-matching file types (case-insensitive)
             if self._filetypes and not is_directory:
                 if extension.lower() not in self._filetypes:
                     continue
+
+            # Apply regex or callable filter to files
+            if not is_directory and not self._passes_filter(file):
+                continue
 
             # Skip empty directories if ignore_empty_dirs is enabled
             if self._ignore_empty_dirs and is_directory:
@@ -367,7 +481,7 @@ class file_browser(
             for file in value
         )
 
-    def name(self, index: int = 0) -> Optional[str]:
+    def name(self, index: int = 0) -> str | None:
         """Get file name at index.
 
         Args:
@@ -383,7 +497,7 @@ class file_browser(
         else:
             return self.value[index].name
 
-    def path(self, index: int = 0) -> Optional[Path]:
+    def path(self, index: int = 0) -> Path | None:
         """Get file path at index.
 
         Args:

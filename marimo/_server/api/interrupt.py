@@ -5,7 +5,7 @@ import asyncio
 import signal
 import sys
 import time
-from typing import Callable
+from typing import TYPE_CHECKING
 
 from marimo._config.settings import GLOBAL_SETTINGS
 from marimo._utils.print import (
@@ -13,12 +13,15 @@ from marimo._utils.print import (
     print_,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 
 class InterruptHandler:
     def __init__(self, quiet: bool, shutdown: Callable[[], None]) -> None:
         self.quiet = quiet
         self.shutdown = shutdown
-        self.loop = asyncio.get_event_loop()
+        self.loop = asyncio.get_running_loop()
         self.original_handler = signal.getsignal(signal.SIGINT)
         self._time_of_last_confirmation: float | None = None
 
@@ -31,7 +34,7 @@ class InterruptHandler:
             # Windows
             signal.signal(
                 signal.SIGINT,
-                lambda signum, frame: self._interrupt_handler(),  # noqa: ARG005,E501
+                lambda signum, frame: self._interrupt_handler(),  # noqa: ARG005
             )
 
     def _interrupt_handler(self) -> None:
@@ -67,7 +70,7 @@ class InterruptHandler:
                     return
 
                 response = input(
-                    f"\r{TAB}Are you sure you want to quit? (y/n): "
+                    f"\r{TAB}Are you sure you want to quit? (y/N): "
                 )
                 self._time_of_last_confirmation = time.time()
                 if response.lower().strip() == "y":

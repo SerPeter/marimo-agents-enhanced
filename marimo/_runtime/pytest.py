@@ -5,10 +5,11 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any
 
 from marimo._ast.cell import Cell
 from marimo._ast.pytest import MARIMO_TEST_STUB_NAME
+from marimo._ast.variables import demangle_locals_in_text
 from marimo._cli.print import bold, green
 from marimo._dependencies.dependencies import DependencyManager
 from marimo._runtime.capture import capture_stdout
@@ -19,6 +20,7 @@ MARIMO_TEST_BLOCK_REGEX = re.compile(rf"{MARIMO_TEST_STUB_NAME}_\d+[(?::)\.]+")
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     import _pytest.Item  # type: ignore
@@ -32,7 +34,7 @@ class MarimoPytestResult:
     skipped: int = 0
     xfailed: int = 0
     xpassed: int = 0
-    output: Optional[str] = None
+    output: str | None = None
 
     @property
     def total(self) -> int:
@@ -79,6 +81,30 @@ def _to_marimo_uri(uri: str) -> str:
 
     notebook = os.path.relpath(_get_name(), notebook_location())
     return f"marimo://{notebook}#cell_id={cell_id}"
+
+
+def _rewrite_longrepr(longrepr: Any) -> None:
+    """Rewrite a TerminalRepr in place for user-friendly test output.
+
+    Strips the parameter-workaround frame at the top of the traceback,
+    rewrites each entry's file location into a `marimo://` URI, and
+    demangles `_cell_<id>_<name>` -> `<_name>` in source/exception lines
+    and the short-summary `reprcrash.message`.
+    """
+    if "func_JYWB" in str(longrepr):
+        longrepr.reprtraceback.reprentries = (
+            longrepr.reprtraceback.reprentries[1:]
+        )
+    for entry in longrepr.reprtraceback.reprentries:
+        if entry.reprfileloc is not None:
+            entry.reprfileloc.path = _to_marimo_uri(entry.reprfileloc.path)
+        if getattr(entry, "lines", None):
+            entry.lines = [
+                demangle_locals_in_text(line) for line in entry.lines
+            ]
+    reprcrash = getattr(longrepr, "reprcrash", None)
+    if reprcrash is not None and reprcrash.message:
+        reprcrash.message = demangle_locals_in_text(reprcrash.message)
 
 
 def _sub_function(
@@ -153,8 +179,8 @@ class ReplaceStubPlugin:
 
     def __init__(
         self,
-        defs: Optional[set[str]] = None,
-        lcls: Optional[dict[str, Any]] = None,
+        defs: set[str] | None = None,
+        lcls: dict[str, Any] | None = None,
     ) -> None:
         if lcls is None:
             lcls = globals()
@@ -312,19 +338,9 @@ class ReplaceStubPlugin:
         if isinstance(report.longrepr, tuple):
             _, lineno, msg = report.longrepr
             report.longrepr = (report.nodeid, lineno, f"({msg})")
-        # Not all TerminalRepr seem to have a reprtraceback
+        # Not all TerminalRepr seem to have a reprtraceback.
         elif hasattr(report.longrepr, "reprtraceback"):
-            longrepr = str(report.longrepr)
-            if "func_JYWB" in longrepr:
-                # Strip the first call of traceback
-                report.longrepr.reprtraceback.reprentries = (
-                    report.longrepr.reprtraceback.reprentries[1:]
-                )
-            for entry in report.longrepr.reprtraceback.reprentries:
-                if entry.reprfileloc is not None:
-                    entry.reprfileloc.path = _to_marimo_uri(
-                        entry.reprfileloc.path
-                    )
+            _rewrite_longrepr(report.longrepr)
 
 
 def run_pytest(
@@ -379,6 +395,8 @@ def run_pytest(
                     "no:codecov",  # Disable codecov plugin to avoid duplicate reports
                     "-p",
                     "no:sugar",  # Disable sugar plugin to avoid duplicate reports
+                    "-p",
+                    "no:cacheprovider",  # Skip .pytest_cache I/O
                     notebook_path,
                 ],
                 plugins=[plugin],

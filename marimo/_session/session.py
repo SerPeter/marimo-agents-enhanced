@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from marimo import _loggers
 from marimo._cli.sandbox import SandboxMode
 from marimo._config.manager import MarimoConfigManager, ScriptConfigManager
-from marimo._messaging.notebook.document import NotebookCell, NotebookDocument
+from marimo._messaging.notebook.document import NotebookDocument
 from marimo._messaging.notification import (
     NotificationMessage,
 )
@@ -45,6 +45,7 @@ from marimo._session.extensions.types import (
     ExtensionRegistry,
     SessionExtension,
 )
+from marimo._session.kernel_exit import classify_kernel_exit
 from marimo._session.managers import (
     KernelManagerImpl,
     QueueManagerImpl,
@@ -54,6 +55,7 @@ from marimo._session.notebook import AppFileManager
 from marimo._session.room import Room
 from marimo._session.state.session_view import SessionView
 from marimo._session.types import (
+    KernelExitInfo,
     KernelManager,
     KernelState,
     QueueManager,
@@ -65,7 +67,7 @@ from marimo._utils.repr import format_repr
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
-    from marimo._ast.cell_manager import CellManager
+    from marimo._runtime.virtual_file import VirtualFileStorageType
     from marimo._server.models.models import InstantiateNotebookRequest
     from marimo._session.app_host import AppHostContext
 
@@ -74,29 +76,6 @@ LOGGER = _loggers.marimo_logger()
 _DEFAULT_TTL_SECONDS = 120
 
 __all__ = ["Session", "SessionImpl"]
-
-
-def _document_from_cell_manager(cell_manager: CellManager) -> NotebookDocument:
-    """Build a NotebookDocument from a CellManager's current state.
-
-    TODO: CellManager and NotebookDocument track overlapping state (cell
-    ordering, code, names, configs). Once the document model is wired
-    into all consumers, we should reconcile these — either CellManager
-    wraps a NotebookDocument internally, or it is replaced by a
-    different composition. For now, the document is populated from the
-    cell manager at session startup and the two coexist.
-    """
-    return NotebookDocument(
-        [
-            NotebookCell(
-                id=cd.cell_id,
-                code=cd.code,
-                name=cd.name,
-                config=cd.config,
-            )
-            for cd in cell_manager.cell_data()
-        ]
-    )
 
 
 class SessionImpl(Session):
@@ -116,10 +95,10 @@ class SessionImpl(Session):
         app_metadata: AppMetadata,
         app_file_manager: AppFileManager,
         config_manager: MarimoConfigManager,
-        virtual_files_supported: bool,
+        virtual_file_storage: VirtualFileStorageType | None,
         redirect_console_to_browser: bool,
         auto_instantiate: bool,
-        ttl_seconds: Optional[int],
+        ttl_seconds: int | None,
         extensions: list[SessionExtension] | None = None,
         sandbox_mode: SandboxMode | None = None,
         app_host_context: AppHostContext | None = None,
@@ -183,7 +162,6 @@ class SessionImpl(Session):
                 configs=configs,
                 app_metadata=app_metadata,
                 config_manager=config_manager,
-                virtual_files_supported=virtual_files_supported,
                 redirect_console_to_browser=redirect_console_to_browser,
             )
         else:
@@ -198,7 +176,7 @@ class SessionImpl(Session):
                 configs=configs,
                 app_metadata=app_metadata,
                 config_manager=config_manager,
-                virtual_files_supported=virtual_files_supported,
+                virtual_file_storage=virtual_file_storage,
                 redirect_console_to_browser=redirect_console_to_browser,
             )
 
@@ -244,7 +222,7 @@ class SessionImpl(Session):
         kernel_manager: KernelManager,
         app_file_manager: AppFileManager,
         config_manager: MarimoConfigManager,
-        ttl_seconds: Optional[int],
+        ttl_seconds: int | None,
         extensions: list[SessionExtension],
     ) -> None:
         """Initialize kernel and client connection to it."""
@@ -257,9 +235,6 @@ class SessionImpl(Session):
         self._kernel_manager = kernel_manager
         self.ttl_seconds = (
             ttl_seconds if ttl_seconds is not None else _DEFAULT_TTL_SECONDS
-        )
-        self.document = _document_from_cell_manager(
-            app_file_manager.app.cell_manager
         )
         self.session_view = SessionView()
         self.config_manager = config_manager
@@ -277,6 +252,19 @@ class SessionImpl(Session):
         # Connect the main consumer after attaching extensions,
         # to avoid calling on_attach on the main consumer twice.
         self.connect_consumer(session_consumer, main=True)
+
+    @property
+    def document(self) -> NotebookDocument:
+        """The notebook document this session reflects.
+
+        Derived from `self.app_file_manager.app.cell_manager.document`
+        rather than stored, so any code path that swaps the underlying
+        `CellManager` or `app` (save round-trip, file-watch reload,
+        export reload) is automatically picked up — no rebinding needed
+        at the call sites. Read-only by design: the document's identity
+        belongs to the cell manager.
+        """
+        return self.app_file_manager.app.cell_manager.document
 
     def _attach_extensions(self) -> None:
         """Attach all extensions to the session."""
@@ -324,12 +312,6 @@ class SessionImpl(Session):
         """Get the consumers in the session."""
         return self.room.consumers
 
-    def flush_messages(self) -> None:
-        """Flush any pending messages."""
-        ext = self.extensions.get(NotificationListenerExtension)
-        if ext is not None:
-            ext.flush()
-
     async def rename_path(self, new_path: str) -> None:
         """Rename the path of the session."""
         old_path = self.app_file_manager.path
@@ -352,10 +334,20 @@ class SessionImpl(Session):
         """Get the PID of the kernel."""
         return self._kernel_manager.pid
 
+    def kernel_exit_info(self) -> KernelExitInfo | None:
+        """Describe how the kernel exited."""
+        task = self._kernel_manager.kernel_task
+        if task is None or task.is_alive():
+            return None
+        # ``exitcode`` is provided by multiprocessing.Process; threads don't
+        # have one, so we treat absence as "unknown".
+        exitcode = getattr(task, "exitcode", None)
+        return classify_kernel_exit(exitcode)
+
     def put_control_request(
         self,
         request: commands.CommandMessage,
-        from_consumer_id: Optional[ConsumerId],
+        from_consumer_id: ConsumerId | None,
     ) -> None:
         """Put a control request in the control queue."""
         self._event_bus.emit_received_command(self, request, from_consumer_id)
@@ -414,7 +406,7 @@ class SessionImpl(Session):
     def notify(
         self,
         operation: NotificationMessage | KernelMessage,
-        from_consumer_id: Optional[ConsumerId],
+        from_consumer_id: ConsumerId | None,
     ) -> None:
         """Broadcast a notification to session consumers."""
         if isinstance(operation, bytes):
@@ -446,7 +438,7 @@ class SessionImpl(Session):
         self,
         request: InstantiateNotebookRequest,
         *,
-        http_request: Optional[HTTPRequest],
+        http_request: HTTPRequest | None,
     ) -> None:
         """Instantiate the app."""
         app = self.app_file_manager.app

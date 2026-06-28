@@ -8,10 +8,8 @@ import {
   ArrowUpNarrowWideIcon,
   ChevronsUpDown,
   CopyIcon,
+  EyeOffIcon,
   FilterX,
-  FunnelPlusIcon,
-  ListFilterIcon,
-  ListFilterPlusIcon,
   PinOffIcon,
   WrapTextIcon,
 } from "lucide-react";
@@ -27,15 +25,17 @@ import type { DataType } from "@/core/kernel/messages";
 import { cn } from "@/utils/cn";
 import { copyToClipboard } from "@/utils/copy";
 import { DATA_TYPE_ICON } from "../datasets/icons";
-import { Button } from "../ui/button";
 import { formattingExample } from "./column-formatting/feature";
 import { formatOptions } from "./column-formatting/types";
 import { NAMELESS_COLUMN_PREFIX } from "./columns";
 
-export function renderFormatOptions<TData, TValue>(
-  column: Column<TData, TValue>,
-  locale: string,
-) {
+export function FormatOptions<TData, TValue>({
+  column,
+  locale,
+}: {
+  column: Column<TData, TValue>;
+  locale: string;
+}) {
   const dataType: DataType | undefined = column.columnDef.meta?.dataType;
   const columnFormatOptions = dataType ? formatOptions[dataType] : [];
 
@@ -86,9 +86,11 @@ export function renderFormatOptions<TData, TValue>(
   );
 }
 
-export function renderColumnWrapping<TData, TValue>(
-  column: Column<TData, TValue>,
-) {
+export function ColumnWrapping<TData, TValue>({
+  column,
+}: {
+  column: Column<TData, TValue>;
+}) {
   if (!column.getCanWrap?.() || !column.getColumnWrapping) {
     return null;
   }
@@ -111,9 +113,11 @@ export function renderColumnWrapping<TData, TValue>(
   );
 }
 
-export function renderColumnPinning<TData, TValue>(
-  column: Column<TData, TValue>,
-) {
+export function ColumnPinning<TData, TValue>({
+  column,
+}: {
+  column: Column<TData, TValue>;
+}) {
   if (!column.getCanPin?.() || !column.getIsPinned) {
     return null;
   }
@@ -143,7 +147,28 @@ export function renderColumnPinning<TData, TValue>(
   );
 }
 
-export function renderCopyColumn<TData, TValue>(column: Column<TData, TValue>) {
+export function HideColumn<TData, TValue>({
+  column,
+}: {
+  column: Column<TData, TValue>;
+}) {
+  if (!column.getCanHide()) {
+    return null;
+  }
+
+  return (
+    <DropdownMenuItem onClick={() => column.toggleVisibility(false)}>
+      <EyeOffIcon className="mo-dropdown-icon" />
+      Hide column
+    </DropdownMenuItem>
+  );
+}
+
+export function CopyColumn<TData, TValue>({
+  column,
+}: {
+  column: Column<TData, TValue>;
+}) {
   if (!column.getCanCopy?.()) {
     return null;
   }
@@ -163,10 +188,19 @@ export function renderCopyColumn<TData, TValue>(column: Column<TData, TValue>) {
 const AscIcon = ArrowUpNarrowWideIcon;
 const DescIcon = ArrowDownWideNarrowIcon;
 
-export function renderSorts<TData, TValue>(
-  column: Column<TData, TValue>,
-  table?: Table<TData>,
-) {
+/**
+ * `table` is optional: it is only needed to detect multi-column sorting and
+ * offer "Clear all sorts". Call sites that build their header inside column
+ * definitions (where the table instance isn't yet in scope) omit it and fall
+ * back to single-column "Clear sort".
+ */
+export function Sorts<TData, TValue>({
+  column,
+  table,
+}: {
+  column: Column<TData, TValue>;
+  table?: Table<TData>;
+}) {
   if (!column.getCanSort()) {
     return null;
   }
@@ -237,36 +271,31 @@ export function renderSorts<TData, TValue>(
         {sortDirection === "desc" && renderSortIndex()}
       </DropdownMenuItem>
       {renderClearSort()}
-      <DropdownMenuSeparator />
     </>
   );
 }
 
-export function renderSortFilterIcon<TData, TValue>(
-  column: Column<TData, TValue>,
-) {
+export function renderSortIcon<TData, TValue>(column: Column<TData, TValue>) {
   if (!column.getCanSort()) {
     return null;
   }
 
   const isSorted = column.getIsSorted();
-  const isFiltered = column.getFilterValue() !== undefined;
 
-  let Icon: React.FC<React.SVGProps<SVGSVGElement>>;
-  if (isFiltered && isSorted) {
-    Icon = ListFilterPlusIcon;
-  } else if (isFiltered) {
-    Icon = FunnelPlusIcon;
-  } else if (isSorted) {
-    Icon = isSorted === "desc" ? DescIcon : AscIcon;
-  } else {
-    Icon = ChevronsUpDown;
-  }
+  const Icon: React.FC<React.SVGProps<SVGSVGElement>> = isSorted
+    ? isSorted === "desc"
+      ? DescIcon
+      : AscIcon
+    : ChevronsUpDown;
 
   return <Icon className="h-3 w-3" />;
 }
 
-export function renderDataType<TData, TValue>(column: Column<TData, TValue>) {
+export function DataType<TData, TValue>({
+  column,
+}: {
+  column: Column<TData, TValue>;
+}) {
   const dtype: string | undefined = column.columnDef.meta?.dtype;
   if (!dtype) {
     return null;
@@ -292,61 +321,3 @@ export const ClearFilterMenuItem = <TData, TValue>({
     Clear filter
   </DropdownMenuItem>
 );
-
-export function renderFilterByValues<TData, TValue>(
-  column: Column<TData, TValue>,
-  setIsFilterValueOpen: (open: boolean) => void,
-) {
-  const canFilter = column.getCanFilter();
-  if (!canFilter) {
-    return null;
-  }
-
-  const columnType = column.columnDef.meta?.dataType;
-  // skip boolean as this can be easily filtered through normal filters
-  if (columnType === "boolean") {
-    return null;
-  }
-
-  // there are some edge cases which do not support filtering (eg. dicts with None values)
-  const filterType = column.columnDef.meta?.filterType;
-  if (!filterType) {
-    return null;
-  }
-
-  return (
-    <DropdownMenuSub>
-      <DropdownMenuItem onClick={() => setIsFilterValueOpen(true)}>
-        <ListFilterIcon className="mo-dropdown-icon" />
-        Filter by values
-      </DropdownMenuItem>
-    </DropdownMenuSub>
-  );
-}
-
-export const FilterButtons = ({
-  onApply,
-  onClear,
-  clearButtonDisabled,
-}: {
-  onApply: () => void;
-  onClear: () => void;
-  clearButtonDisabled?: boolean;
-}) => {
-  return (
-    <div className="flex gap-2 px-2 justify-between">
-      <Button variant="link" size="sm" onClick={onApply}>
-        Apply
-      </Button>
-      <Button
-        variant="linkDestructive"
-        size="sm"
-        className=""
-        onClick={onClear}
-        disabled={clearButtonDisabled}
-      >
-        Clear
-      </Button>
-    </div>
-  );
-};

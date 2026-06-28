@@ -318,13 +318,13 @@ def test_transform_duplicate_definitions():
 def test_transform_remove_duplicate_imports():
     sources = [
         "import numpy as np\nimport pandas as pd\nimport numpy as np",
-        "from sklearn.model_selection import train_test_split\nfrom sklearn.model_selection import cross_val_score",  # noqa: E501
+        "from sklearn.model_selection import train_test_split\nfrom sklearn.model_selection import cross_val_score",
         "import matplotlib.pyplot as plt\nimport numpy as np",
     ]
     result = transform_remove_duplicate_imports(sources)
     assert result == [
         "import numpy as np\nimport pandas as pd",
-        "from sklearn.model_selection import train_test_split\nfrom sklearn.model_selection import cross_val_score",  # noqa: E501
+        "from sklearn.model_selection import train_test_split\nfrom sklearn.model_selection import cross_val_score",
         "import matplotlib.pyplot as plt",
     ]
 
@@ -392,12 +392,12 @@ def test_transform_magic_commands_complex():
     expected = [
         '_df = mo.sql("""\nSELECT *\nFROM table\nWHERE condition\n""")',
         (
-            "# magic command not supported in marimo; please file an issue to add support\n"  # noqa: E501
+            "# magic command not supported in marimo; please file an issue to add support\n"
             "# %%time\nfor i in range(1000000):\n"
             "    pass"
         ),
         (
-            "# magic command not supported in marimo; please file an issue to add support\n"  # noqa: E501
+            "# magic command not supported in marimo; please file an issue to add support\n"
             "# %load_ext autoreload\n"
             "# '%autoreload 2' command supported automatically in marimo"
         ),
@@ -592,29 +592,29 @@ def test_transform_duplicate_definitions_complex():
 
 def test_transform_remove_duplicate_imports_complex():
     sources = [
-        "import numpy as np\nfrom pandas import DataFrame\nimport matplotlib.pyplot as plt",  # noqa: E501
-        "from sklearn.model_selection import train_test_split, cross_val_score\nimport numpy as np",  # noqa: E501
-        "from pandas import Series\nfrom matplotlib import pyplot as plt\nimport pandas as pd",  # noqa: E501
+        "import numpy as np\nfrom pandas import DataFrame\nimport matplotlib.pyplot as plt",
+        "from sklearn.model_selection import train_test_split, cross_val_score\nimport numpy as np",
+        "from pandas import Series\nfrom matplotlib import pyplot as plt\nimport pandas as pd",
     ]
     result = transform_remove_duplicate_imports(sources)
     assert result == [
-        "import numpy as np\nfrom pandas import DataFrame\nimport matplotlib.pyplot as plt",  # noqa: E501
-        "from sklearn.model_selection import train_test_split, cross_val_score",  # noqa: E501
-        "from pandas import Series\nimport pandas as pd",  # noqa: E501
+        "import numpy as np\nfrom pandas import DataFrame\nimport matplotlib.pyplot as plt",
+        "from sklearn.model_selection import train_test_split, cross_val_score",
+        "from pandas import Series\nimport pandas as pd",
     ]
 
 
 def test_transform_fixup_multiple_definitions_with_classes():
     sources = [
-        "class MyClass:\n    x = 1\n    def method(self):\n        return self.x",  # noqa: E501
+        "class MyClass:\n    x = 1\n    def method(self):\n        return self.x",
         "x = 2\nprint(x)",
-        "class MyClass:\n    x = 3\n    def method(self):\n        return self.x",  # noqa: E501
+        "class MyClass:\n    x = 3\n    def method(self):\n        return self.x",
     ]
     result = transform_fixup_multiple_definitions(sources)
     assert result == [
-        "class _MyClass:\n    x = 1\n\n    def method(self):\n        return self.x",  # noqa: E501
+        "class _MyClass:\n    x = 1\n\n    def method(self):\n        return self.x",
         "x = 2\nprint(x)",
-        "class _MyClass:\n    x = 3\n\n    def method(self):\n        return self.x",  # noqa: E501
+        "class _MyClass:\n    x = 3\n\n    def method(self):\n        return self.x",
     ]
 
 
@@ -625,8 +625,8 @@ def test_transform_magic_commands_unsupported():
     ]
     result = transform_magic_commands(sources)
     assert result == [
-        "# magic command not supported in marimo; please file an issue to add support\n# %custom_magic arg1 arg2",  # noqa: E501
-        "# magic command not supported in marimo; please file an issue to add support\n# %%custom_cell_magic\n# some\n# content",  # noqa: E501
+        "# magic command not supported in marimo; please file an issue to add support\n# %custom_magic arg1 arg2",
+        "# magic command not supported in marimo; please file an issue to add support\n# %%custom_cell_magic\n# some\n# content",
     ]
 
 
@@ -1302,6 +1302,47 @@ def test_integration_exclamation_marks_full_pipeline():
     )
 
 
+def _convert_code_cells(sources: list[str]) -> list[str]:
+    notebook = {
+        "cells": [
+            {"cell_type": "code", "source": s, "metadata": {}} for s in sources
+        ],
+        "metadata": {},
+        "nbformat": 4,
+        "nbformat_minor": 2,
+    }
+    result = convert_from_ipynb_to_notebook_ir(json.dumps(notebook))
+    return [cell.code for cell in result.cells]
+
+
+def test_exclamation_mark_does_not_disable_privatization():
+    # A `!` command cell must not disable underscore-privatization of
+    # cell-local duplicate definitions for the rest of the notebook.
+    dup = ["x = 1\nprint(x)", "x = 2\nprint(x)"]
+
+    code = _convert_code_cells(["!ls"] + dup)
+
+    # The `!` command is still rewritten to a subprocess call.
+    assert any("subprocess.call(['ls'])" in s for s in code)
+    # Duplicate `x` is made private to each cell, not suffix-versioned.
+    assert "_x = 1\nprint(_x)" in code
+    assert "_x = 2\nprint(_x)" in code
+    assert all("x_1" not in s for s in code)
+
+
+def test_exclamation_mark_privatization_matches_no_command():
+    # Converting with and without an unrelated `!` cell should privatize the
+    # duplicate `x` identically.
+    dup = ["x = 1\nprint(x)", "x = 2\nprint(x)"]
+
+    with_command = _convert_code_cells(["!ls"] + dup)
+    without_command = _convert_code_cells(dup)
+
+    privatized = ["_x = 1\nprint(_x)", "_x = 2\nprint(_x)"]
+    assert without_command == privatized
+    assert with_command[-2:] == privatized
+
+
 def test_transform_git_url_packages():
     from marimo._convert.ipynb.to_ir import _normalize_git_url_package
 
@@ -1424,3 +1465,69 @@ def test_convert_from_ipynb_with_star_import():
     assert len(result.cells) >= 1
     # The star import cell should be present in the output
     assert any("from os.path import *" in c.code for c in result.cells)
+
+
+def test_remove_input_tag_marks_hidden_and_does_not_leak_into_source():
+    """The `remove-input` nbconvert tag implies hide_code and is consumed."""
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "code",
+                "source": ["print('hidden')"],
+                "metadata": {"tags": ["remove-input"]},
+            },
+        ],
+        "metadata": {},
+        "nbformat": 4,
+        "nbformat_minor": 2,
+    }
+
+    result = convert_from_ipynb_to_notebook_ir(json.dumps(notebook))
+    assert len(result.cells) == 1
+    cell = result.cells[0]
+    assert cell.options.get("hide_code") is True
+    # The tag must not be re-emitted as a `# Cell tags:` comment.
+    assert "remove-input" not in cell.code
+    assert "# Cell tags" not in cell.code
+
+
+def test_jupyter_source_hidden_marks_hidden():
+    """`metadata.jupyter.source_hidden` is recognized as a hide_code signal."""
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "code",
+                "source": ["print('hidden via jupyter meta')"],
+                "metadata": {"jupyter": {"source_hidden": True}},
+            },
+        ],
+        "metadata": {},
+        "nbformat": 4,
+        "nbformat_minor": 2,
+    }
+
+    result = convert_from_ipynb_to_notebook_ir(json.dumps(notebook))
+    assert len(result.cells) == 1
+    assert result.cells[0].options.get("hide_code") is True
+
+
+def test_remove_input_alongside_other_tags_only_consumes_remove_input():
+    """Other tags must still be surfaced as a `# Cell tags:` comment."""
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "code",
+                "source": ["print('hi')"],
+                "metadata": {"tags": ["remove-input", "extra-tag"]},
+            },
+        ],
+        "metadata": {},
+        "nbformat": 4,
+        "nbformat_minor": 2,
+    }
+
+    result = convert_from_ipynb_to_notebook_ir(json.dumps(notebook))
+    cell = result.cells[0]
+    assert cell.options.get("hide_code") is True
+    assert "# Cell tags: extra-tag" in cell.code
+    assert "remove-input" not in cell.code

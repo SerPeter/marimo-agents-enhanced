@@ -145,6 +145,14 @@ describe("sanitizeHtml", () => {
     );
   });
 
+  test("preserves marimo-mermaid with theme attributes", () => {
+    const html =
+      "<marimo-mermaid data-diagram='&quot;graph TD\\nA --&gt; B&quot;' data-theme='&quot;base&quot;' data-theme_variables='{&quot;primaryColor&quot;: &quot;#E8EEF5&quot;, &quot;lineColor&quot;: &quot;#475569&quot;}'></marimo-mermaid>";
+    expect(sanitizeHtml(html)).toMatchInlineSnapshot(
+      `"<marimo-mermaid data-diagram="&quot;graph TD\\nA --> B&quot;" data-theme="&quot;base&quot;" data-theme_variables="{&quot;primaryColor&quot;: &quot;#E8EEF5&quot;, &quot;lineColor&quot;: &quot;#475569&quot;}"></marimo-mermaid>"`,
+    );
+  });
+
   test("keeps style tags with FORCE_BODY", () => {
     const html = "<style>body { color: red; }</style><p>Text</p>";
     expect(sanitizeHtml(html)).toMatchInlineSnapshot(
@@ -548,5 +556,35 @@ describe("sanitizeHtml", () => {
   test("still removes other non-marimo/non-iconify custom elements", () => {
     const html = "<some-custom-element>Content</some-custom-element>";
     expect(sanitizeHtml(html)).toMatchInlineSnapshot(`"Content"`);
+  });
+
+  // DOMPurify SAFE_FOR_XML strips attribute values containing `]>`, `-->`,
+  // `--!>`, or `</(style|script|...)`. `_build_attr` JSON-escapes `<`/`>`
+  // (`<`/`>`) before HTML-escaping so the parsed attribute value
+  // never matches. These tests pin that contract.
+  test("preserves data-* attribute with JSON-escaped ]> payload", () => {
+    const html =
+      "<marimo-table data-data='[{&quot;x&quot;:&quot;]&#92;u003e&quot;}]'></marimo-table>";
+    expect(sanitizeHtml(html)).toMatchInlineSnapshot(
+      `"<marimo-table data-data="[{&quot;x&quot;:&quot;]\\u003e&quot;}]"></marimo-table>"`,
+    );
+  });
+
+  test("preserves data-* attribute with JSON-escaped </script> payload", () => {
+    const html =
+      "<marimo-table data-data='[{&quot;x&quot;:&quot;&#92;u003c/script&#92;u003e&quot;}]'></marimo-table>";
+    expect(sanitizeHtml(html)).toMatchInlineSnapshot(
+      `"<marimo-table data-data="[{&quot;x&quot;:&quot;\\u003c/script\\u003e&quot;}]"></marimo-table>"`,
+    );
+  });
+
+  // Regression sentinel: confirms DOMPurify still strips an UN-escaped `]>`,
+  // which is precisely the condition `_build_attr` exists to prevent.
+  test("strips data-* attribute when raw ]> leaks through", () => {
+    const html =
+      "<marimo-table data-data='[{&quot;x&quot;:&quot;]&gt;&quot;}]'></marimo-table>";
+    expect(sanitizeHtml(html)).toMatchInlineSnapshot(
+      `"<marimo-table></marimo-table>"`,
+    );
   });
 });

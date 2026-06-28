@@ -4,10 +4,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import re
 import signal
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from marimo import _loggers
 from marimo._config.config import (
@@ -17,6 +16,7 @@ from marimo._config.config import (
 )
 from marimo._convert.markdown import convert_from_ir_to_markdown
 from marimo._messaging.msgspec_encoder import encode_json_str
+from marimo._messaging.types import KernelStreams
 from marimo._pyodide.restartable_task import RestartableTask
 from marimo._pyodide.streams import (
     PyodideStderr,
@@ -30,22 +30,15 @@ from marimo._runtime.commands import (
     BatchableCommand,
     CodeCompletionCommand,
     CommandMessage,
-    ModelCommand,
-    UpdateUIElementCommand,
     UpdateUserConfigCommand,
 )
-from marimo._runtime.context.kernel_context import initialize_kernel_context
-from marimo._runtime.input_override import input_override
 from marimo._runtime.marimo_pdb import MarimoPdb
-from marimo._runtime.runner.hooks import Priority, create_default_hooks
-from marimo._runtime.runtime import Kernel
-from marimo._runtime.utils.set_ui_element_request_manager import (
-    SetUIElementRequestManager,
-)
 from marimo._server.export.exporter import Exporter
 from marimo._server.files.os_file_system import OSFileSystem
 from marimo._server.models.export import ExportAsHTMLRequest
 from marimo._server.models.files import (
+    FileCopyRequest,
+    FileCopyResponse,
     FileCreateRequest,
     FileCreateResponse,
     FileDeleteRequest,
@@ -76,8 +69,11 @@ from marimo._utils.inline_script_metadata import PyProjectReader
 from marimo._utils.parse_dataclass import parse_raw
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from marimo._ast.cell import CellConfig
     from marimo._messaging.types import KernelMessage
+    from marimo._runtime.context.types import RuntimeContext
     from marimo._session.notebook.file_manager import AppFileManager
     from marimo._types.ids import CellId_t
 
@@ -120,6 +116,8 @@ class PyodideSession:
         user_config: MarimoConfig,
     ) -> None:
         """Initialize kernel and client connection to it."""
+        from marimo._runtime.kernel_lifecycle import make_control_enqueuer
+
         self.app_manager = app
         self.mode = mode
         self.app_metadata = app_metadata
@@ -127,6 +125,10 @@ class PyodideSession:
         self.session_consumer = on_write
         self.session_view = SessionView()
         self._initial_user_config = user_config
+        self._enqueue_control_request = make_control_enqueuer(
+            self._queue_manager.control_queue,
+            self._queue_manager.set_ui_element_queue,
+        )
 
         self.consumers: list[Callable[[KernelMessage], None]] = [
             lambda msg: self.session_consumer(msg),
@@ -152,12 +154,7 @@ class PyodideSession:
         await self.kernel_task.start()
 
     def put_control_request(self, request: commands.CommandMessage) -> None:
-        self._queue_manager.control_queue.put_nowait(request)
-        if isinstance(
-            request,
-            (commands.UpdateUIElementCommand, commands.ModelCommand),
-        ):
-            self._queue_manager.set_ui_element_queue.put_nowait(request)
+        self._enqueue_control_request(request)
 
     def put_completion_request(
         self, request: commands.CodeCompletionCommand
@@ -175,46 +172,18 @@ class PyodideSession:
 
         # Prefer dependencies from script metadata
         try:
+            from marimo._runtime.packages.utils import (
+                filter_requirements_for_emscripten,
+                strip_requirement_name,
+            )
+
             reader = PyProjectReader.from_script(code)
-            script_deps = reader.dependencies
-
-            def strip_version(dep: str) -> str:
-                """
-                Strip version specifiers from a dependency string.
-                Handles PEP 440 version specifiers, extras, and URLs.
-                """
-                if not dep or not isinstance(dep, str):
-                    return dep if isinstance(dep, str) else ""
-
-                # Strip whitespace
-                dep = dep.strip()
-                if not dep:
-                    return dep
-
-                # Handle URL dependencies (package @ <url>) - leave as-is
-                # PEP 508 allows various URL schemes: http, https, git+https, git+ssh, file, ftp, etc.
-                if "@" in dep:
-                    _, rhs = dep.split("@", 1)
-                    rhs = rhs.strip()
-                    # Check for URL scheme pattern (e.g., https://, git+https://, file://)
-                    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://", rhs):
-                        return dep
-
-                # Handle environment markers (package>=1.0; python_version>='3.8')
-                if ";" in dep:
-                    dep = dep.split(";")[0].strip()
-
-                # Split on PEP 440 version specifiers: ==, !=, <=, >=, <, >, ~=, ===
-                # Must check multi-char operators first to avoid partial matches
-                parts = re.split(
-                    r"\s*(?:===|==|!=|<=|>=|~=|<|>)\s*", dep, maxsplit=1
-                )
-
-                # Return the package name (first part), preserving extras like 'package[extra]'
-                return parts[0].strip() if parts else dep
+            script_deps = filter_requirements_for_emscripten(
+                reader.dependencies
+            )
 
             if len(script_deps) > 0:
-                return [strip_version(dep) for dep in script_deps]
+                return [strip_requirement_name(dep) for dep in script_deps]
         except Exception as e:
             LOGGER.warning("Error parsing script metadata: %s", e)
 
@@ -367,6 +336,20 @@ class PyodideBridge:
         response = FileDeleteResponse(success=success)
         return self._dump(response)
 
+    def copy_file_or_directory(
+        self,
+        request: str,
+    ) -> str:
+        body = self._parse(request, FileCopyRequest)
+        try:
+            info = self.file_system.copy_file_or_directory(
+                body.path, body.new_path
+            )
+            response = FileCopyResponse(success=True, info=info)
+        except Exception as e:
+            response = FileCopyResponse(success=False, message=str(e))
+        return self._dump(response)
+
     def move_file_or_directory(
         self,
         request: str,
@@ -416,6 +399,29 @@ class PyodideBridge:
         return encode_json_str(response)
 
 
+def _dispose_pyodide_lifecycle_items(ctx: RuntimeContext) -> None:
+    registry = ctx.cell_lifecycle_registry
+    for cell_id, lifecycle_items in list(registry.registry.items()):
+        persisted_lifecycle_items = set()
+        for lifecycle_item in list(lifecycle_items):
+            try:
+                should_remove = lifecycle_item.dispose(
+                    context=ctx, deletion=True
+                )
+            except Exception:
+                LOGGER.exception("Failed to dispose Pyodide lifecycle item")
+                persisted_lifecycle_items.add(lifecycle_item)
+                continue
+
+            if not should_remove:
+                persisted_lifecycle_items.add(lifecycle_item)
+
+        if persisted_lifecycle_items:
+            registry.registry[cell_id] = persisted_lifecycle_items
+        else:
+            del registry.registry[cell_id]
+
+
 def _launch_pyodide_kernel(
     control_queue: asyncio.Queue[CommandMessage],
     set_ui_element_queue: asyncio.Queue[BatchableCommand],
@@ -428,107 +434,89 @@ def _launch_pyodide_kernel(
     user_config: MarimoConfig,
 ) -> RestartableTask:
     from marimo._output.formatters.formatters import register_formatters
+    from marimo._runtime._wasm import (
+        shutdown_wasm_runtime_work_async,
+        wait_for_wasm_runtime_work_async,
+    )
+    from marimo._runtime.kernel_lifecycle import (
+        KernelArgs,
+        asyncio_queue_reader,
+        create_kernel,
+        drain_stale,
+        listen_messages,
+        teardown_kernel,
+    )
 
-    register_formatters()
-
-    LOGGER.debug("Launching kernel")
+    register_formatters(theme=user_config["display"]["theme"])
+    LOGGER.debug("Launching pyodide kernel")
 
     # Patches for pyodide compatibility
     patches.patch_pyodide_networking()
-
     # Some libraries mess with Python's default recursion limit, which becomes
     # a problem when running with Pyodide.
     patches.patch_recursion_limit(limit=1000)
 
     is_edit_mode = session_mode == SessionMode.EDIT
 
-    # Create communication channels
     stream = PyodideStream(on_message, input_queue)
     stdout = PyodideStdout(stream)
     stderr = PyodideStderr(stream)
     stdin = PyodideStdin(stream) if is_edit_mode else None
     debugger = MarimoPdb(stdout=stdout, stdin=stdin) if is_edit_mode else None
 
-    def _enqueue_control_request(req: CommandMessage) -> None:
-        control_queue.put_nowait(req)
-        if isinstance(req, (UpdateUIElementCommand, ModelCommand)):
-            set_ui_element_queue.put_nowait(req)
-
-    # Create hooks with mode-specific configuration
-    from marimo._runtime.runner.hooks_post_execution import (
-        attempt_pytest,
-        broadcast_storage_backends,
-        render_toplevel_defs,
-    )
-
-    hooks = create_default_hooks()
-    if is_edit_mode and user_config["runtime"].get("reactive_tests", False):
-        hooks.add_post_execution(attempt_pytest, Priority.LATE)
-    if is_edit_mode:
-        hooks.add_post_execution(render_toplevel_defs, Priority.LATE)
-        hooks.add_post_execution(broadcast_storage_backends, Priority.LATE)
-
-    kernel = Kernel(
-        cell_configs=configs,
-        app_metadata=app_metadata,
-        stream=stream,
-        stdout=stdout,
-        stderr=stderr,
-        stdin=stdin,
-        module=patches.patch_main_module(
-            file=app_metadata.filename,
-            input_override=input_override,
-            print_override=None,
-            doc=app_metadata.docstring,
-        ),
-        enqueue_control_request=_enqueue_control_request,
-        debugger_override=debugger,
-        user_config=user_config,
-        hooks=hooks,
-    )
-    ctx = initialize_kernel_context(
-        kernel=kernel,
-        stream=stream,
-        stdout=stdout,
-        stderr=stderr,
-        virtual_files_supported=False,
-        mode=session_mode,
+    kernel, ctx = create_kernel(
+        KernelArgs(
+            streams=KernelStreams(
+                stream=stream, stdout=stdout, stderr=stderr, stdin=stdin
+            ),
+            debugger=debugger,
+            configs=configs,
+            app_metadata=app_metadata,
+            user_config=user_config,
+            mode=session_mode,
+            control_queue=control_queue,
+            set_ui_element_queue=set_ui_element_queue,
+            virtual_file_storage=None,
+        )
     )
 
     if is_edit_mode:
-        signal.signal(signal.SIGINT, handlers.construct_interrupt_handler(ctx))
-
-    ui_element_request_mgr = SetUIElementRequestManager(set_ui_element_queue)
-
-    async def listen_messages() -> None:
-        while True:
-            request: CommandMessage | None = await control_queue.get()
-            LOGGER.debug("received request %s", request)
-            if isinstance(
-                request,
-                (commands.UpdateUIElementCommand, commands.ModelCommand),
-            ):
-                merged = ui_element_request_mgr.process_request(request)
-                for r in merged:
-                    await kernel.handle_message(r)
-                continue
-
-            if request is not None:
-                await kernel.handle_message(request)
+        signal.signal(signal.SIGINT, handlers.construct_interrupt_handler())
 
     async def listen_completion() -> None:
         while True:
-            request = await completion_queue.get()
-            while not completion_queue.empty():
-                # discard stale requests to avoid choking the runtime
-                request = await completion_queue.get()
-            LOGGER.debug("received completion request %s", request)
-            # 5 is arbitrary, but is a good limit:
-            # too high will cause long load times
-            # too low can be not as useful
+            request = drain_stale(
+                completion_queue, latest=await completion_queue.get()
+            )
             kernel.code_completion(request, docstrings_limit=5)
 
     async def listen() -> None:
-        await asyncio.gather(listen_messages(), listen_completion())
+        try:
+            await asyncio.gather(
+                listen_messages(
+                    kernel,
+                    control_queue,
+                    set_ui_element_queue,
+                    asyncio_queue_reader,
+                ),
+                listen_completion(),
+            )
+        finally:
+            try:
+                try:
+                    _dispose_pyodide_lifecycle_items(ctx)
+                except Exception:
+                    LOGGER.exception(
+                        "Failed to dispose Pyodide lifecycle items"
+                    )
+                try:
+                    await wait_for_wasm_runtime_work_async()
+                    await shutdown_wasm_runtime_work_async()
+                except Exception:
+                    LOGGER.exception(
+                        "Failed to shut down Pyodide WASM runtime work"
+                    )
+            finally:
+                teardown_kernel(kernel, ctx)
 
     return RestartableTask(listen)

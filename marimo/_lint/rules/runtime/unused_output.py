@@ -15,17 +15,17 @@ if TYPE_CHECKING:
 
 
 class UnusedOutputRule(LintRule):
-    """MR003: Marimo output call that is not the last expression in a cell.
+    """MR004: Marimo output call that is not the last expression in a cell.
 
-    Detects ``mo.*`` output calls (like ``mo.md()``, ``mo.ui.slider()``) that
+    Detects `mo.*` output calls (like `mo.md()`, `mo.ui.slider()`) that
     appear as bare expression statements but are not the last expression. In
     marimo, only the last top-level expression of a cell is displayed as
-    output. Earlier ``mo.*`` calls execute but their results are silently
+    output. Earlier `mo.*` calls execute but their results are silently
     discarded.
 
     ## Why is this bad?
 
-    The user likely intended the output to be visible. A ``mo.md("# Title")``
+    The user likely intended the output to be visible. A `mo.md("# Title")`
     in the middle of a cell creates the HTML but throws it away — a subtle bug.
 
     ## Examples
@@ -57,7 +57,7 @@ class UnusedOutputRule(LintRule):
     - [Outputs Guide](https://docs.marimo.io/guides/outputs/)
     """
 
-    code = "MR003"
+    code = "MR004"
     name = "unused-marimo-output"
     description = (
         "Marimo output call is not the last expression and will be discarded"

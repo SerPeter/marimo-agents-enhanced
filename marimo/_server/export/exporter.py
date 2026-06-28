@@ -6,7 +6,7 @@ import base64
 import mimetypes
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from marimo import _loggers
 from marimo._ast.app import InternalApp
@@ -15,22 +15,28 @@ from marimo._config.config import (
     DEFAULT_CONFIG,
     DisplayConfig,
     MarimoConfig,
+    SharingConfig,
 )
 from marimo._config.settings import GLOBAL_SETTINGS
 from marimo._config.utils import deep_copy
 from marimo._convert.common.dom_traversal import (
+    replace_public_files_with_data_uris,
     replace_virtual_files_with_data_uris,
 )
 from marimo._convert.common.filename import (
     get_download_filename,
     get_filename,
 )
-from marimo._convert.ipynb.from_ir import convert_from_ir_to_ipynb
+from marimo._convert.ipynb.from_ir import (
+    NBCONVERT_REMOVE_INPUT_TAG,
+    convert_from_ir_to_ipynb,
+)
 from marimo._dependencies.dependencies import DependencyManager
 from marimo._messaging.mimetypes import KnownMimeType
 from marimo._runtime.virtual_file import read_virtual_file
 from marimo._schemas.notebook import NotebookV1
 from marimo._schemas.session import NotebookSessionV1
+from marimo._server.export._status import emit_pdf_export_status
 from marimo._server.models.export import ExportAsHTMLRequest
 from marimo._server.templates.templates import (
     static_notebook_template,
@@ -51,7 +57,11 @@ from marimo._utils.paths import marimo_package_path, notebook_output_dir
 from marimo._version import __version__
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterator, Mapping
+
+    from traitlets.config import Config
+
+    from marimo._server.export._status import PDFExportStatusCallback
 
 LOGGER = _loggers.marimo_logger()
 
@@ -66,6 +76,20 @@ VIRTUAL_FILE_ALLOWED_TAGS = {"img", "audio", "video"}
 MAX_VIRTUAL_FILE_INLINE_BYTES = 10 * 1024 * 1024
 
 
+def _nbconvert_tag_remove_config() -> Config:
+    """Build a traitlets config that strips inputs from cells tagged with
+    `NBCONVERT_REMOVE_INPUT_TAG`. Used to honor `hide_code=True` in nbconvert
+    exports."""
+    from traitlets.config import Config
+
+    config = Config()
+    config.TagRemovePreprocessor.enabled = True
+    config.TagRemovePreprocessor.remove_input_tags = (
+        NBCONVERT_REMOVE_INPUT_TAG,
+    )
+    return config
+
+
 class Exporter:
     # Virtual file URL format constants
     _VIRTUAL_FILE_PATTERN = "./@file/"
@@ -74,21 +98,24 @@ class Exporter:
     def export_as_html(
         self,
         *,
-        filename: Optional[str],
+        filename: str | None,
         app: InternalApp,
         session_view: SessionView,
         display_config: DisplayConfig,
         request: ExportAsHTMLRequest,
+        sharing_config: SharingConfig | None = None,
     ) -> tuple[str, str]:
         index_html = get_html_contents()
         filename = get_filename(filename)
 
-        # Configure notebook with display settings
-        config = self._prepare_display_config(display_config)
+        # Configure notebook with display and sharing settings
+        config = self._prepare_display_config(display_config, sharing_config)
 
         # Serialize notebook state
         session_snapshot = serialize_session_view(
-            session_view, cell_ids=app.cell_manager.cell_ids()
+            session_view,
+            cell_ids=app.cell_manager.cell_ids(),
+            drop_virtual_file_outputs=False,
         )
         notebook_snapshot = serialize_notebook(session_view, app.cell_manager)
 
@@ -96,6 +123,13 @@ class Exporter:
         session_snapshot, replaced_files = self._inline_virtual_files(
             session_snapshot
         )
+
+        # Inline references to files in the notebook's `public/` folder so
+        # the exported HTML is self-contained. Without this, `mo.md` images
+        # like `![alt](public/image.png)` break when the HTML is opened
+        # outside the notebook's directory.
+        public_dir = Path(filename).resolve().parent / "public"
+        self._inline_public_files(session_snapshot, public_dir)
 
         app_code = app.to_py()
 
@@ -133,16 +167,37 @@ class Exporter:
         return html, download_filename
 
     def _prepare_display_config(
-        self, display_config: DisplayConfig
+        self,
+        display_config: DisplayConfig,
+        sharing_config: SharingConfig | None = None,
     ) -> MarimoConfig:
-        """Prepare config with display settings for static notebook."""
-        # We only want pass the display config in the static notebook,
-        # since we use:
-        # - display.theme
-        # - display.cell_output
-        config = deep_copy(DEFAULT_CONFIG)
+        """Prepare config with display and sharing settings for static notebook."""
+        config: MarimoConfig = deep_copy(DEFAULT_CONFIG)
         config["display"] = display_config
-        return cast(MarimoConfig, config)
+        if sharing_config:
+            config["sharing"] = sharing_config
+        return config
+
+    @staticmethod
+    def _iter_html_data_strings(
+        session_snapshot: NotebookSessionV1,
+    ) -> Iterator[tuple[dict[str, Any], str, str]]:
+        """Yield (output_data_dict, mime_type, data) for each `text/html`
+        string output.
+
+        Only `text/html` outputs are returned: non-HTML mime entries (e.g.
+        `text/plain`, `application/json`) must not be HTML-parsed, since
+        their content is opaque to the attribute-replacement logic.
+        """
+        for cell in session_snapshot["cells"]:
+            for output in cell["outputs"]:
+                if output["type"] != "data":
+                    continue
+                for mime_type, data in output["data"].items():
+                    if mime_type != "text/html":
+                        continue
+                    if isinstance(data, str):
+                        yield output["data"], mime_type, data
 
     def _inline_virtual_files(
         self, session_snapshot: NotebookSessionV1
@@ -154,27 +209,45 @@ class Exporter:
         """
         replaced_files: set[str] = set()
 
-        for cell in session_snapshot["cells"]:
-            for output in cell["outputs"]:
-                if output["type"] != "data":
-                    continue
-
-                for mime_type, data in output["data"].items():
-                    if not isinstance(data, str):
-                        continue
-                    if self._VIRTUAL_FILE_PATTERN not in data:
-                        continue
-
-                    processed, files = replace_virtual_files_with_data_uris(
-                        data,
-                        allowed_tags=VIRTUAL_FILE_ALLOWED_TAGS,
-                        allowed_attributes=VIRTUAL_FILE_ALLOWED_ATTRIBUTES,
-                        max_inline_bytes=MAX_VIRTUAL_FILE_INLINE_BYTES,
-                    )
-                    replaced_files.update(files)
-                    output["data"][mime_type] = processed
+        for data_dict, mime_type, data in self._iter_html_data_strings(
+            session_snapshot
+        ):
+            if self._VIRTUAL_FILE_PATTERN not in data:
+                continue
+            processed, files = replace_virtual_files_with_data_uris(
+                data,
+                allowed_tags=VIRTUAL_FILE_ALLOWED_TAGS,
+                allowed_attributes=VIRTUAL_FILE_ALLOWED_ATTRIBUTES,
+                max_inline_bytes=MAX_VIRTUAL_FILE_INLINE_BYTES,
+            )
+            replaced_files.update(files)
+            data_dict[mime_type] = processed
 
         return session_snapshot, replaced_files
+
+    def _inline_public_files(
+        self,
+        session_snapshot: NotebookSessionV1,
+        public_dir: Path,
+    ) -> None:
+        """Replace `public/`-prefixed file paths in HTML outputs with data URIs.
+
+        Mutates `session_snapshot` in-place.
+        """
+        if not public_dir.exists():
+            return
+
+        for data_dict, mime_type, data in self._iter_html_data_strings(
+            session_snapshot
+        ):
+            if "public/" not in data:
+                continue
+            processed, _ = replace_public_files_with_data_uris(
+                data,
+                public_dir=public_dir,
+                max_inline_bytes=MAX_VIRTUAL_FILE_INLINE_BYTES,
+            )
+            data_dict[mime_type] = processed
 
     def _prepare_code(
         self,
@@ -209,7 +282,7 @@ class Exporter:
         self,
         file_urls: list[str],
         replaced_files: set[str],
-        max_inline_bytes: Optional[int] = None,
+        max_inline_bytes: int | None = None,
     ) -> dict[str, str]:
         """Build dict of virtual files not already inlined in HTML.
 
@@ -249,8 +322,8 @@ class Exporter:
     def _read_virtual_file_as_data_uri(
         self,
         file_url: str,
-        max_inline_bytes: Optional[int] = None,
-    ) -> Optional[str]:
+        max_inline_bytes: int | None = None,
+    ) -> str | None:
         """Read a virtual file and convert it to a data URI.
 
         Args:
@@ -306,7 +379,7 @@ class Exporter:
         app: InternalApp,
         *,
         sort_mode: Literal["top-down", "topological"],
-        session_view: Optional[SessionView] = None,
+        session_view: SessionView | None = None,
     ) -> str:
         """Export notebook as .ipynb, optionally including outputs if session_view provided."""
         return convert_from_ir_to_ipynb(
@@ -317,20 +390,21 @@ class Exporter:
         self,
         *,
         app: InternalApp,
-        filename: Optional[str],
+        filename: str | None,
         display_config: DisplayConfig,
         code: str,
         mode: Literal["edit", "run"],
         show_code: bool,
-        asset_url: Optional[str] = None,
+        asset_url: str | None = None,
+        session_snapshot: NotebookSessionV1 | None = None,
+        notebook_snapshot: NotebookV1 | None = None,
+        sharing_config: SharingConfig | None = None,
     ) -> tuple[str, str]:
         """Export notebook as a WASM-powered standalone HTML file."""
         index_html = get_html_contents()
         filename = get_filename(filename)
 
-        # We only want to pass the display config in the static notebook
-        config: MarimoConfig = deep_copy(DEFAULT_CONFIG)
-        config["display"] = display_config
+        config = self._prepare_display_config(display_config, sharing_config)
         # Remove autosave
         config["save"]["autosave"] = "off"
 
@@ -345,6 +419,8 @@ class Exporter:
             code=code,
             asset_url=asset_url,
             show_code=show_code,
+            session_snapshot=session_snapshot,
+            notebook_snapshot=notebook_snapshot,
         )
 
         download_filename = get_download_filename(filename, "wasm.html")
@@ -359,6 +435,7 @@ class Exporter:
         png_fallbacks: Mapping[CellId_t, str] | None = None,
         webpdf: bool,
         include_inputs: bool = True,
+        status_callback: PDFExportStatusCallback | None = None,
     ) -> bytes | None:
         """Export notebook as a PDF.
 
@@ -368,6 +445,8 @@ class Exporter:
             png_fallbacks: Optional cell-id keyed image/png fallbacks to
                 inject into notebook outputs before nbconvert.
             include_inputs: Whether to include code cell inputs in the export.
+            status_callback: Optional internal callback for CLI-only PDF
+                export stage updates.
             webpdf: If False, tries standard PDF export (pandoc + TeX) first,
                 falling back to webpdf on failure. If True, uses webpdf
                 directly.
@@ -413,13 +492,29 @@ class Exporter:
             PandocMissing,
         )
 
+        def _emit_webpdf_fallback_status() -> None:
+            emit_pdf_export_status(
+                status_callback,
+                phase="render_fallback",
+                message=(
+                    "standard PDF export failed; falling back to WebPDF..."
+                ),
+            )
+
         if not webpdf:
             try:
                 from nbconvert import (  # type: ignore[import-not-found]
                     PDFExporter,
                 )
 
-                exporter = PDFExporter()  # type: ignore[no-untyped-call]
+                emit_pdf_export_status(
+                    status_callback,
+                    phase="render",
+                    message="rendering PDF via standard exporter...",
+                )
+                exporter = PDFExporter(  # type: ignore[no-untyped-call]
+                    config=_nbconvert_tag_remove_config(),
+                )
                 exporter.exclude_input = not include_inputs
                 pdf_data, _resources = exporter.from_notebook_node(notebook)  # type: ignore[no-untyped-call]
                 if isinstance(pdf_data, bytes):
@@ -428,16 +523,19 @@ class Exporter:
                 return None
             except OSError as e:
                 # LatexFailed (IOError) or xelatex not on PATH
+                _emit_webpdf_fallback_status()
                 LOGGER.info(
                     "Standard PDF export failed, falling back to webpdf: %s",
                     e,
                 )
             except (PandocMissing, ConversionException) as e:
+                _emit_webpdf_fallback_status()
                 LOGGER.info(
                     "Standard PDF export failed, falling back to webpdf: %s",
                     e,
                 )
             except Exception as e:
+                _emit_webpdf_fallback_status()
                 LOGGER.error(
                     "Standard PDF export failed, falling back to webpdf.",
                     exc_info=e,
@@ -445,7 +543,14 @@ class Exporter:
 
         from nbconvert import WebPDFExporter
 
-        web_exporter = WebPDFExporter()  # type: ignore[no-untyped-call]
+        emit_pdf_export_status(
+            status_callback,
+            phase="render",
+            message="rendering PDF via WebPDF...",
+        )
+        web_exporter = WebPDFExporter(  # type: ignore[no-untyped-call]
+            config=_nbconvert_tag_remove_config(),
+        )
         web_exporter.exclude_input = not include_inputs
         web_exporter.allow_chromium_download = True
         pdf_data, _resources = web_exporter.from_notebook_node(notebook)  # type: ignore[no-untyped-call]
@@ -462,6 +567,7 @@ class Exporter:
         session_view: SessionView | None,
         png_fallbacks: Mapping[CellId_t, str] | None = None,
         include_inputs: bool = True,
+        status_callback: PDFExportStatusCallback | None = None,
     ) -> bytes | None:
         """Export a slides notebook as PDF using reveal.js + Playwright.
 
@@ -479,6 +585,8 @@ class Exporter:
             png_fallbacks: Optional cell-id keyed image/png fallbacks to
                 inject into notebook outputs before conversion.
             include_inputs: Whether to include code cell inputs.
+            status_callback: Optional internal callback for CLI-only PDF
+                export stage updates.
 
         Returns:
             PDF data
@@ -507,6 +615,11 @@ class Exporter:
                 notebook,
                 png_fallbacks=png_fallbacks,
             )
+        emit_pdf_export_status(
+            status_callback,
+            phase="render",
+            message="rendering slides PDF...",
+        )
         return await self._export_slides_as_pdf(notebook, include_inputs)
 
     @staticmethod
@@ -548,7 +661,9 @@ class Exporter:
             )
 
         # Convert to reveal.js HTML
-        slides_exporter = SlidesExporter()  # type: ignore[no-untyped-call]
+        slides_exporter = SlidesExporter(  # type: ignore[no-untyped-call]
+            config=_nbconvert_tag_remove_config(),
+        )
         slides_exporter.exclude_input = not include_inputs
         html_data, _resources = slides_exporter.from_notebook_node(notebook)
 
@@ -669,7 +784,7 @@ class AutoExporter:
         )
 
     async def _save_file(
-        self, filename: Optional[str], content: str, extension: str
+        self, filename: str | None, content: str, extension: str
     ) -> None:
         notebook_path = get_filename(filename)
         download_name = get_download_filename(filename, extension)
@@ -679,18 +794,18 @@ class AutoExporter:
         filepath = export_dir / download_name
 
         # Run blocking file I/O in thread pool
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             self._executor, self._write_file_sync, filepath, content
         )
 
-    async def save_html(self, filename: Optional[str], html: str) -> None:
+    async def save_html(self, filename: str | None, html: str) -> None:
         await self._save_file(filename, html, "html")
 
-    async def save_md(self, filename: Optional[str], markdown: str) -> None:
+    async def save_md(self, filename: str | None, markdown: str) -> None:
         await self._save_file(filename, markdown, "md")
 
-    async def save_ipynb(self, filename: Optional[str], ipynb: str) -> None:
+    async def save_ipynb(self, filename: str | None, ipynb: str) -> None:
         await self._save_file(filename, ipynb, "ipynb")
 
     def _write_file_sync(self, filepath: Path, content: str) -> None:
@@ -717,7 +832,7 @@ class AutoExporter:
 
 def get_html_contents() -> str:
     if GLOBAL_SETTINGS.DEVELOPMENT_MODE:
-        import marimo._utils.requests as requests
+        from marimo._utils import requests
 
         # Fetch from a CDN
         LOGGER.info(

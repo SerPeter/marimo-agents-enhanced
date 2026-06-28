@@ -25,7 +25,6 @@ from marimo._messaging.notification import (
 from marimo._types.ids import CellId_t, SessionId
 
 if TYPE_CHECKING:
-    from marimo._ast.models import CellData
     from marimo._session import Session
 
 
@@ -48,7 +47,7 @@ class LightweightCellInfo:
     preview: str
     line_count: int
     cell_type: SupportedCellType
-    runtime_state: Optional[str] = None
+    runtime_state: str | None = None
     has_output: bool = False
     has_console_output: bool = False
     has_errors: bool = False
@@ -71,12 +70,12 @@ class CellRuntimeMetadata:
     # String form of the runtime state (see marimo._ast.cell.RuntimeStateType);
     # keep as str for py39/Pydantic compatibility and to avoid Literal/Enum
     # validation issues in models.
-    runtime_state: Optional[str] = None
+    runtime_state: str | None = None
     # Duration of the last execution in milliseconds.
     # Only populated when runtime_state is "idle"; null otherwise.
-    execution_time: Optional[float] = None
+    execution_time: float | None = None
     # Whether the cell's inputs are stale (upstream dependency changed).
-    stale_inputs: Optional[bool] = None
+    stale_inputs: bool | None = None
     # Number of times this cell has been executed in the current session.
     execution_count: int = 0
 
@@ -88,10 +87,10 @@ CellVariables = dict[str, VariableValue]
 class GetCellRuntimeDataData:
     session_id: str
     cell_id: str
-    code: Optional[str] = None
-    errors: Optional[list[MarimoErrorDetail]] = None
-    metadata: Optional[CellRuntimeMetadata] = None
-    variables: Optional[CellVariables] = None
+    code: str | None = None
+    errors: list[MarimoErrorDetail] | None = None
+    metadata: CellRuntimeMetadata | None = None
+    variables: CellVariables | None = None
 
 
 @dataclass
@@ -110,8 +109,8 @@ class GetCellRuntimeDataOutput(SuccessResult):
 class CellVisualOutput:
     """Visual from a cell execution."""
 
-    visual_output: Optional[str] = None
-    visual_mimetype: Optional[str] = None
+    visual_output: str | None = None
+    visual_mimetype: str | None = None
     masked: bool = False
 
 
@@ -196,7 +195,7 @@ class GetLightweightCellMap(
             cell_type = self._get_cell_type(cell_data)
 
             # Get runtime info from cell notifications
-            runtime_state: Optional[str] = None
+            runtime_state: str | None = None
             has_output = False
             has_console_output = False
             has_errors = False
@@ -411,7 +410,7 @@ class GetCellRuntimeData(
         # the value is a duration in milliseconds.  While the cell is
         # running the stored value is the start timestamp (epoch), which
         # would be confusing for consumers.
-        execution_time: Optional[float] = None
+        execution_time: float | None = None
         if runtime_state == "idle":
             execution_time = session_view.last_execution_time.get(cell_id)
 
@@ -425,7 +424,7 @@ class GetCellRuntimeData(
         )
 
     def _get_cell_variables(
-        self, session: Session, cell_data: Optional[CellData]
+        self, session: Session, cell_data: CellData | None
     ) -> CellVariables:
         """Get variables defined by a specific cell and their values."""
         if not cell_data or not cell_data.cell:
@@ -528,7 +527,7 @@ class GetCellOutputs(ToolBase[GetCellOutputArgs, GetCellOutputOutput]):
 
     def _get_visual_output(
         self, cell_notif: CellNotification
-    ) -> tuple[Optional[str], Optional[str], bool]:
+    ) -> tuple[str | None, str | None, bool]:
         visual_output = None
         visual_mimetype = None
         masked = False

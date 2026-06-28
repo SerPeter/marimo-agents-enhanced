@@ -5,6 +5,7 @@
 // https://github.com/TanStack/table/issues/5567
 
 import {
+  type Column,
   type ColumnDef,
   type ColumnFiltersState,
   ColumnPinning,
@@ -16,13 +17,20 @@ import {
   type PaginationState,
   type RowSelectionState,
   type SortingState,
+  type Table as TanstackTable,
   useReactTable,
 } from "@tanstack/react-table";
 import React, { memo } from "react";
 import { useLocale } from "react-aria";
 
+import { Button } from "@/components/ui/button";
 import { Table } from "@/components/ui/table";
-import type { GetRowIds } from "@/plugins/impl/DataTablePlugin";
+import { isStaticNotebook } from "@/core/static/static-state";
+import { Banner } from "@/plugins/impl/common/error-banner";
+import type {
+  CalculateTopKRows,
+  GetRowIds,
+} from "@/plugins/impl/DataTablePlugin";
 import { cn } from "@/utils/cn";
 import {
   PANEL_TYPES,
@@ -38,7 +46,13 @@ import { ColumnFormattingFeature } from "./column-formatting/feature";
 import { ColumnWrappingFeature } from "./column-wrapping/feature";
 import { CopyColumnFeature } from "./copy-column/feature";
 import type { ExportActionProps } from "./export-actions";
+import {
+  type AddFilterRequest,
+  FilterEditorProvider,
+} from "./filter-editor-context";
+import { buildEditorSnapshot } from "./filter-pill-editor";
 import { FilterPills } from "./filter-pills";
+import type { Snapshot } from "./filters";
 import { FocusRowFeature } from "./focus-row/feature";
 import { useColumnPinning } from "./hooks/use-column-pinning";
 import { useScrollContainerHeight } from "./hooks/use-scroll-container-height";
@@ -47,11 +61,16 @@ import { DataTableBody, renderTableHeader } from "./renderers";
 import { TableBottomBar } from "./TableBottomBar";
 import { TableTopBar } from "./TableTopBar";
 import {
+  AUTO_WIDTH_MAX_COLUMNS,
   type DataTableSelection,
   MIN_ROWS_TO_VIRTUALIZE,
   type TooManyRows,
 } from "./types";
 import { getStableRowId } from "./utils";
+import {
+  getUserColumnVisibilityCounts,
+  useColumnVisibility,
+} from "./hooks/use-column-visibility";
 
 interface DataTableProps<TData> extends Partial<ExportActionProps> {
   wrapperClassName?: string;
@@ -66,6 +85,10 @@ interface DataTableProps<TData> extends Partial<ExportActionProps> {
   setSorting?: OnChangeFn<SortingState>; // controlled sorting
   // Pagination
   totalRows: number | TooManyRows;
+  // JSON-serialized size of the currently-rendered data. Forwarded to
+  // ExportMenu so hosts can size-gate the Export button via downloadSizeLimitAtom.
+  sizeBytes?: number | null;
+  sizeBytesIsLoading?: boolean;
   totalColumns: number;
   pagination?: boolean;
   manualPagination?: boolean; // server-side pagination
@@ -82,16 +105,18 @@ interface DataTableProps<TData> extends Partial<ExportActionProps> {
   onCellSelectionChange?: OnChangeFn<CellSelectionState>;
   getRowIds?: GetRowIds;
   // Search
-  enableSearch?: boolean;
+  showSearch?: boolean;
   searchQuery?: string;
   onSearchQueryChange?: (query: string) => void;
   showFilters?: boolean;
   filters?: ColumnFiltersState;
   onFiltersChange?: OnChangeFn<ColumnFiltersState>;
+  calculateTopKRows?: CalculateTopKRows;
   reloading?: boolean;
   // Columns
   freezeColumnsLeft?: string[];
   freezeColumnsRight?: string[];
+  hiddenColumns?: string[];
   toggleDisplayHeader?: () => void;
   // Row viewer panel
   viewedRowIdx?: number;
@@ -104,6 +129,7 @@ interface DataTableProps<TData> extends Partial<ExportActionProps> {
   togglePanel?: (panelType: PanelType) => void;
   isPanelOpen?: (panelType: PanelType) => boolean;
   isAnyPanelOpen?: boolean;
+  renderTableExplorerPanel?: (table: TanstackTable<TData>) => React.ReactNode;
 }
 
 const DataTableInternal = <TData,>({
@@ -116,6 +142,8 @@ const DataTableInternal = <TData,>({
   selection,
   totalColumns,
   totalRows,
+  sizeBytes,
+  sizeBytesIsLoading,
   manualSorting = false,
   sorting,
   setSorting,
@@ -132,15 +160,17 @@ const DataTableInternal = <TData,>({
   onRowSelectionChange,
   onCellSelectionChange,
   getRowIds,
-  enableSearch = false,
+  showSearch = false,
   searchQuery,
   onSearchQueryChange,
   showFilters = false,
   filters,
   onFiltersChange,
+  calculateTopKRows,
   reloading,
   freezeColumnsLeft,
   freezeColumnsRight,
+  hiddenColumns,
   toggleDisplayHeader,
   showChartBuilder,
   isChartBuilderOpen,
@@ -151,7 +181,13 @@ const DataTableInternal = <TData,>({
   isAnyPanelOpen,
   viewedRowIdx,
   onViewedRowChange,
+  renderTableExplorerPanel,
 }: DataTableProps<TData>) => {
+  // The top bar's controls (search, filters, column explorer, chart builder)
+  // all require a live kernel, which static exports don't have.
+  const isStatic = isStaticNotebook();
+  const showTableTopBar = !isStatic;
+
   const [showLoadingBar, setShowLoadingBar] = React.useState<boolean>(false);
   const { locale } = useLocale();
 
@@ -159,6 +195,8 @@ const DataTableInternal = <TData,>({
     freezeColumnsLeft,
     freezeColumnsRight,
   );
+  const { columnVisibility, setColumnVisibility } =
+    useColumnVisibility(hiddenColumns);
 
   // Show loading bar only after a short delay to prevent flickering
   React.useEffect(() => {
@@ -235,11 +273,12 @@ const DataTableInternal = <TData,>({
         }
       : {}),
     manualSorting: manualSorting,
+    enableSorting: !isStatic,
     enableMultiSort: true,
     getSortedRowModel: getSortedRowModel(),
     // filtering
     manualFiltering: true,
-    enableColumnFilters: showFilters,
+    enableColumnFilters: showFilters && !isStatic,
     getFilteredRowModel: getFilteredRowModel(),
     onColumnFiltersChange: onFiltersChange,
     // selection
@@ -250,6 +289,8 @@ const DataTableInternal = <TData,>({
     enableMultiCellSelection: selection === "multi-cell",
     // pinning
     onColumnPinningChange: setColumnPinning,
+    // col visibility
+    onColumnVisibilityChange: setColumnVisibility,
     // focus row
     enableFocusRow: true,
     onFocusRowChange: onViewedRowChange,
@@ -267,6 +308,7 @@ const DataTableInternal = <TData,>({
             { pagination: { pageIndex: 0, pageSize: data.length } }),
       rowSelection: rowSelection ?? {},
       cellSelection: cellSelection ?? [],
+      columnVisibility,
       cellStyling,
       columnPinning: columnPinning,
       cellHoverTemplate: hoverTemplate,
@@ -279,56 +321,113 @@ const DataTableInternal = <TData,>({
 
   const tableRef = useScrollContainerHeight({ maxHeight, virtualize });
 
+  const [addFilterSnapshot, setAddFilterSnapshot] =
+    React.useState<Snapshot | null>(null);
+
+  // useMemo instead of useCallback because need to pass it as object
+  const filterEditor = React.useMemo(
+    () => ({
+      requestAddFilter: (request: AddFilterRequest) => {
+        const column = table.getColumn(request.columnId);
+        if (!column) {
+          return;
+        }
+        setAddFilterSnapshot(
+          buildEditorSnapshot(column as Column<unknown, unknown>, {
+            operator: request.operator,
+          }),
+        );
+      },
+    }),
+    [table],
+  );
+
+  const visibilityCounts = getUserColumnVisibilityCounts(table);
+  const allUserColumnsHidden =
+    visibilityCounts.total > 0 && visibilityCounts.visible === 0;
+
   return (
-    <div className={cn(wrapperClassName, "flex flex-col space-y-1")}>
-      <FilterPills filters={filters} table={table} />
-      <CellSelectionProvider>
-        <div
-          part="table-wrapper"
-          className={cn(className || "rounded-md border overflow-hidden")}
-        >
-          <TableTopBar
-            enableSearch={enableSearch}
-            searchQuery={searchQuery}
-            onSearchQueryChange={onSearchQueryChange}
-            reloading={reloading}
-            showChartBuilder={showChartBuilder}
-            isChartBuilderOpen={isChartBuilderOpen}
-            toggleDisplayHeader={toggleDisplayHeader}
-            showTableExplorer={showTableExplorer}
-            togglePanel={togglePanel}
-            isAnyPanelOpen={isAnyPanelOpen}
-            downloadAs={downloadAs}
-          />
-          <Table className="relative" ref={tableRef}>
-            {showLoadingBar && (
-              <thead className="absolute top-0 left-0 h-[3px] w-1/2 bg-primary animate-slide" />
+    <FilterEditorProvider value={filterEditor}>
+      <div className={cn(wrapperClassName, "flex flex-col space-y-1")}>
+        <FilterPills
+          filters={filters}
+          table={table}
+          calculateTopKRows={calculateTopKRows}
+          addFilterSnapshot={addFilterSnapshot}
+          onAddFilterSnapshotChange={setAddFilterSnapshot}
+        />
+        {renderTableExplorerPanel?.(table)}
+        <CellSelectionProvider>
+          <div
+            part="table-wrapper"
+            className={cn(className || "rounded-md border overflow-hidden")}
+          >
+            {showTableTopBar && (
+              <TableTopBar
+                table={table}
+                showSearch={showSearch}
+                searchQuery={searchQuery}
+                onSearchQueryChange={onSearchQueryChange}
+                reloading={reloading}
+                showChartBuilder={showChartBuilder}
+                isChartBuilderOpen={isChartBuilderOpen}
+                toggleDisplayHeader={toggleDisplayHeader}
+                showTableExplorer={showTableExplorer}
+                togglePanel={togglePanel}
+                isAnyPanelOpen={isAnyPanelOpen}
+                downloadAs={downloadAs}
+                sizeBytes={sizeBytes}
+                sizeBytesIsLoading={sizeBytesIsLoading}
+              />
             )}
-            {renderTableHeader(table, virtualize || Boolean(maxHeight))}
-            <DataTableBody
+            {allUserColumnsHidden && (
+              <Banner className="mb-1 mx-2 rounded flex items-center justify-between">
+                <span>All columns are hidden.</span>
+                <Button
+                  variant="link"
+                  size="xs"
+                  onClick={() => table.resetColumnVisibility(true)}
+                >
+                  Unhide all
+                </Button>
+              </Banner>
+            )}
+            <Table
+              className={cn(
+                "relative",
+                columns.length <= AUTO_WIDTH_MAX_COLUMNS ? "w-auto" : "w-full",
+              )}
+              ref={tableRef}
+            >
+              {showLoadingBar && (
+                <thead className="absolute top-0 left-0 h-[3px] w-1/2 bg-primary animate-slide" />
+              )}
+              {renderTableHeader(table, virtualize || Boolean(maxHeight))}
+              <DataTableBody
+                table={table}
+                columns={columns}
+                rowViewerPanelOpen={rowViewerPanelOpen}
+                getRowIndex={getPaginatedRowIndex}
+                viewedRowIdx={viewedRowIdx}
+                virtualize={virtualize}
+              />
+            </Table>
+            <TableBottomBar
+              part="table-footer"
+              className="pt-1.5 pb-0.5 border-t border-border"
+              totalColumns={totalColumns}
+              pagination={pagination}
+              selection={selection}
+              onRowSelectionChange={onRowSelectionChange}
               table={table}
-              columns={columns}
-              rowViewerPanelOpen={rowViewerPanelOpen}
-              getRowIndex={getPaginatedRowIndex}
-              viewedRowIdx={viewedRowIdx}
-              virtualize={virtualize}
+              getRowIds={getRowIds}
+              showPageSizeSelector={showPageSizeSelector}
+              tableLoading={reloading}
             />
-          </Table>
-          <TableBottomBar
-            part="table-footer"
-            className="pt-1.5 pb-0.5 border-t border-border"
-            totalColumns={totalColumns}
-            pagination={pagination}
-            selection={selection}
-            onRowSelectionChange={onRowSelectionChange}
-            table={table}
-            getRowIds={getRowIds}
-            showPageSizeSelector={showPageSizeSelector}
-            tableLoading={reloading}
-          />
-        </div>
-      </CellSelectionProvider>
-    </div>
+          </div>
+        </CellSelectionProvider>
+      </div>
+    </FilterEditorProvider>
   );
 };
 

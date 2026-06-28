@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import io
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Final, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import marimo._output.data.data as mo_data
 from marimo._output.rich_help import mddoc
@@ -18,15 +18,15 @@ from marimo._plugins.ui._core.ui_element import UIElement
 from marimo._runtime.functions import EmptyArgs, Function
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine
+    from collections.abc import Callable, Coroutine
 
-DataType = Union[str, bytes, io.BytesIO, io.BufferedReader]
+DataType = str | bytes | io.BytesIO | io.BufferedReader
 
 
 @dataclass
 class LoadResponse:
     data: str
-    filename: Optional[str]
+    filename: str | None
 
 
 @mddoc
@@ -41,7 +41,11 @@ class download(UIElement[None, None]):
             - file opened in binary mode
             - callable returning any of the above (for lazy loading)
             - async callable returning any of the above (for lazy loading)
-        filename (str): The name of the file to download.
+        filename (str, callable): The name of the file to download. Can be a
+            zero-arg callable returning a string, evaluated at click time so
+            the name reflects the latest application state. A callable filename
+            disables extension-based mimetype inference; pass `mimetype`
+            explicitly if you need a specific one.
             If not provided, the name will be guessed from the data.
         mimetype (str): The mimetype of the file to download, for example,
             (e.g. "text/csv", "image/png"). If not provided,
@@ -75,13 +79,11 @@ class download(UIElement[None, None]):
 
     def __init__(
         self,
-        data: Union[
-            DataType,
-            Callable[[], DataType],
-            Callable[[], Coroutine[None, None, DataType]],
-        ],
-        filename: Optional[str] = None,
-        mimetype: Optional[str] = None,
+        data: DataType
+        | Callable[[], DataType]
+        | Callable[[], Coroutine[None, None, DataType]],
+        filename: str | Callable[[], str] | None = None,
+        mimetype: str | None = None,
         disabled: bool = False,
         *,
         label: str = "Download",
@@ -91,10 +93,15 @@ class download(UIElement[None, None]):
         self._mimetype = mimetype
 
         data_url = ""
-        is_lazy = callable(data)
+        is_lazy = callable(data) or callable(filename)
 
-        # name used to guess mimetype
-        name_for_mime = data if isinstance(data, str) else filename
+        # name used to guess mimetype; a callable filename has no extension to
+        # inspect at render time, so skip inference and fall back to text/plain
+        name_for_mime = (
+            data
+            if isinstance(data, str)
+            else (None if callable(filename) else filename)
+        )
         resolved_mimetype = (
             mimetype or guess_mime_type(name_for_mime) or "text/plain"
         )
@@ -126,7 +133,7 @@ class download(UIElement[None, None]):
             on_change=None,
             args={
                 "data": data_url,
-                "filename": filename,
+                "filename": None if callable(filename) else filename,
                 "disabled": disabled,
                 "lazy": is_lazy,
             },
@@ -142,23 +149,31 @@ class download(UIElement[None, None]):
         )
 
     async def _load(self, _args: EmptyArgs) -> LoadResponse:
-        if callable(self._data) and not isinstance(self._data, UIElement):
+        filename = (
+            self._filename() if callable(self._filename) else self._filename
+        )
+
+        # Eager data already ships as the button's href; a callable filename is
+        # the only reason load runs here, so resolve the name and let the
+        # frontend reuse the href instead of re-encoding the payload.
+        if not callable(self._data):
+            return LoadResponse(data="", filename=filename)
+
+        if isinstance(self._data, UIElement):
+            result = self._data
+        else:
             result_or_coroutine = self._data()
             if asyncio.iscoroutine(result_or_coroutine):
                 result = await result_or_coroutine
             else:
                 result = result_or_coroutine
-        else:
-            result = self._data
 
         url = io_to_data_url(
             result, fallback_mime_type=self._mimetype or "text/plain"
         )
-
         if url is None:
             raise ValueError("Failed to convert data to data URL")
-
-        return LoadResponse(data=url, filename=self._filename)
+        return LoadResponse(data=url, filename=filename)
 
     def _convert_value(self, value: None) -> None:
         return value

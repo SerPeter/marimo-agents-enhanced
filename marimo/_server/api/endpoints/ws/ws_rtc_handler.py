@@ -12,8 +12,8 @@ if TYPE_CHECKING:
     from loro import DiffEvent, ExportMode, LoroDoc
     from starlette.websockets import WebSocket
 
-    from marimo._server.file_router import MarimoFileKey
     from marimo._server.rtc.doc import LoroDocManager
+    from marimo._server.workspace import MarimoFileKey
 
 LOGGER = _loggers.marimo_logger()
 
@@ -74,7 +74,7 @@ class RTCWebSocketHandler:
             LOGGER.debug("RTC: WebSocket disconnected")
         except Exception as e:
             LOGGER.warning(
-                f"RTC: Exception in websocket loop for file {self.file_key}: {str(e)}"
+                f"RTC: Exception in websocket loop for file {self.file_key}: {e!s}"
             )
         finally:
             LOGGER.debug("RTC: Cleaning up resources")
@@ -114,7 +114,7 @@ class RTCWebSocketHandler:
                 await self.websocket.send_bytes(update)
         except Exception as e:
             LOGGER.warning(
-                f"RTC: Could not send loro update to client for file {self.file_key}: {str(e)}",
+                f"RTC: Could not send loro update to client for file {self.file_key}: {e!s}",
             )
 
     async def _receive_updates_from_client(

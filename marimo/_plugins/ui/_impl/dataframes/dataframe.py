@@ -4,12 +4,10 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from typing import (
+    TYPE_CHECKING,
     Any,
-    Callable,
     Final,
     Literal,
-    Optional,
-    Union,
     cast,
 )
 
@@ -28,6 +26,7 @@ from marimo._plugins.ui._impl.dataframes.transforms.types import (
 from marimo._plugins.ui._impl.table import (
     DownloadAsArgs,
     DownloadAsResponse,
+    GetSizeBytesResponse,
     SearchTableArgs,
     SearchTableResponse,
     SortArgs,
@@ -42,6 +41,9 @@ from marimo._plugins.ui._impl.tables.utils import (
     get_table_manager,
 )
 from marimo._plugins.ui._impl.utils.dataframe import (
+    DelimitedOptions,
+    DownloadOptions,
+    JsonOptions,
     download_as,
     get_bound_name,
 )
@@ -56,21 +58,24 @@ from marimo._utils.narwhals_utils import is_narwhals_lazyframe, make_lazy
 from marimo._utils.parse_dataclass import parse_raw
 from marimo._utils.variable_name import infer_variable_name
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 TOO_MANY_ROWS = 100_000
 
 
 @dataclass
 class GetDataFrameResponse:
     url: str
-    total_rows: Union[int, Literal["too_many"]]
+    total_rows: int | Literal["too_many"]
     # Columns that are actually row headers
     # This really only applies to Pandas, that has special index columns
     row_headers: FieldTypes
     field_types: FieldTypes
     # Column types at each transform step (index 0 = original, index N = after N transforms)
     column_types_per_step: list[FieldTypes]
-    python_code: Optional[str] = None
-    sql_code: Optional[str] = None
+    python_code: str | None = None
+    sql_code: str | None = None
 
 
 @dataclass
@@ -100,7 +105,7 @@ class GetDataFrameError(Exception):
 class dataframe(UIElement[dict[str, Any], DataFrameType]):
     """Run transformations on a DataFrame or series.
 
-    Currently supports Pandas, Polars, Ibis, Pyarrow, and DuckDB.
+    Supports any dataframe (e.g., Polars, Pandas, PyArrow, Ibis, DuckDB).
 
     Examples:
         ```python
@@ -139,16 +144,16 @@ class dataframe(UIElement[dict[str, Any], DataFrameType]):
     def __init__(
         self,
         df: DataFrameType,
-        on_change: Optional[Callable[[DataFrameType], None]] = None,
-        page_size: Optional[int] = 5,
-        limit: Optional[int] = None,
+        on_change: Callable[[DataFrameType], None] | None = None,
+        page_size: int | None = 5,
+        limit: int | None = None,
         show_download: bool = True,
         *,
-        format_mapping: Optional[FormatMapping] = None,
+        format_mapping: FormatMapping | None = None,
         download_csv_encoding: str | None = None,
         download_csv_separator: str | None = None,
         download_json_ensure_ascii: bool = True,
-        lazy: Optional[bool] = None,
+        lazy: bool | None = None,
     ) -> None:
         validate_no_integer_columns(df)
         # This will raise an error if the dataframe type is not supported.
@@ -169,7 +174,7 @@ class dataframe(UIElement[dict[str, Any], DataFrameType]):
         self._manager = self._get_cached_table_manager(df, self._limit)
         self._format_mapping = format_mapping
         self._transform_container = TransformsContainer(nw_df, handler)
-        self._error: Optional[str] = None
+        self._error: str | None = None
         self._last_transforms = Transformations([])
         self._column_types_per_step: list[FieldTypes] = [
             self._manager.get_field_types()
@@ -223,6 +228,11 @@ class dataframe(UIElement[dict[str, Any], DataFrameType]):
                     arg_cls=DownloadAsArgs,
                     function=self._download_as,
                 ),
+                Function(
+                    name="get_size_bytes",
+                    arg_cls=EmptyArgs,
+                    function=self._get_size_bytes,
+                ),
             ),
         )
 
@@ -237,7 +247,7 @@ class dataframe(UIElement[dict[str, Any], DataFrameType]):
             return ("text/html", str(self._data))
         return ("text/html", self.text)
 
-    def _get_column_types(self) -> list[list[Union[str, int]]]:
+    def _get_column_types(self) -> list[list[str | int]]:
         return [
             [name, dtype[0], dtype[1]]
             for name, dtype in self._manager.get_field_types()
@@ -283,7 +293,7 @@ class dataframe(UIElement[dict[str, Any], DataFrameType]):
         unique_values = self._manager.get_unique_column_values(args.column)
         if len(unique_values) <= LIMIT:
             return GetColumnValuesResponse(
-                values=list(sorted(unique_values, key=str)),
+                values=sorted(unique_values, key=str),
                 too_many_values=False,
             )
         else:
@@ -308,7 +318,7 @@ class dataframe(UIElement[dict[str, Any], DataFrameType]):
             self._last_transforms = transformations
             return self._undo(result)
         except Exception as e:
-            error = f"Error applying dataframe transform: {str(e)}\n\n"
+            error = f"Error applying dataframe transform: {e!s}\n\n"
             sys.stderr.write(error)
             self._error = error
             return self._undo(self._transform_container._original_df)
@@ -341,7 +351,7 @@ class dataframe(UIElement[dict[str, Any], DataFrameType]):
 
         Args:
             args (DownloadAsArgs): Arguments specifying the download format.
-                format must be one of 'csv', 'json', or 'parquet'.
+                format must be one of 'csv', 'tsv', 'json', or 'parquet'.
 
         Returns:
             DownloadAsResponse: URL and filename for the downloaded file.
@@ -357,17 +367,23 @@ class dataframe(UIElement[dict[str, Any], DataFrameType]):
         url, filename = download_as(
             manager,
             args.format,
-            csv_encoding=self._download_csv_encoding,
-            csv_separator=self._download_csv_separator,
-            json_ensure_ascii=self._download_json_ensure_ascii,
+            options=DownloadOptions(
+                delimited=DelimitedOptions(
+                    encoding=self._download_csv_encoding,
+                    separator=self._download_csv_separator,
+                ),
+                json=JsonOptions(
+                    ensure_ascii=self._download_json_ensure_ascii
+                ),
+            ),
             filename=bound_filename,
         )
         return DownloadAsResponse(url=url, filename=filename)
 
     def _apply_filters_query_sort(
         self,
-        query: Optional[str],
-        sort: Optional[list[SortArgs]],
+        query: str | None,
+        sort: list[SortArgs] | None,
     ) -> TableManager[DataFrameType]:
         result = self._get_cached_table_manager(self._value, self._limit)
 
@@ -384,9 +400,14 @@ class dataframe(UIElement[dict[str, Any], DataFrameType]):
 
     @memoize_last_value
     def _get_cached_table_manager(
-        self, value: DataFrameType, limit: Optional[int]
+        self, value: DataFrameType, limit: int | None
     ) -> TableManager[DataFrameType]:
         tm = get_table_manager(value)
         if limit is not None:
             tm = tm.take(limit, 0)
         return tm
+
+    def _get_size_bytes(self, args: EmptyArgs) -> GetSizeBytesResponse:
+        del args
+        manager = self._get_cached_table_manager(self._value, self._limit)
+        return GetSizeBytesResponse(size_bytes=manager.estimate_size_bytes())

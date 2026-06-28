@@ -14,7 +14,19 @@ marimo is designed to be:
     5. fun
 """
 
-__all__ = [
+from sys import platform as _platform
+
+if _platform == "emscripten":
+    # Runtime modules imported below capture `threading.Thread` and
+    # `threading.local`. Install the Pyodide concurrency patch first so public
+    # imports and runtime context storage share the same stdlib view.
+    from marimo._runtime._wasm import (
+        ensure_wasm_runtime_bootstrapped as _ensure_wasm_runtime_bootstrapped,
+    )
+
+    _ensure_wasm_runtime_bootstrapped()
+
+__all__ = [  # noqa: RUF022
     # Core API
     "App",
     "Cell",
@@ -91,7 +103,6 @@ __all__ = [
 ]
 import marimo._ai as ai
 import marimo._islands as islands
-import marimo._runtime.watch as watch
 from marimo._ast.app import App
 from marimo._ast.cell import Cell
 from marimo._islands._island_generator import MarimoIslandGenerator
@@ -127,7 +138,7 @@ from marimo._plugins.stateless.style import style
 from marimo._plugins.stateless.tabs import tabs
 from marimo._plugins.stateless.tree import tree
 from marimo._plugins.stateless.video import video
-from marimo._runtime import output
+from marimo._runtime import output, watch
 from marimo._runtime.app_meta import AppMeta
 from marimo._runtime.capture import (
     capture_stderr,

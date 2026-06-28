@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from starlette.websockets import WebSocket
@@ -10,8 +10,8 @@ if TYPE_CHECKING:
 from marimo import _loggers
 from marimo._server.api.auth import validate_auth
 from marimo._server.api.deps import AppState
-from marimo._server.codes import WebSocketCodes
-from marimo._server.file_router import MarimoFileKey
+from marimo._server.codes import WebSocketCloseReason, WebSocketCodes
+from marimo._server.workspace import MarimoFileKey
 from marimo._types.ids import SessionId
 
 LOGGER = _loggers.marimo_logger()
@@ -47,14 +47,14 @@ class WebSocketConnectionValidator:
         """
         if self.app_state.enable_auth and not validate_auth(self.websocket):
             await self.websocket.close(
-                WebSocketCodes.UNAUTHORIZED, "MARIMO_UNAUTHORIZED"
+                WebSocketCodes.UNAUTHORIZED, WebSocketCloseReason.UNAUTHORIZED
             )
             return False
         return True
 
     async def extract_connection_params(
         self,
-    ) -> Optional[ConnectionParams]:
+    ) -> ConnectionParams | None:
         """Extract and validate connection parameters.
 
         Returns:
@@ -64,21 +64,21 @@ class WebSocketConnectionValidator:
         raw_session_id = self.app_state.query_params(SESSION_QUERY_PARAM_KEY)
         if raw_session_id is None:
             await self.websocket.close(
-                WebSocketCodes.NORMAL_CLOSE, "MARIMO_NO_SESSION_ID"
+                WebSocketCodes.NORMAL_CLOSE, WebSocketCloseReason.NO_SESSION_ID
             )
             return None
 
         session_id = SessionId(raw_session_id)
 
         # Extract file_key
-        file_key: Optional[MarimoFileKey] = (
+        file_key: MarimoFileKey | None = (
             self.app_state.query_params(FILE_QUERY_PARAM_KEY)
-            or self.app_state.session_manager.file_router.get_unique_file_key()
+            or self.app_state.session_manager.workspace.get_unique_file_key()
         )
 
         if file_key is None:
             await self.websocket.close(
-                WebSocketCodes.NORMAL_CLOSE, "MARIMO_NO_FILE_KEY"
+                WebSocketCodes.NORMAL_CLOSE, WebSocketCloseReason.NO_FILE_KEY
             )
             return None
 
@@ -98,21 +98,21 @@ class WebSocketConnectionValidator:
             rtc_enabled=rtc_enabled,
         )
 
-    async def extract_file_key_only(self) -> Optional[MarimoFileKey]:
+    async def extract_file_key_only(self) -> MarimoFileKey | None:
         """Extract only the file_key parameter (for RTC endpoint).
 
         Returns:
             MarimoFileKey if valid, None otherwise.
         """
-        file_key: Optional[MarimoFileKey] = (
+        file_key: MarimoFileKey | None = (
             self.app_state.query_params(FILE_QUERY_PARAM_KEY)
-            or self.app_state.session_manager.file_router.get_unique_file_key()
+            or self.app_state.session_manager.workspace.get_unique_file_key()
         )
 
         if file_key is None:
             LOGGER.warning("RTC: Closing websocket - no file key")
             await self.websocket.close(
-                WebSocketCodes.NORMAL_CLOSE, "MARIMO_NO_FILE_KEY"
+                WebSocketCodes.NORMAL_CLOSE, WebSocketCloseReason.NO_FILE_KEY
             )
             return None
 

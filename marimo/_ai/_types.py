@@ -3,23 +3,13 @@ from __future__ import annotations
 
 import abc
 import mimetypes
-from collections.abc import Iterator
 from dataclasses import asdict, dataclass, is_dataclass
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Literal,
-    Optional,
-    TypedDict,
-    Union,
-    cast,
-)
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 import msgspec
 
 from marimo import _loggers
 from marimo._dependencies.dependencies import DependencyManager
-from marimo._utils.dicts import remove_none_values
 from marimo._utils.parse_dataclass import parse_raw
 
 LOGGER = _loggers.marimo_logger()
@@ -27,8 +17,8 @@ LOGGER = _loggers.marimo_logger()
 
 class ChatAttachmentDict(TypedDict):
     url: str
-    content_type: Optional[str]
-    name: Optional[str]
+    content_type: str | None
+    name: str | None
 
 
 class TextPartDict(TypedDict):
@@ -39,7 +29,7 @@ class TextPartDict(TypedDict):
 class FilePartDict(TypedDict):
     type: Literal["file"]
     media_type: str
-    filename: Optional[str]
+    filename: str | None
     url: str
 
 
@@ -52,7 +42,7 @@ class ReasoningPartDict(TypedDict):
 class ReasoningDetailsDict(TypedDict):
     type: Literal["text"]
     text: str
-    signature: Optional[str]
+    signature: str | None
 
 
 class ToolInvocationPartDict(TypedDict):
@@ -60,30 +50,30 @@ class ToolInvocationPartDict(TypedDict):
     tool_call_id: str
     state: str
     input: dict[str, Any]
-    output: Optional[Any]
+    output: Any | None
 
 
-ChatPartDict = Union[
-    TextPartDict, ReasoningPartDict, ToolInvocationPartDict, FilePartDict
-]
+ChatPartDict = (
+    TextPartDict | ReasoningPartDict | ToolInvocationPartDict | FilePartDict
+)
 
 
 class ChatMessageDict(TypedDict):
     id: str
     role: Literal["user", "assistant", "system"]
-    content: Optional[str]
-    attachments: Optional[list[ChatAttachmentDict]]
+    content: str | None
+    attachments: list[ChatAttachmentDict] | None
     parts: list[ChatPartDict]
-    metadata: Optional[Any]
+    metadata: Any | None
 
 
 class ChatModelConfigDict(TypedDict, total=False):
-    max_tokens: Optional[int]
-    temperature: Optional[float]
-    top_p: Optional[float]
-    top_k: Optional[int]
-    frequency_penalty: Optional[float]
-    presence_penalty: Optional[float]
+    max_tokens: int | None
+    temperature: float | None
+    top_p: float | None
+    top_k: int | None
+    frequency_penalty: float | None
+    presence_penalty: float | None
 
 
 # NOTE: The following classes are public API.
@@ -101,7 +91,7 @@ class ChatAttachment:
 
     # A string indicating the [media type](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Type).
     # By default, it's extracted from the pathname's extension.
-    content_type: Optional[str] = None
+    content_type: str | None = None
 
     def __post_init__(self) -> None:
         if self.content_type is None:
@@ -123,14 +113,14 @@ class ReasoningPart:
 
     type: Literal["reasoning"]
     text: str
-    details: Optional[list[ReasoningDetails]] = None
+    details: list[ReasoningDetails] | None = None
 
 
 @dataclass
 class ReasoningDetails:
     type: Literal["text"]
     text: str
-    signature: Optional[str] = None
+    signature: str | None = None
 
 
 @dataclass
@@ -139,9 +129,9 @@ class ToolInvocationPart:
 
     type: str  # Starts with "tool-"
     tool_call_id: str
-    state: Union[str, Literal["output-available"]]
+    state: str | Literal["output-available"]
     input: dict[str, Any]
-    output: Optional[Any] = None
+    output: Any | None = None
 
     @property
     def tool_name(self) -> str:
@@ -155,7 +145,7 @@ class FilePart:
     type: Literal["file"]
     media_type: str
     url: str
-    filename: Optional[str] = None
+    filename: str | None = None
 
 
 @dataclass
@@ -177,14 +167,16 @@ class StepStartPart:
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    ChatPart = Union[
-        TextPart,
-        ReasoningPart,
-        ToolInvocationPart,
-        FilePart,
-        DataReasoningPart,
-        StepStartPart,
-    ]
+    from pydantic_ai.ui.vercel_ai.request_types import UIMessagePart
+
+    ChatPart = (
+        TextPart
+        | ReasoningPart
+        | ToolInvocationPart
+        | FilePart
+        | DataReasoningPart
+        | StepStartPart
+    )
 else:
     ChatPart = dict[str, Any]
 
@@ -198,7 +190,7 @@ PART_TYPES = [
 ]
 
 
-class ChatMessage(msgspec.Struct):
+class ChatMessage(msgspec.Struct, dict=True):
     """
     A message in a chat.
     """
@@ -218,41 +210,86 @@ class ChatMessage(msgspec.Struct):
 
     # Optional attachments to the message.
     # TODO: Deprecate in favour of parts
-    attachments: Optional[list[ChatAttachment]] = None
+    attachments: list[ChatAttachment] | None = None
 
     metadata: Any | None = None
 
     def __post_init__(self) -> None:
-        # Hack: msgspec only supports discriminated unions. This is a hack to just
-        # iterate through possible part variants and decode until one works.
-        if self.parts:
-            parts = []
-            for part in self.parts:
-                if converted := self._convert_part(part):
-                    parts.append(converted)
-            self.parts = parts
+        # Non-struct attribute (via `dict=True`) so it isn't serialized.
+        # Snapshots raw dict inputs 1:1 with `self.parts` so SDK fields the
+        # typed dataclasses don't model survive the round-trip.
+        self._raw_parts: list[dict[str, Any] | None] | None = None
+        if not self.parts:
+            return
+        snapshots: list[dict[str, Any] | None] = []
+        typed: list[ChatPart] = []
+        for part in self.parts:
+            converted = self._convert_part(part)
+            if converted is None:
+                continue
+            snapshots.append(
+                cast(dict[str, Any], part) if isinstance(part, dict) else None
+            )
+            typed.append(converted)
+        if any(s is not None for s in snapshots):
+            self._raw_parts = snapshots
+        self.parts = typed
 
-    def _convert_part(self, part: Any) -> Optional[ChatPart]:
-        # If we receive a Vercel AI SDK part (through pydantic-ai), return it as is.
+    def _convert_part(self, part: Any) -> ChatPart | None:
         if DependencyManager.pydantic_ai.imported():
             from pydantic_ai.ui.vercel_ai.request_types import UIMessagePart
 
             if isinstance(part, UIMessagePart):
                 return cast(ChatPart, part)
 
-        PartType = None
-        for PartType in PART_TYPES:
-            try:
-                if is_dataclass(part):
-                    return cast(ChatPart, part)
-                return parse_raw(part, cls=PartType, allow_unknown_keys=True)
-            except Exception:
-                continue
+        if is_dataclass(part) and not isinstance(part, type):
+            return cast(ChatPart, part)
 
-        LOGGER.debug(
-            f"Could not decode part {part}. Ignore if it's a Vercel UI message part."
-        )
+        # Unknown dicts pass through verbatim so future SDK part types still
+        # round-trip.
+        if isinstance(part, dict):
+            for PartType in PART_TYPES:
+                try:
+                    return parse_raw(
+                        part, cls=PartType, allow_unknown_keys=True
+                    )
+                except Exception:
+                    continue
+            return cast(ChatPart, part)
+
+        LOGGER.debug("Dropping unrecognized part %r", part)
         return None
+
+    def raw_or_dumped_parts(self) -> list[dict[str, Any]]:
+        """Return parts in dict form, preferring the original wire payload."""
+        ui_message_part_cls: type[UIMessagePart] | None = None
+        if DependencyManager.pydantic_ai.imported():
+            from pydantic_ai.ui.vercel_ai.request_types import UIMessagePart
+
+            # `UIMessagePart` is a union type alias; the runtime value works
+            # with `isinstance` but doesn't match `type[...]` statically.
+            ui_message_part_cls = UIMessagePart  # type: ignore[assignment]  # pyright: ignore[reportAssignmentType]
+
+        def dump(part: Any) -> dict[str, Any] | None:
+            if is_dataclass(part) and not isinstance(part, type):
+                return asdict(part)
+            if ui_message_part_cls is not None and isinstance(
+                part, ui_message_part_cls
+            ):
+                return part.model_dump(by_alias=True, exclude_none=True)  # type: ignore[no-any-return]
+            if isinstance(part, dict):
+                return cast(dict[str, Any], part)
+            return None
+
+        raws = self._raw_parts
+        result: list[dict[str, Any]] = []
+        for i, part in enumerate(self.parts):
+            snap = raws[i] if raws is not None and i < len(raws) else None
+            if snap is not None:
+                result.append(snap)
+            elif (d := dump(part)) is not None:
+                result.append(d)
+        return result
 
     def __iter__(self) -> Iterator[tuple[str, Any]]:
         """Allow dict(message) to build the serialized dict."""
@@ -260,7 +297,7 @@ class ChatMessage(msgspec.Struct):
             "role": self.role,
             "id": self.id,
             "content": self.content,
-            "parts": [cast(ChatPartDict, asdict(part)) for part in self.parts],
+            "parts": cast(list[ChatPartDict], self.raw_or_dumped_parts()),
             "attachments": [
                 cast(ChatAttachmentDict, asdict(a)) for a in self.attachments
             ]
@@ -276,7 +313,7 @@ class ChatMessage(msgspec.Struct):
         *,
         role: Literal["user", "assistant", "system"],
         message_id: str,
-        content: Optional[str],
+        content: str | None,
         parts: list[ChatPart],
         part_validator_class: Any | None = None,
     ) -> ChatMessage:
@@ -286,12 +323,16 @@ class ChatMessage(msgspec.Struct):
         """
 
         if part_validator_class:
+            # Lazy import: `_pydantic_ai_utils` pulls in `marimo._server.*`,
+            # which we don't want to load just to define the types module.
+            from marimo._ai._pydantic_ai_utils import sanitize_part
+
             validated_parts = []
             for part in parts:
                 if isinstance(part, part_validator_class):
                     validated_parts.append(part)
                 elif isinstance(part, dict):
-                    sanitized_part = remove_none_values(part)
+                    sanitized_part = sanitize_part(part)
                     # Try pydantic validation for dict -> class conversion
                     try:
                         from pydantic import TypeAdapter
@@ -321,22 +362,22 @@ class ChatMessage(msgspec.Struct):
 @dataclass
 class ChatModelConfig:
     # Maximum number of tokens.
-    max_tokens: Optional[int] = None
+    max_tokens: int | None = None
 
     # Temperature for the model (randomness).
-    temperature: Optional[float] = None
+    temperature: float | None = None
 
     # Restriction on the cumulative probability of prediction candidates.
-    top_p: Optional[float] = None
+    top_p: float | None = None
 
     # Number of top prediction candidates to consider.
-    top_k: Optional[int] = None
+    top_k: int | None = None
 
     # Penalty for tokens which appear frequently.
-    frequency_penalty: Optional[float] = None
+    frequency_penalty: float | None = None
 
     # Penalty for tokens which already appeared at least once.
-    presence_penalty: Optional[float] = None
+    presence_penalty: float | None = None
 
 
 class ChatModel(abc.ABC):

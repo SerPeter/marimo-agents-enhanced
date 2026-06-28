@@ -16,10 +16,15 @@ import { cellIdsAtom, notebookAtom, useCellActions } from "@/core/cells/cells";
 import { useCellFocusActions } from "@/core/cells/focus";
 import type { CellId } from "@/core/cells/ids";
 import { HTMLCellId } from "@/core/cells/ids";
+import {
+  clearPendingCutAtom,
+  pendingCutCellIdsAtom,
+} from "@/core/cells/pending-cut-service";
 import { usePendingDeleteService } from "@/core/cells/pending-delete-service";
 import { scrollCellIntoView } from "@/core/cells/scrollCellIntoView";
 import {
   hotkeysAtom,
+  isAiFeatureEnabled,
   keymapPresetAtom,
   userConfigAtom,
 } from "@/core/config/config";
@@ -185,12 +190,13 @@ export function useCellNavigationProps(
   const temporarilyShownCodeActions = useTemporarilyShownCodeActions();
   const runCells = useRunCells();
   const keymapPreset = useAtomValue(keymapPresetAtom);
-  const { copyCells, pasteAtCell } = useCellClipboard();
+  const { copyCells, pasteAtCell, cutCells } = useCellClipboard();
   const rawSelectionActions = useCellSelectionActions();
   const isSelected = useIsCellSelected(cellId);
   const pendingDeleteService = usePendingDeleteService();
   const deleteCells = useDeleteManyCellsCallback();
   const userConfig = useAtomValue(userConfigAtom);
+  const aiFeaturesEnabled = isAiFeatureEnabled(userConfig);
 
   // Wrap selection actions to clear pending cells on any selection change
   const selectionActions = {
@@ -317,6 +323,12 @@ export function useCellNavigationProps(
         },
         // Clear selection
         Escape: () => {
+          // Clear pending cut state if any
+          const pendingCutCellIds = store.get(pendingCutCellIdsAtom);
+          if (pendingCutCellIds.size > 0) {
+            store.set(clearPendingCutAtom);
+            return true;
+          }
           if (isSelected) {
             selectionActions.clear();
             return true;
@@ -486,6 +498,9 @@ export function useCellNavigationProps(
           return true;
         }),
         "cell.aiCompletion": (cellId) => {
+          if (!aiFeaturesEnabled) {
+            return false;
+          }
           let closed = false;
           setAiCompletionCell((v) => {
             // Toggle close
@@ -508,6 +523,10 @@ export function useCellNavigationProps(
         // Command mode
         "command.copyCell": addSingleHandler((cellIds) => {
           copyCells(cellIds);
+          return true;
+        }),
+        "command.cutCell": addSingleHandler((cellIds) => {
+          cutCells(cellIds);
           return true;
         }),
         "command.pasteCell": (cellIds) => {

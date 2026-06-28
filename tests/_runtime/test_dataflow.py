@@ -10,6 +10,9 @@ from marimo._ast import compiler
 from marimo._ast.visitor import Name, VariableData
 from marimo._dependencies.dependencies import DependencyManager
 from marimo._runtime import dataflow
+from marimo._runtime.runner import by_refs
+from marimo._runtime.runner.by_refs import _get_ancestors
+from marimo._types.ids import CellId_t
 
 parse_cell = partial(compiler.compile_cell, cell_id="0")
 
@@ -42,10 +45,10 @@ def test_graph_two_chains() -> None:
 
     # 0 --> 1 --> 2, 0 --> 2
     assert graph.cells == {"0": first_cell, "1": second_cell, "2": third_cell}
-    assert graph.parents == {"0": set(), "1": set(["0"]), "2": set(["0", "1"])}
+    assert graph.parents == {"0": set(), "1": {"0"}, "2": {"0", "1"}}
     assert graph.children == {
-        "0": set(["1", "2"]),
-        "1": set(["2"]),
+        "0": {"1", "2"},
+        "1": {"2"},
         "2": set(),
     }
 
@@ -78,11 +81,9 @@ def test_graph_closure() -> None:
 
     # 0 --> 1
     assert graph.cells == {"0": first_cell, "1": second_cell}
-    assert graph.parents == {"0": set(), "1": set(["0"])}
-    assert graph.children == {"0": set(["1"]), "1": set()}
-    assert dataflow.transitive_closure(graph, cell_ids=set(["0"])) == set(
-        ["0", "1"]
-    )
+    assert graph.parents == {"0": set(), "1": {"0"}}
+    assert graph.children == {"0": {"1"}, "1": set()}
+    assert dataflow.transitive_closure(graph, cell_ids={"0"}) == {"0", "1"}
 
 
 def test_graph_closure_predicate() -> None:
@@ -94,7 +95,7 @@ def test_graph_closure_predicate() -> None:
     code = "def foo():\n  return x"
     second_cell = parse_cell(code)
     graph.register_cell("1", second_cell)
-    graph.set_stale(set(["1"]))
+    graph.set_stale({"1"})
 
     code = "x"
     third_cell = parse_cell(code)
@@ -102,12 +103,12 @@ def test_graph_closure_predicate() -> None:
 
     # 0 --> 1
     assert graph.cells == {"0": first_cell, "1": second_cell, "2": third_cell}
-    assert graph.parents == {"0": set(), "1": set(["0"]), "2": set(["0"])}
-    assert graph.children == {"0": set(["1", "2"]), "1": set(), "2": set()}
+    assert graph.parents == {"0": set(), "1": {"0"}, "2": {"0"}}
+    assert graph.children == {"0": {"1", "2"}, "1": set(), "2": set()}
 
     assert dataflow.transitive_closure(
-        graph, cell_ids=set(["0"]), predicate=lambda cell: not cell.stale
-    ) == set(["0", "2"])
+        graph, cell_ids={"0"}, predicate=lambda cell: not cell.stale
+    ) == {"0", "2"}
 
 
 def test_graph_closure_inclusive() -> None:
@@ -126,33 +127,33 @@ def test_graph_closure_inclusive() -> None:
 
     # 0 --> 1 --> 2
     assert graph.cells == {"0": first_cell, "1": second_cell, "2": third_cell}
-    assert graph.parents == {"0": set(), "1": set(["0"]), "2": set(["1"])}
-    assert graph.children == {"0": set(["1"]), "1": set(["2"]), "2": set()}
+    assert graph.parents == {"0": set(), "1": {"0"}, "2": {"1"}}
+    assert graph.children == {"0": {"1"}, "1": {"2"}, "2": set()}
 
     # Test inclusive=True (default)
-    assert dataflow.transitive_closure(graph, cell_ids=set(["1"])) == set(
-        ["1", "2"]
-    )
+    assert dataflow.transitive_closure(graph, cell_ids={"1"}) == {"1", "2"}
 
     # Test inclusive=False
     assert dataflow.transitive_closure(
-        graph, cell_ids=set(["1"]), inclusive=False
-    ) == set(["2"])
+        graph, cell_ids={"1"}, inclusive=False
+    ) == {"2"}
 
     # Test with multiple starting cells
-    assert dataflow.transitive_closure(graph, cell_ids=set(["0", "1"])) == set(
-        ["0", "1", "2"]
-    )
+    assert dataflow.transitive_closure(graph, cell_ids={"0", "1"}) == {
+        "0",
+        "1",
+        "2",
+    }
 
     # Test ancestors (children=False)
     assert dataflow.transitive_closure(
-        graph, cell_ids=set(["2"]), children=False
-    ) == set(["0", "1", "2"])
+        graph, cell_ids={"2"}, children=False
+    ) == {"0", "1", "2"}
 
     # Test ancestors with inclusive=False
     assert dataflow.transitive_closure(
-        graph, cell_ids=set(["2"]), children=False, inclusive=False
-    ) == set(["0", "1"])
+        graph, cell_ids={"2"}, children=False, inclusive=False
+    ) == {"0", "1"}
 
 
 def test_graph_closure_predicate_with_inclusive_false() -> None:
@@ -170,22 +171,22 @@ def test_graph_closure_predicate_with_inclusive_false() -> None:
     graph.register_cell("2", third_cell)
 
     result = dataflow.transitive_closure(
-        graph, cell_ids=set(["0"]), inclusive=False
+        graph, cell_ids={"0"}, inclusive=False
     )
-    assert result == set(["1", "2"])
+    assert result == {"1", "2"}
 
     result = dataflow.transitive_closure(
-        graph, cell_ids=set(["1"]), inclusive=False
+        graph, cell_ids={"1"}, inclusive=False
     )
-    assert result == set(["2"])
+    assert result == {"2"}
 
     result = dataflow.transitive_closure(
-        graph, cell_ids=set(["0", "1"]), inclusive=False
+        graph, cell_ids={"0", "1"}, inclusive=False
     )
-    assert result == set(["2"])
+    assert result == {"2"}
 
     result = dataflow.transitive_closure(
-        graph, cell_ids=set(["0", "1", "2"]), inclusive=False
+        graph, cell_ids={"0", "1", "2"}, inclusive=False
     )
     assert result == set()
 
@@ -202,13 +203,9 @@ def test_graph_closure_empty() -> None:
     graph.register_cell("0", first_cell)
 
     # Test with single cell, no connections
-    assert dataflow.transitive_closure(graph, cell_ids=set(["0"])) == set(
-        ["0"]
-    )
+    assert dataflow.transitive_closure(graph, cell_ids={"0"}) == {"0"}
     assert (
-        dataflow.transitive_closure(
-            graph, cell_ids=set(["0"]), inclusive=False
-        )
+        dataflow.transitive_closure(graph, cell_ids={"0"}, inclusive=False)
         == set()
     )
 
@@ -252,8 +249,8 @@ def test_set_stale() -> None:
     assert not graph.get_stale()
 
     # 0 and its children are stale
-    graph.set_stale(set(["0"]))
-    assert graph.get_stale() == set(["0", "1", "2"])
+    graph.set_stale({"0"})
+    assert graph.get_stale() == {"0", "1", "2"}
 
     graph.cells["0"].set_stale(stale=False)
     graph.cells["1"].set_stale(stale=False)
@@ -281,8 +278,8 @@ def test_ancestors() -> None:
     graph.register_cell("3", fourth_cell)
 
     assert not graph.ancestors("0")
-    assert graph.ancestors("1") == set(["0"])
-    assert graph.ancestors("2") == set(["0", "1"])
+    assert graph.ancestors("1") == {"0"}
+    assert graph.ancestors("2") == {"0", "1"}
     assert not graph.ancestors("3")
 
 
@@ -305,8 +302,8 @@ def test_descendants() -> None:
     fourth_cell = parse_cell(code)
     graph.register_cell("3", fourth_cell)
 
-    assert graph.descendants("0") == set(["1", "2"])
-    assert graph.descendants("1") == set(["2"])
+    assert graph.descendants("0") == {"1", "2"}
+    assert graph.descendants("1") == {"2"}
     assert not graph.descendants("2")
     assert not graph.ancestors("3")
 
@@ -318,18 +315,18 @@ def test_register_with_stale_ancestor() -> None:
     code = "x = 0"
     first_cell = parse_cell(code)
     graph.register_cell("0", first_cell)
-    graph.set_stale(set(["0"]))
+    graph.set_stale({"0"})
 
     code = "y = x"
     second_cell = parse_cell(code)
     graph.register_cell("1", second_cell)
-    assert graph.get_stale() == set(["0", "1"])
+    assert graph.get_stale() == {"0", "1"}
 
     # add a third cell not related to the others
     code = "a = 0"
     third_cell = parse_cell(code)
     graph.register_cell("3", third_cell)
-    assert graph.get_stale() == set(["0", "1"])
+    assert graph.get_stale() == {"0", "1"}
 
 
 def test_topological_sort_single_node() -> None:
@@ -509,8 +506,8 @@ class TestSQL:
         graph.register_cell("1", second_cell)
 
         assert graph.cells == {"0": first_cell, "1": second_cell}
-        assert graph.parents == {"0": set(), "1": set(["0"])}
-        assert graph.children == {"0": set(["1"]), "1": set()}
+        assert graph.parents == {"0": set(), "1": {"0"}}
+        assert graph.children == {"0": {"1"}, "1": set()}
 
     def test_sql_tree_with_declared_df(self) -> None:
         graph = dataflow.DirectedGraph()
@@ -527,8 +524,8 @@ class TestSQL:
         graph.register_cell("1", second_cell)
 
         assert graph.cells == {"0": first_cell, "1": second_cell}
-        assert graph.parents == {"0": set(), "1": set(["0"])}
-        assert graph.children == {"0": set(["1"]), "1": set()}
+        assert graph.parents == {"0": set(), "1": {"0"}}
+        assert graph.children == {"0": {"1"}, "1": set()}
 
         code = 'mo.sql("SELECT * from df")'
         third_cell = parse_cell(code)
@@ -539,8 +536,8 @@ class TestSQL:
             "1": second_cell,
             "2": third_cell,
         }
-        assert graph.parents == {"0": set(), "1": set(["0"]), "2": set(["0"])}
-        assert graph.children == {"0": set(["1", "2"]), "1": set(), "2": set()}
+        assert graph.parents == {"0": set(), "1": {"0"}, "2": {"0"}}
+        assert graph.children == {"0": {"1", "2"}, "1": set(), "2": set()}
 
         code = "df"
         fourth_cell = parse_cell(code)
@@ -554,12 +551,12 @@ class TestSQL:
         }
         assert graph.parents == {
             "0": set(),
-            "1": set(["0"]),
-            "2": set(["0"]),
-            "3": set(["0"]),
+            "1": {"0"},
+            "2": {"0"},
+            "3": {"0"},
         }
         assert graph.children == {
-            "0": set(["1", "2", "3"]),
+            "0": {"1", "2", "3"},
             "1": set(),
             "2": set(),
             "3": set(),
@@ -583,6 +580,90 @@ class TestSQL:
         # Because t1 is qualified with schema1, it is not considered multiply defined
         multiply_defined = graph.get_multiply_defined()
         assert multiply_defined == []
+
+    def test_qualified_sql_table_in_defining_cells(self):
+        graph = dataflow.DirectedGraph()
+        code = "t1 = 123"
+        first_cell = parse_cell(code)
+        graph.register_cell(CellId_t("0"), first_cell)
+
+        code = 'mo.sql("CREATE TABLE schema1.t1 (i INTEGER, j INTEGER)")'
+        second_cell = parse_cell(code)
+        graph.register_cell(CellId_t("1"), second_cell)
+
+        assert graph.get_defining_cells("t1") == {
+            CellId_t("0"),
+            CellId_t("1"),
+        }
+        assert graph.get_multiply_defined() == []
+
+    def test_redefine_sql_table_same_name_diff_schema(self):
+        graph = dataflow.DirectedGraph()
+        code = 'mo.sql("CREATE TABLE finance.datalake.xx (id INT)")'
+        first_cell = parse_cell(code)
+        graph.register_cell(CellId_t("0"), first_cell)
+
+        code = 'mo.sql("CREATE TABLE finance.information_layer.xx (id INT)")'
+        second_cell = parse_cell(code)
+        graph.register_cell(CellId_t("1"), second_cell)
+
+        assert graph.cells == {
+            "0": first_cell,
+            "1": second_cell,
+        }
+        assert graph.get_multiply_defined() == []
+
+    def test_redefine_sql_table_same_name_diff_catalog(self):
+        graph = dataflow.DirectedGraph()
+        code = 'mo.sql("CREATE TABLE catalog_one.schema_name.xx (id INT)")'
+        first_cell = parse_cell(code)
+        graph.register_cell(CellId_t("0"), first_cell)
+
+        code = 'mo.sql("CREATE TABLE catalog_two.schema_name.xx (id INT)")'
+        second_cell = parse_cell(code)
+        graph.register_cell(CellId_t("1"), second_cell)
+
+        assert graph.get_multiply_defined() == []
+
+    def test_redefine_sql_table_same_qualified_name(self):
+        graph = dataflow.DirectedGraph()
+        code = 'mo.sql("CREATE TABLE finance.datalake.xx (id INT)")'
+        first_cell = parse_cell(code)
+        graph.register_cell(CellId_t("0"), first_cell)
+
+        code = 'mo.sql("CREATE TABLE finance.datalake.xx (id INT)")'
+        second_cell = parse_cell(code)
+        graph.register_cell(CellId_t("1"), second_cell)
+
+        assert graph.get_multiply_defined() == ["xx"]
+
+    def test_redefine_sql_table_unqualified_same_name(self):
+        graph = dataflow.DirectedGraph()
+        code = 'mo.sql("CREATE TABLE xx (id INT)")'
+        first_cell = parse_cell(code)
+        graph.register_cell(CellId_t("0"), first_cell)
+
+        code = 'mo.sql("CREATE TABLE xx (id INT)")'
+        second_cell = parse_cell(code)
+        graph.register_cell(CellId_t("1"), second_cell)
+
+        assert graph.get_multiply_defined() == ["xx"]
+
+    def test_delete_redefined_sql_table_clears_conflict(self):
+        graph = dataflow.DirectedGraph()
+        code = 'mo.sql("CREATE TABLE finance.datalake.xx (id INT)")'
+        first_cell = parse_cell(code)
+        graph.register_cell(CellId_t("0"), first_cell)
+
+        code = 'mo.sql("CREATE TABLE finance.datalake.xx (id INT)")'
+        second_cell = parse_cell(code)
+        graph.register_cell(CellId_t("1"), second_cell)
+
+        assert graph.get_multiply_defined() == ["xx"]
+
+        graph.delete_cell(CellId_t("1"))
+
+        assert graph.get_multiply_defined() == []
 
     def test_sql_table_schema_to_python_ref(self):
         graph = dataflow.DirectedGraph()
@@ -644,12 +725,12 @@ class TestSQL:
             "1": second_cell,
             "2": third_cell,
         }
-        assert graph.parents == {"0": set(), "1": set([]), "2": set(["0"])}
-        assert graph.children == {"0": set(["2"]), "1": set(), "2": set([])}
+        assert graph.parents == {"0": set(), "1": set(), "2": {"0"}}
+        assert graph.children == {"0": {"2"}, "1": set(), "2": set()}
 
         assert second_cell.language == "python"
-        assert graph.get_referring_cells("t1", language="sql") == set([])
-        assert graph.get_referring_cells("df", language="python") == set(["2"])
+        assert graph.get_referring_cells("t1", language="sql") == set()
+        assert graph.get_referring_cells("df", language="python") == {"2"}
 
     def test_python_to_sql_ref(self):
         graph = dataflow.DirectedGraph()
@@ -667,10 +748,10 @@ class TestSQL:
             "0": first_cell,
             "1": second_cell,
         }
-        assert graph.parents == {"0": set(), "1": set(["0"])}
-        assert graph.children == {"0": set(["1"]), "1": set([])}
+        assert graph.parents == {"0": set(), "1": {"0"}}
+        assert graph.children == {"0": {"1"}, "1": set()}
 
-        assert graph.get_referring_cells("df", language="python") == set(["1"])
+        assert graph.get_referring_cells("df", language="python") == {"1"}
 
     def test_sql_creation_and_select_from_same_cell(self):
         graph = dataflow.DirectedGraph()
@@ -687,9 +768,9 @@ class TestSQL:
             "1": second_cell,
         }
 
-        assert graph.parents == {"0": set(), "1": set(["0"])}
-        assert graph.children == {"0": set(["1"]), "1": set([])}
-        assert graph.get_referring_cells("df", language="python") == set(["1"])
+        assert graph.parents == {"0": set(), "1": {"0"}}
+        assert graph.children == {"0": {"1"}, "1": set()}
+        assert graph.get_referring_cells("df", language="python") == {"1"}
 
     def test_get_referring_cells_sql_and_python(self) -> None:
         """Test the get_referring_cells method."""
@@ -709,7 +790,7 @@ class TestSQL:
         graph.register_cell("1", second_cell)
 
         # Second cell should be in the referring cells for x
-        assert graph.get_referring_cells("x", language="python") == set(["1"])
+        assert graph.get_referring_cells("x", language="python") == {"1"}
 
         # Third cell refers to x in SQL
         code = "mo.sql('SELECT * FROM x')"
@@ -717,10 +798,8 @@ class TestSQL:
         graph.register_cell("2", third_cell)
 
         # Both cells should be in the referring cells for x
-        assert graph.get_referring_cells("x", language="python") == set(
-            ["1", "2"]
-        )
-        assert graph.get_referring_cells("x", language="sql") == set(["2"])
+        assert graph.get_referring_cells("x", language="python") == {"1", "2"}
+        assert graph.get_referring_cells("x", language="sql") == {"2"}
 
         # Test language filter (Python vars can leak to SQL, but not vice versa)
         code = "mo.sql('CREATE TABLE t1 (i INTEGER)')"
@@ -736,13 +815,11 @@ class TestSQL:
         graph.register_cell("5", sixth_cell)
 
         # cell "5"'s t1 cannot possibly be a SQL variable
-        assert graph.get_referring_cells("t1", language="sql") == set(["4"])
+        assert graph.get_referring_cells("t1", language="sql") == {"4"}
         # t1 could potentially be a Python variable, so it is included in the
         # reference set; even if t1 were not defined anywhere, it would still
         # return "5"
-        assert graph.get_referring_cells("t1", language="python") == set(
-            ["4", "5"]
-        )
+        assert graph.get_referring_cells("t1", language="python") == {"4", "5"}
 
         # Python cell "5" is not a child of SQL cell "3", even though 5
         # refs "t1" and 3 defines SQL variable t1
@@ -791,12 +868,12 @@ class TestSQL:
             "1": second_cell,
             "2": third_cell,
         }
-        assert graph.parents == {"0": set(), "1": set(["0"]), "2": set([])}
-        assert graph.children == {"0": set(["1"]), "1": set([]), "2": set([])}
+        assert graph.parents == {"0": set(), "1": {"0"}, "2": set()}
+        assert graph.children == {"0": {"1"}, "1": set(), "2": set()}
 
         # cell 2 shouldn't count as a referring cell because it isn't a SQL
         # cell
-        assert graph.get_referring_cells("my_db", language="sql") == set(["1"])
+        assert graph.get_referring_cells("my_db", language="sql") == {"1"}
 
 
 def test_disable_enable_cell() -> None:
@@ -843,7 +920,7 @@ def test_disable_enable_cell() -> None:
     assert not graph.cells["2"].disabled_transitively
 
     # Cells to run should include all previously disabled cells and the stale one
-    assert cells_to_run == set(["1"])
+    assert cells_to_run == {"1"}
 
     # Test disabling a middle cell
     graph.cells["1"].config.disabled = True
@@ -867,7 +944,7 @@ def test_disable_enable_cell() -> None:
     assert not graph.cells["2"].disabled_transitively
 
     # Only cells 1 and 2 need to be run
-    assert cells_to_run == set(["1", "2"])
+    assert cells_to_run == {"1", "2"}
 
 
 def test_is_disabled() -> None:
@@ -954,7 +1031,7 @@ def test_is_disabled() -> None:
 
 
 def test_runner_sync() -> None:
-    """Test the Runner class for synchronous execution."""
+    """Synchronous Cell.run(**kwargs) path. Must work without an event loop."""
     graph = dataflow.DirectedGraph()
 
     # Create a chain of cells: 0 -> 1 -> 2
@@ -970,18 +1047,15 @@ def test_runner_sync() -> None:
     third_cell = compiler.compile_cell(code, cell_id="2")
     graph.register_cell("2", third_cell)
 
-    # Create a runner
-    runner = dataflow.Runner(graph)
-
     # Run the last cell
-    output, defs = runner.run_cell_sync("2", {})
+    output, defs = by_refs.run_cell_sync(graph, "2", {})
 
     # Check output and definitions
     assert output == 25  # 10 * 2 + 5
     assert defs == {"z": 25}
 
     # Run the last cell with substituted values
-    output, defs = runner.run_cell_sync("2", {"y": 50})
+    output, defs = by_refs.run_cell_sync(graph, "2", {"y": 50})
 
     # Check output and definitions with substituted value
     assert output == 55  # 50 + 5
@@ -989,14 +1063,14 @@ def test_runner_sync() -> None:
 
     # Try to run with an invalid argument
     try:
-        runner.run_cell_sync("2", {"invalid": 100})
+        by_refs.run_cell_sync(graph, "2", {"invalid": 100})
         raise AssertionError("Should have raised an exception")
     except ValueError:
         pass  # Expected
 
 
 def test_runner_ancestors() -> None:
-    """Test that the Runner correctly identifies ancestors based on refs."""
+    """Ancestor pruning based on substituted refs."""
     graph = dataflow.DirectedGraph()
 
     # Create cells with different refs/defs patterns
@@ -1012,19 +1086,16 @@ def test_runner_ancestors() -> None:
     third_cell = compiler.compile_cell(code, cell_id="2")
     graph.register_cell("2", third_cell)
 
-    # Create a runner
-    runner = dataflow.Runner(graph)
-
     # Get ancestors of the third cell
-    ancestors = runner._get_ancestors(graph.cells["2"], {})
-    assert ancestors == set(["0", "1"])
+    ancestors = _get_ancestors(graph, graph.cells["2"], {})
+    assert ancestors == {"0", "1"}
 
     # When substituting y, only cell 0 should be an ancestor
-    ancestors = runner._get_ancestors(graph.cells["2"], {"y": 30})
-    assert ancestors == set(["0"])
+    ancestors = _get_ancestors(graph, graph.cells["2"], {"y": 30})
+    assert ancestors == {"0"}
 
     # When substituting both x and y, there should be no ancestors
-    ancestors = runner._get_ancestors(graph.cells["2"], {"x": 40, "y": 30})
+    ancestors = _get_ancestors(graph, graph.cells["2"], {"x": 40, "y": 30})
     assert ancestors == set()
 
 
@@ -1076,7 +1147,7 @@ def test_del_del_cycle():
     graph.register_cell("0", parse_cell("del x"))
     graph.register_cell("1", parse_cell("del x"))
     assert len(graph.cycles) == 1
-    assert set(list(graph.cycles)[0]) == set((("0", "1"), ("1", "0")))
+    assert set(next(iter(graph.cycles))) == {("0", "1"), ("1", "0")}
 
 
 def test_del_ref_cycle():
@@ -1087,7 +1158,7 @@ def test_del_ref_cycle():
     graph.register_cell("1", parse_cell("del x; y = 1"))
     graph.register_cell("2", parse_cell("z = x + y"))
     assert len(graph.cycles) == 1
-    assert set(list(graph.cycles)[0]) == set([("1", "2"), ("2", "1")])
+    assert set(next(iter(graph.cycles))) == {("1", "2"), ("2", "1")}
 
 
 def test_del_child_of_ref():
@@ -1097,14 +1168,14 @@ def test_del_child_of_ref():
     graph.register_cell("0", parse_cell("del x"))
     graph.register_cell("1", parse_cell("x"))
     graph.register_cell("2", parse_cell("x = 1"))
-    assert graph.parents["0"] == set(["1", "2"])
+    assert graph.parents["0"] == {"1", "2"}
     assert graph.children["0"] == set()
 
-    assert graph.parents["1"] == set(["2"])
-    assert graph.children["1"] == set(["0"])
+    assert graph.parents["1"] == {"2"}
+    assert graph.children["1"] == {"0"}
 
-    assert graph.parents["2"] == set([])
-    assert graph.children["2"] == set(["0", "1"])
+    assert graph.parents["2"] == set()
+    assert graph.children["2"] == {"0", "1"}
 
 
 def test_get_path() -> None:
@@ -1186,7 +1257,7 @@ def test_import_block_relatives() -> None:
     code = "import pandas as pd\nimport numpy as np"
     first_cell = parse_cell(code)
     first_cell.import_workspace.is_import_block = True
-    first_cell.import_workspace.imported_defs = set(["pd", "np"])
+    first_cell.import_workspace.imported_defs = {"pd", "np"}
     graph.register_cell("0", first_cell)
 
     # Create cells that use the imports
@@ -1243,7 +1314,7 @@ result = func3()
     graph.register_cell("1", second_cell)
 
     # Get transitive references from result
-    refs = graph.get_transitive_references(set(["result"]))
+    refs = graph.get_transitive_references({"result"})
 
     # Should include all functions in the chain
     assert "result" in refs
@@ -1252,7 +1323,7 @@ result = func3()
     assert "func1" in refs
 
     # Test with non-inclusive mode
-    refs = graph.get_transitive_references(set(["result"]), inclusive=False)
+    refs = graph.get_transitive_references({"result"}, inclusive=False)
 
     # Should include all except result
     assert "result" not in refs
@@ -1267,11 +1338,11 @@ result = func3()
         return data.kind == "function"
 
     refs = graph.get_transitive_references(
-        set(["result", "func3"]), predicate=is_function, inclusive=False
+        {"result", "func3"}, predicate=is_function, inclusive=False
     )
 
     # Should include only functions
-    assert refs == set(["func2", "func1"])
+    assert refs == {"func2", "func1"}
 
     # result is not a function, so it should be excluded even with inclusive=True
     assert "result" not in refs
@@ -1303,7 +1374,7 @@ result = obj.method1()
     graph.register_cell("1", second_cell)
 
     # Get transitive references from result
-    refs = graph.get_transitive_references(set(["result"]))
+    refs = graph.get_transitive_references({"result"})
 
     # Should include all related symbols
     assert "result" in refs
@@ -1331,7 +1402,7 @@ def public_func():
     graph.register_cell("1", second_cell)
 
     # Get transitive references
-    refs = graph.get_transitive_references(set(["result"]))
+    refs = graph.get_transitive_references({"result"})
 
     # Should include public_func
     assert "public_func" in refs
@@ -1589,3 +1660,55 @@ def test_prune_cells_for_overrides_preserves_order() -> None:
         graph, execution_order, {"b": 100}
     )
     assert result == ["0", "2", "3"]
+
+
+def test_is_any_ancestor_errored() -> None:
+    """Test that is_any_ancestor_errored correctly detects ancestor errors."""
+    graph = dataflow.DirectedGraph()
+    # Create a chain: 0 -> 1 -> 2
+    code = "x = 0"
+    first_cell = parse_cell(code)
+    graph.register_cell("0", first_cell)
+    code = "y = x"
+    second_cell = parse_cell(code)
+    graph.register_cell("1", second_cell)
+    code = "z = y"
+    third_cell = parse_cell(code)
+    graph.register_cell("2", third_cell)
+
+    # No errors initially
+    assert not graph.is_any_ancestor_errored("0")
+    assert not graph.is_any_ancestor_errored("1")
+    assert not graph.is_any_ancestor_errored("2")
+
+    # Set cell 0 to exception state
+    graph.cells["0"].set_run_result_status("exception")
+    assert not graph.is_any_ancestor_errored("0")  # no ancestors
+    assert graph.is_any_ancestor_errored("1")  # parent 0 has error
+    assert graph.is_any_ancestor_errored("2")  # grandparent 0 has error
+
+    # Fix cell 0 - clear the error
+    graph.cells["0"].set_run_result_status("success")
+    assert not graph.is_any_ancestor_errored("0")
+    assert not graph.is_any_ancestor_errored("1")
+    assert not graph.is_any_ancestor_errored("2")
+
+
+def test_is_any_ancestor_errored_marimo_error() -> None:
+    """Test that is_any_ancestor_errored detects marimo-error status too."""
+    graph = dataflow.DirectedGraph()
+    code = "x = 0"
+    first_cell = parse_cell(code)
+    graph.register_cell("0", first_cell)
+    code = "y = x"
+    second_cell = parse_cell(code)
+    graph.register_cell("1", second_cell)
+
+    # Set cell 0 to marimo-error state (e.g. registration/syntax error)
+    graph.cells["0"].set_run_result_status("marimo-error")
+    assert not graph.is_any_ancestor_errored("0")  # no ancestors
+    assert graph.is_any_ancestor_errored("1")  # parent 0 has marimo-error
+
+    # Fix cell 0
+    graph.cells["0"].set_run_result_status("success")
+    assert not graph.is_any_ancestor_errored("1")

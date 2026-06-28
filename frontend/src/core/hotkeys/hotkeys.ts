@@ -370,6 +370,27 @@ const DEFAULT_HOT_KEY = {
     group: "Other",
     key: "Mod-j",
   },
+  "global.showAllCode": {
+    name: "Show all code",
+    group: "Editing",
+    key: NOT_SET,
+    additionalKeywords: ["unhide", "hide", "reveal", "show source"],
+  },
+  "global.hideAllCode": {
+    name: "Hide all code",
+    group: "Editing",
+    key: NOT_SET,
+  },
+  "global.showAllMarkdownCode": {
+    name: "Show all markdown code",
+    group: "Editing",
+    key: NOT_SET,
+  },
+  "global.hideAllMarkdownCode": {
+    name: "Hide all markdown code",
+    group: "Editing",
+    key: NOT_SET,
+  },
   "global.collapseAllSections": {
     name: "Collapse all sections",
     group: "Editing",
@@ -441,6 +462,11 @@ const DEFAULT_HOT_KEY = {
     name: "Copy cell",
     group: "Command",
     key: "c",
+  },
+  "command.cutCell": {
+    name: "Cut cell",
+    group: "Command",
+    key: "x",
   },
   "command.pasteCell": {
     name: "Paste cell",

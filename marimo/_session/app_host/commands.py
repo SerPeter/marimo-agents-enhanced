@@ -12,6 +12,7 @@ import msgspec.json
 from marimo._ast.cell import CellConfig
 from marimo._config.config import MarimoConfig
 from marimo._runtime.commands import AppMetadata
+from marimo._runtime.virtual_file import VirtualFileStorageType
 from marimo._types.ids import CellId_t
 
 
@@ -23,7 +24,7 @@ class CreateKernelCmd(msgspec.Struct, tag=True):
     configs: dict[CellId_t, CellConfig]
     app_metadata: AppMetadata
     user_config: MarimoConfig
-    virtual_files_supported: bool
+    virtual_file_storage: VirtualFileStorageType | None
     redirect_console_to_browser: bool
     log_level: int
 
@@ -92,6 +93,7 @@ class AppHostArgs(msgspec.Struct):
     # Notebook file path, for debug logs
     file_path: str
     log_level: int
+    parent_pid: int | None
 
     def encode_json(self) -> bytes:
         return msgspec.json.encode(self)

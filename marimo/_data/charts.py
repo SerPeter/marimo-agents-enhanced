@@ -5,7 +5,7 @@ import abc
 from dataclasses import dataclass
 from datetime import time
 from textwrap import dedent
-from typing import TYPE_CHECKING, Any, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import narwhals.stable.v2 as nw
 
@@ -82,7 +82,9 @@ NUMBER_STROKE = "#8e4ec6"  # purple-9
 COMMON_CONFIG = 'properties(width="container").configure_view(stroke=None)'
 
 
-def add_common_config(chart: alt.Chart | alt.LayerChart) -> alt.Chart:
+def add_common_config(
+    chart: alt.Chart | alt.LayerChart | alt.FacetChart,
+) -> alt.Chart:
     return chart.properties(width="container").configure_view(stroke=None)  # type: ignore
 
 
@@ -338,8 +340,8 @@ class DateChartBuilder(ChartBuilder):
     DEFAULT_TIME_UNIT: TimeUnitOptions = "yearmonthdate"
 
     def __init__(self) -> None:
-        self.date_format: Optional[str] = None
-        self.time_unit: Optional[TimeUnitOptions] = None
+        self.date_format: str | None = None
+        self.time_unit: TimeUnitOptions | None = None
 
     def _guess_date_format(
         self, data: Any, column: str

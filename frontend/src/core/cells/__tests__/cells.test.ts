@@ -22,7 +22,11 @@ import { foldAllBulk, unfoldAllBulk } from "@/core/codemirror/editing/commands";
 import { adaptiveLanguageConfiguration } from "@/core/codemirror/language/extension";
 import { OverridingHotkeyProvider } from "@/core/hotkeys/hotkeys";
 import type { OutputMessage } from "@/core/kernel/messages";
-import { type CollapsibleTree, MultiColumn } from "@/utils/id-tree";
+import {
+  type CollapsibleTree,
+  MultiColumn,
+  type CellColumnId,
+} from "@/utils/id-tree";
 import type { Seconds } from "@/utils/time";
 import {
   exportedForTesting,
@@ -41,6 +45,9 @@ import type { CellData } from "../types";
 vi.mock("@/core/codemirror/editing/commands", () => ({
   foldAllBulk: vi.fn(),
   unfoldAllBulk: vi.fn(),
+}));
+vi.mock("@/core/wasm/utils", () => ({
+  isWasm: vi.fn(() => false),
 }));
 vi.mock("../scrollCellIntoView", async (importOriginal) => {
   const actual = await importOriginal();
@@ -203,6 +210,20 @@ describe("cell reducer", () => {
       [0] ''
       "
     `);
+  });
+
+  it("can add a cell with name and config", () => {
+    actions.createNewCell({
+      cellId: firstCellId,
+      before: false,
+      code: "x = 1",
+      name: "My Cell",
+      config: { hide_code: true, disabled: false },
+    });
+    const newCellId = state.cellIds.inOrderIds[1];
+    expect(state.cellData[newCellId].name).toBe("My Cell");
+    expect(state.cellData[newCellId].config.hide_code).toBe(true);
+    expect(state.cellData[newCellId].config.disabled).toBe(false);
   });
 
   it("can delete a Python cell and undo delete", () => {
@@ -491,6 +512,279 @@ describe("cell reducer", () => {
       [0] ''
 
       [2] ''
+      "
+    `);
+  });
+
+  it("can move a cell to an exact index within a column", () => {
+    actions.createNewCell({
+      cellId: firstCellId,
+      before: false,
+    });
+    actions.createNewCell({
+      cellId: cellId("1"),
+      before: false,
+    });
+
+    const columnId = state.cellIds.atOrThrow(0).id;
+    actions.moveCellToIndex({
+      cellId: firstCellId,
+      columnId,
+      index: 3,
+    });
+
+    expect(formatCells(state)).toMatchInlineSnapshot(`
+      "
+      [1] ''
+
+      [2] ''
+
+      [0] ''
+      "
+    `);
+  });
+
+  it("can move a cell to an exact index across columns", () => {
+    actions.createNewCell({
+      cellId: firstCellId,
+      before: false,
+    });
+    actions.createNewCell({
+      cellId: cellId("1"),
+      before: false,
+    });
+    actions.addColumnBreakpoint({ cellId: cellId("1") });
+
+    const secondColumnId = state.cellIds.atOrThrow(1).id;
+    actions.moveCellToIndex({
+      cellId: firstCellId,
+      columnId: secondColumnId,
+      index: 1,
+    });
+
+    expect(formatCells(state)).toMatchInlineSnapshot(`
+      "
+      > col 0
+
+
+      > col 1
+      [1] ''
+
+      [0] ''
+
+      [2] ''
+      "
+    `);
+  });
+
+  it("moveCellToIndex is a no-op when moving to the same position", () => {
+    actions.createNewCell({
+      cellId: firstCellId,
+      before: false,
+    });
+    actions.createNewCell({
+      cellId: cellId("1"),
+      before: false,
+    });
+
+    const columnId = state.cellIds.atOrThrow(0).id;
+    const before = formatCells(state);
+
+    actions.moveCellToIndex({
+      cellId: firstCellId,
+      columnId,
+      index: 0,
+    });
+
+    expect(formatCells(state)).toBe(before);
+  });
+
+  it("moveCellToIndex is a no-op for an invalid columnId", () => {
+    actions.createNewCell({
+      cellId: firstCellId,
+      before: false,
+    });
+
+    const before = formatCells(state);
+
+    actions.moveCellToIndex({
+      cellId: firstCellId,
+      columnId: "nonexistent-column" as CellColumnId,
+      index: 0,
+    });
+
+    expect(formatCells(state)).toBe(before);
+  });
+
+  it("can move multiple cells relative to target", () => {
+    actions.createNewCell({
+      cellId: firstCellId,
+      before: false,
+    });
+    actions.createNewCell({
+      cellId: cellId("1"),
+      before: false,
+    });
+    expect(formatCells(state)).toMatchInlineSnapshot(`
+      "
+      [0] ''
+
+      [1] ''
+
+      [2] ''
+      "
+    `);
+
+    // Move first two cells after the third
+    actions.moveCellsRelativeTo({
+      cellIds: [firstCellId, cellId("1")],
+      targetCellId: cellId("2"),
+      position: "after",
+    });
+    expect(formatCells(state)).toMatchInlineSnapshot(`
+      "
+      [2] ''
+
+      [0] ''
+
+      [1] ''
+      "
+    `);
+  });
+
+  it("can undo cut-paste (move with previousPlacements)", () => {
+    actions.createNewCell({
+      cellId: firstCellId,
+      before: false,
+    });
+    actions.createNewCell({
+      cellId: cellId("1"),
+      before: false,
+    });
+    expect(formatCells(state)).toMatchInlineSnapshot(`
+      "
+      [0] ''
+
+      [1] ''
+
+      [2] ''
+      "
+    `);
+
+    const col = state.cellIds.findWithId(firstCellId);
+    const previousPlacements = [
+      {
+        columnId: col.id,
+        index: col.indexOfOrThrow(
+          firstCellId,
+        ) as import("@/utils/id-tree").CellIndex,
+      },
+      {
+        columnId: col.id,
+        index: col.indexOfOrThrow(
+          cellId("1"),
+        ) as import("@/utils/id-tree").CellIndex,
+      },
+    ];
+
+    actions.moveCellsRelativeTo({
+      cellIds: [firstCellId, cellId("1")],
+      targetCellId: cellId("2"),
+      position: "after",
+      previousPlacements,
+    });
+    expect(formatCells(state)).toMatchInlineSnapshot(`
+      "
+      [2] ''
+
+      [0] ''
+
+      [1] ''
+      "
+    `);
+
+    actions.undoDeleteCell();
+    expect(formatCells(state)).toMatchInlineSnapshot(`
+      "
+      [0] ''
+
+      [1] ''
+
+      [2] ''
+      "
+    `);
+  });
+
+  it("undo order: cut-paste then delete — first undo restores delete, second undo undoes move", () => {
+    actions.createNewCell({
+      cellId: firstCellId,
+      before: false,
+    });
+    actions.createNewCell({
+      cellId: cellId("1"),
+      before: false,
+    });
+
+    const col = state.cellIds.findWithId(firstCellId);
+    const previousPlacements = [
+      {
+        columnId: col.id,
+        index: col.indexOfOrThrow(
+          firstCellId,
+        ) as import("@/utils/id-tree").CellIndex,
+      },
+      {
+        columnId: col.id,
+        index: col.indexOfOrThrow(
+          cellId("1"),
+        ) as import("@/utils/id-tree").CellIndex,
+      },
+    ];
+
+    actions.moveCellsRelativeTo({
+      cellIds: [firstCellId, cellId("1")],
+      targetCellId: cellId("2"),
+      position: "after",
+      previousPlacements,
+    });
+    expect(formatCells(state)).toMatchInlineSnapshot(`
+      "
+      [2] ''
+
+      [0] ''
+
+      [1] ''
+      "
+    `);
+
+    actions.deleteCell({ cellId: cellId("2") });
+    expect(formatCells(state)).toMatchInlineSnapshot(`
+      "
+      [0] ''
+
+      [1] ''
+      "
+    `);
+
+    actions.undoDeleteCell();
+    expect(formatCells(state)).toMatchInlineSnapshot(`
+      "
+      [3] ''
+
+      [0] ''
+
+      [1] ''
+      "
+    `);
+
+    actions.undoDeleteCell();
+    expect(formatCells(state)).toMatchInlineSnapshot(`
+      "
+      [0] ''
+
+      [1] ''
+
+      [3] ''
       "
     `);
   });
@@ -1207,6 +1501,47 @@ describe("cell reducer", () => {
       { ...STD_IN_1, response: "Marimo!" },
       { ...STD_IN_2, response: "" },
     ]);
+  });
+
+  it("does not crash when setStdinResponse has out-of-bounds outputIndex", () => {
+    const STDOUT: OutputMessage = {
+      channel: "stdout",
+      mimetype: "text/plain",
+      data: "hello!",
+      timestamp: 1,
+    };
+
+    // Set the cell to running with a console output
+    actions.prepareForRun({ cellId: firstCellId });
+    actions.handleCellMessage({
+      cell_id: firstCellId,
+      output: undefined,
+      console: null,
+      status: "running",
+      stale_inputs: null,
+      timestamp: new Date(20).getTime() as Seconds,
+    });
+    actions.handleCellMessage({
+      cell_id: firstCellId,
+      output: undefined,
+      console: STDOUT,
+      status: undefined,
+      stale_inputs: null,
+      timestamp: new Date(22).getTime() as Seconds,
+    });
+
+    // Try to set stdin response with an out-of-bounds index
+    // This should not crash - it should return state unchanged
+    actions.setStdinResponse({
+      response: "test",
+      cellId: firstCellId,
+      outputIndex: 999,
+    });
+
+    // Cell state should be unchanged
+    const cell = cells[0];
+    expect(cell.consoleOutputs).toHaveLength(1);
+    expect(cell.consoleOutputs[0]).toMatchObject(STDOUT);
   });
 
   it("can receive console when the cell is idle and will clear when starts again", () => {
@@ -2061,6 +2396,116 @@ describe("cell reducer", () => {
     expect(state.cellIds.getColumns()[2].topLevelIds).toEqual([cellId("2")]);
   });
 
+  it("rebuildCellColumns regroups cells by config.column", () => {
+    // Create four cells in a single column.
+    actions.createNewCell({ cellId: firstCellId, before: false });
+    actions.createNewCell({ cellId: cellId("1"), before: false });
+    actions.createNewCell({ cellId: cellId("2"), before: false });
+    expect(state.cellIds.getColumns().length).toBe(1);
+
+    // Explicitly set config.column on each cell. This ONLY updates metadata —
+    // updateCellConfig does not touch the MultiColumn tree.
+    actions.updateCellConfig({
+      cellId: cellId("0"),
+      config: { column: 0 },
+    });
+    actions.updateCellConfig({
+      cellId: cellId("2"),
+      config: { column: 1 },
+    });
+
+    // Tree is still a single column at this point.
+    expect(state.cellIds.getColumns().length).toBe(1);
+
+    // Now rebuild the column tree from metadata.
+    actions.rebuildCellColumns({
+      cellIds: [cellId("0"), cellId("1"), cellId("2"), cellId("3")],
+    });
+
+    expect(state.cellIds.getColumns().length).toBe(2);
+    // Cell 1 inherits from 0 (col 0), cell 3 inherits from 2 (col 1).
+    expect(state.cellIds.getColumns()[0].topLevelIds).toEqual([
+      cellId("0"),
+      cellId("1"),
+    ]);
+    expect(state.cellIds.getColumns()[1].topLevelIds).toEqual([
+      cellId("2"),
+      cellId("3"),
+    ]);
+  });
+
+  it("rebuildCellColumns with explicit column on every cell", () => {
+    actions.createNewCell({ cellId: firstCellId, before: false });
+    actions.createNewCell({ cellId: cellId("1"), before: false });
+    actions.createNewCell({ cellId: cellId("2"), before: false });
+
+    for (const [id, col] of [
+      ["0", 1],
+      ["1", 0],
+      ["2", 1],
+      ["3", 0],
+    ] as const) {
+      actions.updateCellConfig({ cellId: cellId(id), config: { column: col } });
+    }
+
+    actions.rebuildCellColumns({
+      cellIds: [cellId("0"), cellId("1"), cellId("2"), cellId("3")],
+    });
+
+    expect(state.cellIds.getColumns().length).toBe(2);
+    expect(state.cellIds.getColumns()[0].topLevelIds).toEqual([
+      cellId("1"),
+      cellId("3"),
+    ]);
+    expect(state.cellIds.getColumns()[1].topLevelIds).toEqual([
+      cellId("0"),
+      cellId("2"),
+    ]);
+  });
+
+  it("rebuildCellColumns collapses to one column when all cells are col 0", () => {
+    actions.createNewCell({ cellId: firstCellId, before: false });
+    actions.addColumnBreakpoint({ cellId: cellId("1") });
+    expect(state.cellIds.getColumns().length).toBe(2);
+
+    // Wipe column metadata back to 0 for both cells.
+    actions.updateCellConfig({ cellId: cellId("0"), config: { column: 0 } });
+    actions.updateCellConfig({ cellId: cellId("1"), config: { column: 0 } });
+
+    actions.rebuildCellColumns({
+      cellIds: [cellId("0"), cellId("1")],
+    });
+
+    expect(state.cellIds.getColumns().length).toBe(1);
+    expect(state.cellIds.getColumns()[0].topLevelIds).toEqual([
+      cellId("0"),
+      cellId("1"),
+    ]);
+  });
+
+  it("rebuildCellColumns follows the provided order, not current tree order", () => {
+    // Start with a single column.
+    actions.createNewCell({ cellId: firstCellId, before: false });
+    actions.createNewCell({ cellId: cellId("1"), before: false });
+    actions.updateCellConfig({ cellId: cellId("0"), config: { column: 0 } });
+    actions.updateCellConfig({ cellId: cellId("2"), config: { column: 1 } });
+
+    // Pass the reversed order. The rebuild should honor it.
+    actions.rebuildCellColumns({
+      cellIds: [cellId("2"), cellId("1"), cellId("0")],
+    });
+
+    // cellIds iteration:
+    //   2 → col=1, pushed to col1, prev=1
+    //   1 → col=null, pushed to col[prev=1] = col1
+    //   0 → col=0, pushed to col0
+    expect(state.cellIds.getColumns()[0].topLevelIds).toEqual([cellId("0")]);
+    expect(state.cellIds.getColumns()[1].topLevelIds).toEqual([
+      cellId("2"),
+      cellId("1"),
+    ]);
+  });
+
   it("can clear output of a single cell", () => {
     // Set up initial state with output
     actions.handleCellMessage({
@@ -2473,6 +2918,39 @@ describe("cell reducer", () => {
       const newCellId =
         state.cellIds.inOrderIds[state.cellIds.inOrderIds.length - 1];
       expect(state.untouchedNewCells.has(newCellId)).toBe(true);
+    });
+
+    it("adds interactively-created hidden cell with boilerplate code to untouchedNewCells", () => {
+      // Markdown cells are created with hideCode and non-empty default code
+      // (e.g. `mo.md(r"""\n""")`). They are user-initiated, so their editor
+      // should be shown until first blur.
+      actions.createNewCell({
+        cellId: "__end__",
+        before: false,
+        code: 'mo.md(r"""\n""")',
+        hideCode: true,
+        autoFocus: true,
+      });
+
+      const newCellId =
+        state.cellIds.inOrderIds[state.cellIds.inOrderIds.length - 1];
+      expect(state.untouchedNewCells.has(newCellId)).toBe(true);
+    });
+
+    it("does not add programmatically-created hidden cell with code to untouchedNewCells", () => {
+      // Cells created by the kernel (e.g. via code_mode) carry code and
+      // autoFocus=false; their hide_code must take effect immediately.
+      actions.createNewCell({
+        cellId: "__end__",
+        before: false,
+        code: "x = 1",
+        hideCode: true,
+        autoFocus: false,
+      });
+
+      const newCellId =
+        state.cellIds.inOrderIds[state.cellIds.inOrderIds.length - 1];
+      expect(state.untouchedNewCells.has(newCellId)).toBe(false);
     });
 
     it("does not add cell to untouchedNewCells when hideCode is false", () => {
@@ -3171,5 +3649,101 @@ describe("createTracebackInfoAtom", () => {
     const traceback = store.get(tracebackAtom);
 
     expect(traceback).toBeUndefined();
+  });
+});
+
+describe("setCells snapshot preservation", () => {
+  const CELL_A = cellId("A");
+  const CELL_B = cellId("B");
+  const newCells: CellData[] = [
+    {
+      id: CELL_A,
+      name: "a",
+      code: "1",
+      edited: false,
+      lastCodeRun: null,
+      lastExecutionTime: null,
+      config: { hide_code: false, disabled: false, column: null },
+      serializedEditorState: null,
+    },
+    {
+      id: CELL_B,
+      name: "b",
+      code: "2",
+      edited: false,
+      lastCodeRun: null,
+      lastExecutionTime: null,
+      config: { hide_code: false, disabled: false, column: null },
+      serializedEditorState: null,
+    },
+  ];
+
+  const hydratedState = () =>
+    MockNotebook.notebookState({
+      cellData: {
+        [CELL_A]: { id: CELL_A, code: "1" },
+        [CELL_B]: { id: CELL_B, code: "2" },
+      },
+      cellRuntime: {
+        [CELL_A]: {
+          output: {
+            channel: "output",
+            mimetype: "text/plain",
+            data: "hydrated-A",
+            timestamp: 0,
+          },
+        },
+        [CELL_B]: {
+          consoleOutputs: [
+            {
+              channel: "stdout",
+              mimetype: "text/plain",
+              data: "hydrated-B-stdout",
+              timestamp: 0,
+            },
+          ],
+        },
+      },
+    });
+
+  beforeEach(async () => {
+    const { isWasm } = await import("@/core/wasm/utils");
+    vi.mocked(isWasm).mockReturnValue(true);
+  });
+
+  it("preserves hydrated output in WASM", () => {
+    const next = exportedForTesting.reducer(hydratedState(), {
+      type: "setCells",
+      payload: newCells,
+    });
+
+    expect(next.cellRuntime[CELL_A].output).toMatchObject({
+      data: "hydrated-A",
+    });
+  });
+
+  it("preserves console-only hydration in WASM", () => {
+    const next = exportedForTesting.reducer(hydratedState(), {
+      type: "setCells",
+      payload: newCells,
+    });
+
+    expect(next.cellRuntime[CELL_B].consoleOutputs).toHaveLength(1);
+    expect(next.cellRuntime[CELL_B].consoleOutputs[0]).toMatchObject({
+      data: "hydrated-B-stdout",
+    });
+  });
+
+  it("resets cells with no prior runtime even in WASM", () => {
+    const empty = MockNotebook.notebookState({ cellData: {} });
+    const next = exportedForTesting.reducer(empty, {
+      type: "setCells",
+      payload: newCells,
+    });
+
+    expect(next.cellRuntime[CELL_A].output).toBeNull();
+    expect(next.cellRuntime[CELL_A].consoleOutputs).toEqual([]);
+    expect(next.cellRuntime[CELL_B].output).toBeNull();
+    expect(next.cellRuntime[CELL_B].consoleOutputs).toEqual([]);
   });
 });

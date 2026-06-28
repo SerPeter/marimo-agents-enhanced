@@ -1,17 +1,22 @@
 # Copyright 2026 Marimo. All rights reserved.
 from __future__ import annotations
 
-import base64
 from typing import TYPE_CHECKING
 
 from starlette.authentication import requires
+from starlette.exceptions import HTTPException
 
 from marimo import _loggers
 from marimo._server.api.deps import AppState
-from marimo._server.api.utils import parse_request
-from marimo._server.files.os_file_system import OSFileSystem
+from marimo._server.api.utils import parse_multipart_request, parse_request
+from marimo._server.files.os_file_system import (
+    OSFileSystem,
+    UploadTooLargeError,
+)
 from marimo._server.models.files import (
-    FileCreateRequest,
+    FileCopyRequest,
+    FileCopyResponse,
+    FileCreateMultipartRequest,
     FileCreateResponse,
     FileDeleteRequest,
     FileDeleteResponse,
@@ -67,8 +72,8 @@ async def list_files(
     """
     app_state = AppState(request)
     body = await parse_request(request, cls=FileListRequest)
-    # Use file router's directory as default, fall back to cwd
-    directory = app_state.session_manager.file_router.directory
+    # Use workspace's directory as default, fall back to cwd
+    directory = app_state.session_manager.workspace.directory
     root = body.path or directory or file_system.get_root()
     files = file_system.list_files(root)
     return FileListResponse(files=files, root=root)
@@ -107,9 +112,9 @@ async def create_file_or_directory(
     """
     requestBody:
         content:
-            application/json:
+            multipart/form-data:
                 schema:
-                    $ref: "#/components/schemas/FileCreateRequest"
+                    $ref: "#/components/schemas/FileCreateMultipartRequest"
     responses:
         200:
             description: Create a new file or directory
@@ -118,18 +123,25 @@ async def create_file_or_directory(
                     schema:
                         $ref: "#/components/schemas/FileCreateResponse"
     """
-    body = await parse_request(request, cls=FileCreateRequest)
     try:
-        decoded_contents = (
-            base64.b64decode(body.contents)
-            if body.contents is not None
-            else None
-        )
-
-        info = file_system.create_file_or_directory(
-            body.path, body.type, body.name, decoded_contents
-        )
+        async with parse_multipart_request(
+            request, FileCreateMultipartRequest
+        ) as parsed:
+            upload = parsed.files.get("file")
+            # Directories and the default-template notebook take the
+            # in-memory path; only real file content streams.
+            if upload is not None and parsed.body.type in ("file", "notebook"):
+                info = await file_system.stream_create_file(
+                    parsed.body.path, parsed.body.name, upload
+                )
+            else:
+                info = file_system.create_file_or_directory(
+                    parsed.body.path, parsed.body.type, parsed.body.name, None
+                )
         return FileCreateResponse(success=True, info=info)
+    except UploadTooLargeError as e:
+        LOGGER.warning(f"Rejected oversize upload: {e}")
+        raise HTTPException(status_code=413, detail=str(e)) from e
     except Exception as e:
         LOGGER.error(f"Error creating file or directory: {e}")
         return FileCreateResponse(success=False, message=str(e))
@@ -157,12 +169,44 @@ async def delete_file_or_directory(
     """
     body = await parse_request(request, cls=FileDeleteRequest)
     try:
+        # TODO: Refactor this side-effect based validation to a dedicated validation.
         file_system.get_details(body.path)
         success = file_system.delete_file_or_directory(body.path)
         return FileDeleteResponse(success=success)
     except Exception as e:
         LOGGER.error(f"Error deleting file or directory: {e}")
         return FileDeleteResponse(success=False, message=str(e))
+
+
+@router.post("/copy")
+@requires("edit")
+async def copy_file_or_directory(
+    *,
+    request: Request,
+) -> FileCopyResponse:
+    """
+    requestBody:
+        content:
+            application/json:
+                schema:
+                    $ref: "#/components/schemas/FileCopyRequest"
+    responses:
+        200:
+            description: Copy a file or directory
+            content:
+                application/json:
+                    schema:
+                        $ref: "#/components/schemas/FileCopyResponse"
+    """
+    body = await parse_request(request, cls=FileCopyRequest)
+    try:
+        # TODO: Refactor this side-effect based validation to a dedicated validation.
+        file_system.get_details(body.path)
+        info = file_system.copy_file_or_directory(body.path, body.new_path)
+        return FileCopyResponse(success=True, info=info)
+    except Exception as e:
+        LOGGER.error(f"Error copying file or directory: {e}")
+        return FileCopyResponse(success=False, message=str(e))
 
 
 @router.post("/move")
@@ -187,11 +231,12 @@ async def move_file_or_directory(
     """
     body = await parse_request(request, cls=FileMoveRequest)
     try:
+        # TODO: Refactor this side-effect based validation to a dedicated validation.
         file_system.get_details(body.path)
         info = file_system.move_file_or_directory(body.path, body.new_path)
         return FileMoveResponse(success=True, info=info)
     except Exception as e:
-        LOGGER.error(f"Error updating file or directory: {e}")
+        LOGGER.error(f"Error moving file or directory: {e}")
         return FileMoveResponse(success=False, message=str(e))
 
 
@@ -218,6 +263,7 @@ async def update_file(
     app_state = AppState(request)
     body = await parse_request(request, cls=FileUpdateRequest)
     try:
+        # TODO: Refactor this side-effect based validation to a dedicated validation.
         file_system.get_details(body.path)
         info = file_system.update_file(body.path, body.contents)
 
@@ -253,6 +299,7 @@ async def open_file(
     """
     body = await parse_request(request, cls=FileOpenRequest)
     try:
+        # TODO: Refactor this side-effect based validation to a dedicated validation.
         file_system.get_details(body.path)
         success = file_system.open_in_editor(body.path, body.line_number)
         return SuccessResponse(success=success)

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager, nullcontext
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 
 from marimo import _loggers
 from marimo._data.get_datasets import get_databases_from_duckdb
@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     import duckdb
+    import polars as pl
 
 # Internal engine names
 INTERNAL_DUCKDB_ENGINE = cast(VariableName, "__marimo_duckdb")
@@ -32,8 +33,8 @@ class DuckDBEngine(SQLConnection[Optional["duckdb.DuckDBPyConnection"]]):
 
     def __init__(
         self,
-        connection: Optional[duckdb.DuckDBPyConnection] = None,
-        engine_name: Optional[VariableName] = None,
+        connection: duckdb.DuckDBPyConnection | None = None,
+        engine_name: VariableName | None = None,
     ) -> None:
         super().__init__(connection, engine_name)
 
@@ -65,7 +66,7 @@ class DuckDBEngine(SQLConnection[Optional["duckdb.DuckDBPyConnection"]]):
 
     @staticmethod
     def execute_and_return_relation(
-        query: str, params: Optional[list[Any]] = None
+        query: str, params: list[Any] | None = None
     ) -> duckdb.DuckDBPyRelation:
         """Execute a query and return a relation. Supports parameters."""
         DependencyManager.duckdb.require("to execute sql")
@@ -83,11 +84,29 @@ class DuckDBEngine(SQLConnection[Optional["duckdb.DuckDBPyConnection"]]):
 
         sql_output_format = self.sql_output_format()
 
+        def to_polars() -> pl.DataFrame:
+            import polars as pl
+
+            # Use the Arrow PyCapsule interface (pl.DataFrame(relation))
+            # instead of relation.pl() so that pyarrow is not required.
+            return pl.DataFrame(relation)
+
+        def to_lazy_polars() -> pl.LazyFrame:
+            # `lazy=True` requires DuckDB >= 1.4 and pyarrow. Fall back to the
+            # Arrow PyCapsule path on older DuckDB or when pyarrow is missing.
+            # batch_size of 100k bounds peak memory at ~10x less than DuckDB's
+            # 1M default while keeping per-batch overhead negligible.
+            try:
+                return relation.pl(batch_size=100_000, lazy=True)
+            except (TypeError, ImportError, ModuleNotFoundError):
+                return to_polars().lazy()
+
         return convert_to_output(
             sql_output_format=sql_output_format,
-            to_polars=lambda: relation.pl(),
+            to_polars=to_polars,
             to_pandas=lambda: relation.df(),
             to_native=lambda: relation,
+            to_lazy_polars=to_lazy_polars,
         )
 
     @staticmethod
@@ -108,7 +127,7 @@ class DuckDBEngine(SQLConnection[Optional["duckdb.DuckDBPyConnection"]]):
             auto_discover_columns=False,
         )
 
-    def get_default_database(self) -> Optional[str]:
+    def get_default_database(self) -> str | None:
         try:
             import duckdb
 
@@ -124,7 +143,7 @@ class DuckDBEngine(SQLConnection[Optional["duckdb.DuckDBPyConnection"]]):
             LOGGER.info("Failed to get current database")
             return None
 
-    def get_default_schema(self) -> Optional[str]:
+    def get_default_schema(self) -> str | None:
         try:
             import duckdb
 
@@ -143,9 +162,9 @@ class DuckDBEngine(SQLConnection[Optional["duckdb.DuckDBPyConnection"]]):
     def get_databases(
         self,
         *,
-        include_schemas: Union[bool, Literal["auto"]],
-        include_tables: Union[bool, Literal["auto"]],
-        include_table_details: Union[bool, Literal["auto"]],
+        include_schemas: bool | Literal["auto"],
+        include_tables: bool | Literal["auto"],
+        include_table_details: bool | Literal["auto"],
     ) -> list[Database]:
         """Fetch all databases from the engine. At the moment, will fetch everything."""
         _, _, _ = include_schemas, include_tables, include_table_details
@@ -162,24 +181,40 @@ class DuckDBEngine(SQLConnection[Optional["duckdb.DuckDBPyConnection"]]):
     def get_schemas(
         self,
         *,
-        database: Optional[str],
+        database: str | None,
         include_tables: bool,
         include_table_details: bool,
+        schema_path: list[str] | None = None,
     ) -> list[Schema]:
         """Get all schemas and optionally their tables. Keys are schema names."""
-        _, _, _ = database, include_tables, include_table_details
+        _, _, _, _ = (
+            database,
+            include_tables,
+            include_table_details,
+            schema_path,
+        )
         return []
 
     def get_tables_in_schema(
-        self, *, schema: str, database: str, include_table_details: bool
+        self,
+        *,
+        schema: str,
+        database: str,
+        include_table_details: bool,
+        schema_path: list[str] | None = None,
     ) -> list[DataTable]:
         """Return all tables in a schema. This is currently implemented in get_databases_from_duckdb."""
-        _, _, _ = database, schema, include_table_details
+        _, _, _, _ = database, schema, include_table_details, schema_path
         return []
 
     def get_table_details(
-        self, *, table_name: str, schema_name: str, database_name: str
-    ) -> Optional[DataTable]:
+        self,
+        *,
+        table_name: str,
+        schema_name: str,
+        database_name: str,
+        schema_path: list[str] | None = None,
+    ) -> DataTable | None:
         """Get a single table from the engine. This is currently implemented in get_databases_from_duckdb."""
-        _, _, _ = table_name, schema_name, database_name
+        _, _, _, _ = table_name, schema_name, database_name, schema_path
         return None

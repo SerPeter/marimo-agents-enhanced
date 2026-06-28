@@ -11,7 +11,9 @@ from marimo._sql.engines.adbc import (
     AdbcConnectionCatalog,
     AdbcDBAPIEngine,
     _adbc_info_to_dialect,
+    _schema_field_to_data_type,
 )
+from marimo._sql.engines.types import default_inference_config
 from marimo._sql.get_engines import get_engines_from_variables
 from marimo._types.ids import VariableName
 
@@ -229,12 +231,55 @@ def test_adbc_info_to_dialect() -> None:
         _adbc_info_to_dialect(info={"vendor_name": "Microsoft SQL Server"})
         == "microsoft sql server"
     )
+    assert _adbc_info_to_dialect(info={"vendor_name": "Dremio"}) == "dremio"
 
     # Missing/blank/non-string vendor_name falls back to "sql".
     assert _adbc_info_to_dialect(info={"vendor_name": "   "}) == "sql"
     assert _adbc_info_to_dialect(info={"vendor_name": 123}) == "sql"
     assert _adbc_info_to_dialect(info={"driver_name": "AcmeDB"}) == "sql"
     assert _adbc_info_to_dialect(info={}) == "sql"
+
+
+@pytest.mark.parametrize(
+    "external_type",
+    [
+        "list<$data$: bool not null>",
+        "list<$data$: int64 not null>",
+        "large_list<$data$: double>",
+        "fixed_size_list<item: string>[3]",
+        "array<int32>",
+        "int64[]",
+        " struct<id: int64, enabled: bool> ",
+        "struct<id: int64, enabled: bool>",
+        "map<string, int64>",
+    ],
+)
+def test_schema_field_to_data_type_returns_unknown_for_nested_types(
+    external_type: str,
+) -> None:
+    assert _schema_field_to_data_type(external_type) == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("external_type", "data_type"),
+    [
+        ("int8", "integer"),
+        ("int64", "integer"),
+        ("uint32", "integer"),
+        ("uint64", "integer"),
+        ("string", "string"),
+        ("large_string", "string"),
+        ("binary", "string"),
+        ("fixed_size_binary[16]", "string"),
+        ("interval", "unknown"),
+        ("dictionary<values=string, indices=int8, ordered=0>", "unknown"),
+        ("bool", "boolean"),
+    ],
+)
+def test_schema_field_to_data_type_handles_scalar_types(
+    external_type: str, data_type: str
+) -> None:
+    assert _schema_field_to_data_type(external_type) == data_type
 
 
 def test_get_engines_from_variables_prefers_adbc_dbapi_engine() -> None:
@@ -392,6 +437,18 @@ def test_adbc_is_compatible_does_not_create_cursor() -> None:
     assert conn._cursor.did_execute is False  # type: ignore[attr-defined]
     assert conn._cursor.did_fetch_arrow is False  # type: ignore[attr-defined]
     assert conn._cursor.did_close is True  # type: ignore[attr-defined]
+
+
+def test_adbc_engine_uses_default_inference_config() -> None:
+    """ADBC shares the default discovery config (see #9775)."""
+    conn = FakeAdbcDbApiConnection(
+        cursor=FakeAdbcDbApiCursor(description=None),
+        objects_pylist=[],
+        table_schema=FakeAdbcTableSchema([]),
+    )
+    engine = AdbcDBAPIEngine(conn)
+    assert engine.inference_config == default_inference_config()
+    assert engine.inference_config.auto_discover_schemas == "auto"
 
 
 def test_adbc_catalog_auto_discovery_uses_cheap_dialect_heuristic() -> None:

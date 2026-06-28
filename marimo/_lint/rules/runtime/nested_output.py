@@ -30,18 +30,18 @@ _NESTING_NODES = (
 
 
 class NestedOutputRule(LintRule):
-    """MR004: Marimo output call nested inside control flow without assignment.
+    """MR005: Marimo output call nested inside control flow without assignment.
 
-    Detects ``mo.*`` output calls (``mo.md()``, ``mo.ui.slider()``, etc.)
-    that appear as bare expression statements inside ``if``, ``for``,
-    ``while``, ``with``, ``def``, ``class``, ``try``, or ``match`` blocks.
+    Detects `mo.*` output calls (`mo.md()`, `mo.ui.slider()`, etc.)
+    that appear as bare expression statements inside `if`, `for`,
+    `while`, `with`, `def`, `class`, `try`, or `match` blocks.
     These calls create output objects that are immediately discarded because
     they are neither assigned to a variable nor returned.
 
     ## Why is this bad?
 
     The user almost certainly intended the output to be visible. A
-    ``mo.md("Hello")`` inside an ``if`` block executes but produces no
+    `mo.md("Hello")` inside an `if` block executes but produces no
     visible result — a subtle, confusing bug.
 
     ## Examples
@@ -76,7 +76,7 @@ class NestedOutputRule(LintRule):
 
     mo.stop(mo.md("Unauthorized"))  # mo.stop() argument
 
-    mo.md("# Title")  # Top-level (see MR003)
+    mo.md("# Title")  # Top-level (see MR004)
     ```
 
     ## References
@@ -84,7 +84,7 @@ class NestedOutputRule(LintRule):
     - [Outputs Guide](https://docs.marimo.io/guides/outputs/)
     """
 
-    code = "MR004"
+    code = "MR005"
     name = "nested-marimo-output"
     description = "Marimo output call inside control flow is not assigned and will be discarded"
     severity = Severity.RUNTIME

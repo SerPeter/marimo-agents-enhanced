@@ -7,7 +7,7 @@ CellNotificationUtils for cell-related broadcasts.
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from marimo import _loggers as loggers
@@ -39,7 +39,7 @@ LOGGER = loggers.marimo_logger()
 
 
 def broadcast_notification(
-    notification: NotificationMessage, stream: Optional[Stream] = None
+    notification: NotificationMessage, stream: Stream | None = None
 ) -> None:
     """Broadcast a notification to the stream."""
     if stream is None:
@@ -112,8 +112,8 @@ class CellNotificationUtils:
         channel: CellChannel,
         mimetype: KnownMimeType,
         data: str,
-        cell_id: Optional[CellId_t],
-        status: Optional[RuntimeStateType],
+        cell_id: CellId_t | None,
+        status: RuntimeStateType | None,
         stream: Stream | None = None,
     ) -> None:
         # Import here to avoid circular dependency
@@ -141,8 +141,8 @@ class CellNotificationUtils:
 
     @staticmethod
     def broadcast_empty_output(
-        cell_id: Optional[CellId_t],
-        status: Optional[RuntimeStateType],
+        cell_id: CellId_t | None,
+        status: RuntimeStateType | None,
         stream: Stream | None = None,
     ) -> None:
         # Import here to avoid circular dependency
@@ -166,8 +166,8 @@ class CellNotificationUtils:
         channel: CellChannel,
         mimetype: KnownMimeType,
         data: str,
-        cell_id: Optional[CellId_t],
-        status: Optional[RuntimeStateType],
+        cell_id: CellId_t | None,
+        status: RuntimeStateType | None,
         stream: Stream | None = None,
     ) -> None:
         # Import here to avoid circular dependency
@@ -222,7 +222,7 @@ class CellNotificationUtils:
         # Import here to avoid circular dependency
         from marimo._messaging.notification import CellNotification
 
-        console: Optional[list[CellOutput]] = [] if clear_console else None
+        console: list[CellOutput] | None = [] if clear_console else None
 
         # In run mode, we don't want to broadcast the error. Instead we want to print the error to the console
         # and then broadcast a new error such that the data is hidden.
@@ -291,8 +291,27 @@ class CellNotificationUtils:
         # Import here to avoid circular dependency
         from marimo._messaging.notification import CellNotification
 
-        status: Optional[TopLevelHints] = serialization.hint
+        status: TopLevelHints | None = serialization.hint
         broadcast_notification(
             CellNotification(cell_id=cell_id, serialization=str(status)),
+            stream,
+        )
+
+    @staticmethod
+    def broadcast_serialization_cleared(
+        cell_id: CellId_t,
+        stream: Stream | None = None,
+    ) -> None:
+        """Clear a cell's reusability hint (it is no longer a top-level def).
+
+        Sends an explicit None: in the partial-update cell-op contract a
+        missing field means "unchanged", so a concrete None is required to
+        remove a previously shown hint.
+        """
+        # Import here to avoid circular dependency
+        from marimo._messaging.notification import CellNotification
+
+        broadcast_notification(
+            CellNotification(cell_id=cell_id, serialization=None),
             stream,
         )

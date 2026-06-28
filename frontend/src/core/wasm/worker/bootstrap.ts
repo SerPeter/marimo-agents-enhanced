@@ -9,6 +9,7 @@ import { WasmFileSystem } from "./fs";
 import { getMarimoWheel } from "./getMarimoWheel";
 import { t } from "./tracer";
 import type { SerializedBridge, WasmController } from "./types";
+import { shouldLoadDuckDBPackages } from "../utils";
 
 const MAKE_SNAPSHOT = false;
 
@@ -54,6 +55,10 @@ export class DefaultWasmController implements WasmController {
     // Load pyodide and packages
     const span = t.startSpan("loadPyodide");
     try {
+      // Without this, this fails in Firefox with
+      // `Could not extract indexURL path from pyodide module`
+      // This fixes for Firefox and does not break Chrome/others
+      const indexURL = `https://cdn.jsdelivr.net/pyodide/${opts.pyodideVersion}/full/`;
       const pyodide = await loadPyodide({
         // Perf: These get loaded while pyodide is being bootstrapped
         packages: [
@@ -67,10 +72,14 @@ export class DefaultWasmController implements WasmController {
         ],
         _makeSnapshot: MAKE_SNAPSHOT,
         lockFileURL: `https://wasm.marimo.app/pyodide-lock.json?v=${opts.version}&pyodide=${opts.pyodideVersion}`,
-        // Without this, this fails in Firefox with
-        // `Could not extract indexURL path from pyodide module`
-        // This fixes for Firefox and does not break Chrome/others
-        indexURL: `https://cdn.jsdelivr.net/pyodide/${opts.pyodideVersion}/full/`,
+        indexURL,
+        // Since Pyodide 0.28.0, when lockFileURL is set, the package base URL
+        // defaults to the lockfile's URL (wasm.marimo.app) instead of indexURL.
+        // Unlike Node, browsers get no CDN fallback on a failed fetch, so we
+        // should pin packageBaseUrl back to the jsDelivr CDN  to restore
+        // the resolution akin to pre-0.28.
+        packageBaseUrl: indexURL,
+        convertNullToNone: true,
       });
       this.pyodide = pyodide;
       span.end("ok");
@@ -163,8 +172,8 @@ export class DefaultWasmController implements WasmController {
   private async loadNotebookDeps(code: string, foundPackages: Set<string>) {
     const pyodide = this.requirePyodide;
 
-    if (code.includes("mo.sql")) {
-      // We need pandas and duckdb for mo.sql
+    if (shouldLoadDuckDBPackages(code, foundPackages)) {
+      // We need pandas and duckdb for mo.sql and for remote duckdb sources
       code = `import pandas\n${code}`;
       code = `import duckdb\n${code}`;
       code = `import sqlglot\n${code}`;

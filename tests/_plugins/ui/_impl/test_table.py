@@ -12,7 +12,10 @@ import pytest
 from marimo._data.models import ValueCount
 from marimo._dependencies.dependencies import DependencyManager
 from marimo._plugins import ui
-from marimo._plugins.ui._impl.dataframes.transforms.types import Condition
+from marimo._plugins.ui._impl.dataframes.transforms.types import (
+    FilterCondition,
+    FilterGroup,
+)
 from marimo._plugins.ui._impl.table import (
     CHART_MAX_ROWS_STRING_VALUE_COUNTS,
     DEFAULT_MAX_COLUMNS,
@@ -119,7 +122,7 @@ def test_normalize_data(executing_kernel: Kernel) -> None:
     assert str(e.value) == "data must be a list or tuple or a dict of lists."
 
     # Test with invalid data structure
-    data3: Any = [set([1, 2, 3])]
+    data3: Any = [{1, 2, 3}]
     with pytest.raises(ValueError) as e:
         _normalize_data(data3)
     assert (
@@ -1009,7 +1012,7 @@ def test_show_column_summaries_modes():
 class TestTableBinValues:
     @pytest.mark.parametrize(
         "df",
-        create_dataframes({"a": [None] * 20}, exclude=["duckdb"]),
+        create_dataframes({"a": [None] * 20}),
     )
     def test_bin_values_all_nulls(self, df: Any) -> None:
         table = ui.table(df)
@@ -1109,6 +1112,170 @@ def test_table_with_frozen_columns() -> None:
     assert table._component_args["freeze-columns-right"] == ["d", "e"]
 
 
+@pytest.mark.skipif(
+    not DependencyManager.pandas.has(), reason="Pandas not installed"
+)
+class TestFrozenRowHeaders:
+    def test_freeze_unnamed_pandas_index_rejected(self) -> None:
+        import pandas as pd
+
+        df = pd.DataFrame({"a": [1, 2, 3]}, index=["x", "y", "z"])
+        with pytest.raises(ValueError, match="unnamed row index"):
+            ui.table(df, freeze_columns_left=[""])
+
+    def test_freeze_named_pandas_index(self) -> None:
+        import pandas as pd
+
+        df = pd.DataFrame(
+            {"a": [1, 2]}, index=pd.Index(["x", "y"], name="foo")
+        )
+        table = ui.table(df, freeze_columns_left=["foo"])
+        assert table._component_args["freeze-columns-left"] == ["foo"]
+
+    def test_freeze_multiindex_levels(self) -> None:
+        import pandas as pd
+
+        df = pd.DataFrame(
+            {"v": [1, 2, 3, 4]},
+            index=pd.MultiIndex.from_tuples(
+                [("a", 1), ("a", 2), ("b", 1), ("b", 2)], names=["g", "n"]
+            ),
+        )
+        table = ui.table(df, freeze_columns_left=["g", "n"])
+        assert table._component_args["freeze-columns-left"] == ["g", "n"]
+
+    def test_freeze_collision_suffixed_index(self) -> None:
+        import pandas as pd
+
+        # Index name 'a' collides with a column named 'a'; the row-header
+        # name is suffixed to '_index' (see _resolve_index_name).
+        df = pd.DataFrame({"a": [1, 2]}, index=pd.Index(["x", "y"], name="a"))
+        table = ui.table(df, freeze_columns_left=["a_index"])
+        assert table._component_args["freeze-columns-left"] == ["a_index"]
+
+    def test_freeze_index_and_column_mixed(self) -> None:
+        import pandas as pd
+
+        df = pd.DataFrame(
+            {"a": [1, 2], "b": [3, 4]},
+            index=pd.Index(["x", "y"], name="foo"),
+        )
+        table = ui.table(
+            df,
+            freeze_columns_left=["foo", "a"],
+            freeze_columns_right=["b"],
+        )
+        assert table._component_args["freeze-columns-left"] == ["foo", "a"]
+        assert table._component_args["freeze-columns-right"] == ["b"]
+
+    def test_freeze_row_header_on_right_raises(self) -> None:
+        import pandas as pd
+
+        df = pd.DataFrame(
+            {"a": [1, 2]}, index=pd.Index(["x", "y"], name="foo")
+        )
+        with pytest.raises(
+            ValueError, match="row headers always render on the left"
+        ):
+            ui.table(df, freeze_columns_right=["foo"])
+
+    def test_freeze_unknown_column_still_raises(self) -> None:
+        import pandas as pd
+
+        df = pd.DataFrame(
+            {"a": [1, 2]}, index=pd.Index(["x", "y"], name="foo")
+        )
+        with pytest.raises(ValueError, match="not found in table"):
+            ui.table(df, freeze_columns_left=["nonexistent"])
+
+
+@pytest.mark.skipif(
+    not DependencyManager.polars.has(), reason="Polars not installed"
+)
+def test_freeze_columns_polars_regression() -> None:
+    import polars as pl
+
+    df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    table = ui.table(df, freeze_columns_left=["a"])
+    assert table._component_args["freeze-columns-left"] == ["a"]
+
+
+def test_table_with_hidden_columns() -> None:
+    data = {"a": [1, 2, 3], "b": [4, 5, 6], "c": [7, 8, 9]}
+    table = ui.table(data, hidden_columns=["b"])
+    assert table._component_args["hidden-columns"] == ["b"]
+
+
+def test_table_with_visible_columns_normalizes_to_hidden() -> None:
+    data = {"a": [1, 2, 3], "b": [4, 5, 6], "c": [7, 8, 9]}
+    table = ui.table(data, visible_columns=["a"])
+    assert sorted(table._component_args["hidden-columns"]) == ["b", "c"]
+
+
+def test_table_hidden_columns_empty_list() -> None:
+    data = {"a": [1, 2, 3]}
+    table = ui.table(data, hidden_columns=[])
+    assert table._component_args["hidden-columns"] == []
+
+
+def test_table_no_visibility_kwargs_emits_empty_list() -> None:
+    data = {"a": [1, 2, 3]}
+    table = ui.table(data)
+    assert table._component_args["hidden-columns"] == []
+
+
+def test_table_hidden_and_visible_columns_mutually_exclusive() -> None:
+    data = {"a": [1, 2, 3], "b": [4, 5, 6]}
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        ui.table(data, hidden_columns=["a"], visible_columns=["b"])
+
+
+def test_table_hidden_columns_unknown_column_raises() -> None:
+    data = {"a": [1, 2, 3]}
+    with pytest.raises(ValueError, match="not found in table"):
+        ui.table(data, hidden_columns=["xyz"])
+
+
+def test_table_visible_columns_unknown_column_raises() -> None:
+    data = {"a": [1, 2, 3]}
+    with pytest.raises(ValueError, match="not found in table"):
+        ui.table(data, visible_columns=["xyz"])
+
+
+def test_table_hidden_columns_deduplicates() -> None:
+    data = {"a": [1, 2, 3], "b": [4, 5, 6]}
+    table = ui.table(data, hidden_columns=["a", "a"])
+    assert table._component_args["hidden-columns"] == ["a"]
+
+
+def test_table_hidden_columns_does_not_affect_value() -> None:
+    data = {"a": [1, 2, 3], "b": [4, 5, 6]}
+    table = ui.table(data, hidden_columns=["b"], selection="single")
+    payload_data = table._component_args["data"]
+    if isinstance(payload_data, str):
+        rows = json.loads(payload_data)
+    else:
+        rows = payload_data
+    assert all("b" in row for row in rows)
+
+
+@pytest.mark.skipif(
+    not DependencyManager.pandas.has(), reason="Pandas not installed"
+)
+def test_table_hidden_columns_row_header_raises() -> None:
+    import pandas as pd
+
+    name = "index"
+    df = pd.DataFrame(
+        {"a": [1, 2, 3]}, index=pd.Index(["x", "y", "z"], name=name)
+    )
+    with pytest.raises(
+        ValueError,
+        match=f"Cannot control visibility for row index '{name}'",
+    ):
+        ui.table(df, hidden_columns=[name])
+
+
 @pytest.mark.parametrize(
     "df",
     create_dataframes({"a": [1, 2, 3], "b": ["abc", "def", None]}),
@@ -1117,7 +1284,18 @@ def test_table_with_filtered_columns(df: Any) -> None:
     table = ui.table(df)
     result = table._search(
         SearchTableArgs(
-            filters=[Condition(column_id="b", operator="contains", value="f")],
+            filters=FilterGroup(
+                type="group",
+                operator="and",
+                children=[
+                    FilterCondition(
+                        type="condition",
+                        column_id="b",
+                        operator="contains",
+                        value="f",
+                    )
+                ],
+            ),
             page_size=10,
             page_number=0,
         )
@@ -1245,7 +1423,56 @@ def test_show_download(df: Any) -> None:
     assert table_false._component_args["show-download"] is False
 
 
-DOWNLOAD_FORMATS = ["csv", "json", "parquet"]
+@pytest.mark.parametrize(
+    "df",
+    create_dataframes(
+        {"a": [1, 2, 3], "b": [4, 5, 6]},
+    ),
+)
+def test_show_search(df: Any) -> None:
+    table_default = ui.table(df)
+    assert table_default._component_args["show-search"] is True
+
+    table_true = ui.table(df, show_search=True)
+    assert table_true._component_args["show-search"] is True
+
+    table_false = ui.table(df, show_search=False)
+    assert table_false._component_args["show-search"] is False
+
+
+@pytest.mark.parametrize(
+    "df",
+    create_dataframes(
+        {"a": [1, 2, 3], "b": [4, 5, 6]},
+    ),
+)
+def test_display_config_unpacks(df: Any) -> None:
+    cfg = ui.table.Display(show_search=False, show_download=False)
+    assert cfg == {"show_search": False, "show_download": False}
+
+    t = ui.table(df, **cfg)
+    assert t._component_args["show-search"] is False
+    assert t._component_args["show-download"] is False
+
+    # Deriving a variant leaves the original untouched
+    variant = {**cfg, "show_column_summaries": False}
+    assert "show_column_summaries" not in cfg
+    t2 = ui.table(df, **variant)
+    assert t2._component_args["show-search"] is False
+    assert t2._component_args["show-column-summaries"] is False
+
+
+DOWNLOAD_FORMATS = ["csv", "tsv", "json", "parquet"]
+
+# Parquet export requires pandas+pyarrow or polars (see the `_download_as`
+# short-circuit in `table.py`). In environments without those — e.g. the
+# `test` group, which has only pyarrow — skip parquet in the round-trip.
+_CAN_EXPORT_PARQUET = DependencyManager.polars.has() or (
+    DependencyManager.pandas.has() and DependencyManager.pyarrow.has()
+)
+_TESTABLE_DOWNLOAD_FORMATS = (
+    DOWNLOAD_FORMATS if _CAN_EXPORT_PARQUET else ["csv", "tsv", "json"]
+)
 
 
 @pytest.mark.parametrize(
@@ -1318,10 +1545,26 @@ def test_download_as(df: Any) -> None:
                 import pyarrow.csv as pacsv
 
                 return pacsv.read_csv(buffer)
+        elif format_type == "tsv":
+            if DependencyManager.pandas.has():
+                import pandas as pd
+
+                return pd.read_csv(buffer, sep="\t")
+            elif DependencyManager.polars.has():
+                import polars as pl
+
+                return pl.read_csv(buffer, separator="\t")
+            elif DependencyManager.pyarrow.has():
+                import pyarrow.csv as pacsv
+
+                return pacsv.read_csv(
+                    buffer,
+                    parse_options=pacsv.ParseOptions(delimiter="\t"),
+                )
         raise ValueError(f"Unsupported format: {format_type}")
 
     # Test base downloads (full data)
-    for format_type in DOWNLOAD_FORMATS:
+    for format_type in _TESTABLE_DOWNLOAD_FORMATS:
         downloaded_df = download_and_convert(format_type, table)
         downloaded_nw = nw.from_native(downloaded_df)
         assert len(downloaded_nw) == len(nw_df)
@@ -1329,7 +1572,7 @@ def test_download_as(df: Any) -> None:
 
     # Test downloads with search filter
     table._search(SearchTableArgs(query="New", page_size=10, page_number=0))
-    for format_type in DOWNLOAD_FORMATS:
+    for format_type in _TESTABLE_DOWNLOAD_FORMATS:
         filtered_df = download_and_convert(format_type, table)
         filtered_nw = nw.from_native(filtered_df)
         assert len(filtered_nw) == 2
@@ -1338,12 +1581,63 @@ def test_download_as(df: Any) -> None:
 
     # Test downloads with row selection (includes search from before)
     table._convert_value(["1"])  # select one row of the filtered view
-    for format_type in DOWNLOAD_FORMATS:
+    for format_type in _TESTABLE_DOWNLOAD_FORMATS:
         selected_df = download_and_convert(format_type, table)
         selected_nw = nw.from_native(selected_df)
         # For row selection, selection is respected (single row)
         assert len(selected_nw) == 1
         assert selected_nw["cities"][0] == "New York"
+
+
+def test_get_size_bytes_rpc_extrapolates_from_sample() -> None:
+    from marimo._plugins.ui._impl.table import GetSizeBytesResponse
+    from marimo._plugins.ui._impl.tables.table_manager import (
+        SIZE_ESTIMATE_SAMPLE_ROWS,
+    )
+
+    small = ui.table([{"a": i} for i in range(SIZE_ESTIMATE_SAMPLE_ROWS)])
+    large = ui.table([{"a": i} for i in range(SIZE_ESTIMATE_SAMPLE_ROWS * 10)])
+
+    resp_small = small._get_size_bytes(EmptyArgs())
+    resp_large = large._get_size_bytes(EmptyArgs())
+
+    assert isinstance(resp_small, GetSizeBytesResponse)
+    assert isinstance(resp_large, GetSizeBytesResponse)
+    assert resp_small.size_bytes is not None
+    assert resp_large.size_bytes is not None
+    ratio = resp_large.size_bytes / resp_small.size_bytes
+    assert 7.5 < ratio < 12.5, f"unexpected ratio {ratio}"
+
+
+def test_get_size_bytes_rpc_uses_searched_manager() -> None:
+    data = [{"a": i, "b": "match" if i < 5 else "miss"} for i in range(50)]
+    t = ui.table(data)
+
+    full = t._get_size_bytes(EmptyArgs()).size_bytes
+    t._search(SearchTableArgs(query="match", page_size=5, page_number=0))
+    filtered = t._get_size_bytes(EmptyArgs()).size_bytes
+
+    assert full is not None
+    assert filtered is not None
+    assert filtered < full
+
+
+def test_get_size_bytes_rpc_returns_none_on_serialization_failure() -> None:
+    from unittest.mock import patch
+
+    from marimo._plugins.ui._impl.table import GetSizeBytesResponse
+
+    t = ui.table([{"a": 1}])
+    manager_cls = type(t._manager)
+
+    def _raise(*_args: object, **_kwargs: object) -> str:
+        raise RuntimeError("boom")
+
+    with patch.object(manager_cls, "to_json_str", _raise):
+        resp = t._get_size_bytes(EmptyArgs())
+
+    assert isinstance(resp, GetSizeBytesResponse)
+    assert resp.size_bytes is None
 
 
 def test_download_as_ignores_cell_selection() -> None:
@@ -1360,6 +1654,40 @@ def test_download_as_ignores_cell_selection() -> None:
     assert isinstance(rows, list)
     assert len(rows) == 1
     assert int(rows[0]["a"]) == 2
+
+
+def test_download_as_parquet_without_libs_reports_missing_packages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(DependencyManager.pandas, "has", lambda: False)
+    monkeypatch.setattr(DependencyManager.polars, "has", lambda: False)
+    monkeypatch.setattr(DependencyManager.pyarrow, "has", lambda: False)
+
+    table = ui.table([{"a": 1}])
+    response = table._download_as(DownloadAsArgs(format="parquet"))
+
+    assert response.url == ""
+    assert response.filename == ""
+    assert response.missing_packages == ["polars"]
+    assert response.error is not None
+    assert "polars" in response.error
+
+
+def test_download_as_parquet_with_pandas_only_prompts_pyarrow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(DependencyManager.pandas, "has", lambda: True)
+    monkeypatch.setattr(DependencyManager.polars, "has", lambda: False)
+    monkeypatch.setattr(DependencyManager.pyarrow, "has", lambda: False)
+
+    table = ui.table([{"a": 1}])
+    response = table._download_as(DownloadAsArgs(format="parquet"))
+
+    assert response.url == ""
+    assert response.filename == ""
+    assert response.missing_packages == ["pyarrow"]
+    assert response.error is not None
+    assert "pyarrow" in response.error
 
 
 @pytest.mark.skipif(
@@ -1382,7 +1710,7 @@ def test_download_as_for_supported_cell_selection() -> None:
 )
 @pytest.mark.parametrize(
     "fmt",
-    ["csv", "json", "parquet"],
+    ["csv", "tsv", "json", "parquet"],
 )
 def test_download_as_for_dataframes(df: Any, fmt: str) -> None:
     table = ui.table(df)
@@ -1641,7 +1969,15 @@ def test_selection_with_clamped_columns_and_filter(df: Any):
     search_args = SearchTableArgs(
         page_size=10,
         page_number=0,
-        filters=[Condition(column_id="age", operator=">=", value=30)],
+        filters=FilterGroup(
+            type="group",
+            operator="and",
+            children=[
+                FilterCondition(
+                    type="condition", column_id="age", operator=">=", value=30
+                )
+            ],
+        ),
     )
     response = table._search(search_args)
     result_data = json.loads(response.data)
@@ -2134,6 +2470,8 @@ def test_lazy_dataframe(df: Any) -> None:
         assert table._component_args["show-page-size-selector"] is False
         assert table._component_args["show-column-explorer"] is False
         assert table._component_args["show-chart-builder"] is False
+        # Search is pushed down to the lazy backend, so it stays available.
+        assert table._component_args["show-search"] is True
 
         # Verify that search response indicates "too_many" for total_rows
         # but returns the preview rows
@@ -2171,10 +2509,14 @@ def test_lazy_dataframe_with_non_lazy_dataframe(df: Any):
 def test_get_data_url_no_deps() -> None:
     table = ui.table([1, 2, 3])
     response = table._get_data_url({})
-    assert response.data_url.startswith("data:application/json;base64,")
-    data = json.loads(from_data_uri(response.data_url)[1])
-    assert data == [{"value": 1}, {"value": 2}, {"value": 3}]
-    assert response.format == "json"
+    # DefaultTableManager.to_csv_str uses the stdlib csv module and works
+    # without pandas/polars/pyarrow, so _to_chart_data_url returns CSV before
+    # falling through to JSON.
+    assert response.data_url.startswith("data:text/csv;base64,")
+    assert from_data_uri(response.data_url)[1].decode("utf-8") == (
+        "value\n1\n2\n3\n"
+    )
+    assert response.format == "csv"
 
 
 @pytest.mark.skipif(
@@ -2201,7 +2543,7 @@ def test_get_data_url_values() -> None:
     from pandas.testing import assert_frame_equal
 
     df = _convert_data_bytes_to_pandas_df(response.data_url, response.format)
-    expected_df = pd.DataFrame({0: [1, 2, 3]})
+    expected_df = pd.DataFrame({"value": [1, 2, 3]})
     assert_frame_equal(df, expected_df)
 
     # Test search
@@ -2240,6 +2582,119 @@ def test_calculate_top_k_rows():
     )
     assert result == CalculateTopKRowsResponse(
         data=[(3, 2), (None, 2), (1, 1)],
+    )
+
+
+_TOP_K_DATA = {
+    "role": ["admin", "admin", "user", "user", "guest"],
+    "country": ["US", "UK", "US", "US", "UK"],
+}
+
+
+def _filter_role_in(values: list[str]) -> FilterGroup:
+    return FilterGroup(
+        type="group",
+        operator="and",
+        children=[
+            FilterCondition(
+                type="condition",
+                column_id="role",
+                operator="in",
+                value=values,
+            )
+        ],
+    )
+
+
+def _filter_country_eq(value: str) -> FilterGroup:
+    return FilterGroup(
+        type="group",
+        operator="and",
+        children=[
+            FilterCondition(
+                type="condition",
+                column_id="country",
+                operator="equals",
+                value=value,
+            )
+        ],
+    )
+
+
+@pytest.mark.parametrize("df", create_dataframes(_TOP_K_DATA))
+def test_top_k_ignores_same_column_filter(df: Any) -> None:
+    """Editing a filter on a column must not hide values the filter excludes."""
+    table = ui.table(df)
+    table._search(
+        SearchTableArgs(
+            page_size=10,
+            page_number=0,
+            filters=_filter_role_in(["admin", "user"]),
+        )
+    )
+    result = table._calculate_top_k_rows(
+        CalculateTopKRowsArgs(column="role", k=10)
+    )
+    # `guest` is excluded by the active filter but must still appear,
+    # otherwise users can't broaden the filter back out.
+    assert result == CalculateTopKRowsResponse(
+        data=[("admin", 2), ("user", 2), ("guest", 1)],
+    )
+
+
+@pytest.mark.parametrize("df", create_dataframes(_TOP_K_DATA))
+def test_top_k_respects_other_column_filter(df: Any) -> None:
+    table = ui.table(df)
+    table._search(
+        SearchTableArgs(
+            page_size=10,
+            page_number=0,
+            filters=_filter_country_eq("UK"),
+        )
+    )
+    result = table._calculate_top_k_rows(
+        CalculateTopKRowsArgs(column="role", k=10)
+    )
+    # Only UK rows survive: admin (UK) and guest (UK).
+    assert result == CalculateTopKRowsResponse(
+        data=[("admin", 1), ("guest", 1)],
+    )
+
+
+@pytest.mark.parametrize("df", create_dataframes(_TOP_K_DATA))
+def test_top_k_strips_self_filter_keeps_others(df: Any) -> None:
+    table = ui.table(df)
+    table._search(
+        SearchTableArgs(
+            page_size=10,
+            page_number=0,
+            filters=FilterGroup(
+                type="group",
+                operator="and",
+                children=[
+                    FilterCondition(
+                        type="condition",
+                        column_id="role",
+                        operator="in",
+                        value=["admin", "user"],
+                    ),
+                    FilterCondition(
+                        type="condition",
+                        column_id="country",
+                        operator="equals",
+                        value="UK",
+                    ),
+                ],
+            ),
+        )
+    )
+    result = table._calculate_top_k_rows(
+        CalculateTopKRowsArgs(column="role", k=10)
+    )
+    # `role` filter is stripped, `country == UK` still applies:
+    # UK rows are admin + guest. `guest` reappears because role filter is ignored.
+    assert result == CalculateTopKRowsResponse(
+        data=[("admin", 1), ("guest", 1)],
     )
 
 
@@ -2357,7 +2812,15 @@ def test_max_columns_not_provided_with_filters(df: Any):
     search_args = SearchTableArgs(
         page_size=10,
         page_number=0,
-        filters=[Condition(column_id="col0", operator="==", value=1)],
+        filters=FilterGroup(
+            type="group",
+            operator="and",
+            children=[
+                FilterCondition(
+                    type="condition", column_id="col0", operator="==", value=1
+                )
+            ],
+        ),
         max_columns=MAX_COLUMNS_NOT_PROVIDED,
     )
     response = table._search(search_args)
@@ -2369,7 +2832,15 @@ def test_max_columns_not_provided_with_filters(df: Any):
     search_args = SearchTableArgs(
         page_size=10,
         page_number=0,
-        filters=[Condition(column_id="col0", operator="==", value=1)],
+        filters=FilterGroup(
+            type="group",
+            operator="and",
+            children=[
+                FilterCondition(
+                    type="condition", column_id="col0", operator="==", value=1
+                )
+            ],
+        ),
         max_columns=20,
     )
     response = table._search(search_args)
@@ -2381,7 +2852,15 @@ def test_max_columns_not_provided_with_filters(df: Any):
     search_args = SearchTableArgs(
         page_size=10,
         page_number=0,
-        filters=[Condition(column_id="col0", operator="==", value=1)],
+        filters=FilterGroup(
+            type="group",
+            operator="and",
+            children=[
+                FilterCondition(
+                    type="condition", column_id="col0", operator="==", value=1
+                )
+            ],
+        ),
         max_columns=None,
     )
     response = table._search(search_args)
@@ -2405,16 +2884,30 @@ def test_filters_with_nonexistent_columns(df: Any):
     search_args = SearchTableArgs(
         page_size=10,
         page_number=0,
-        filters=[
-            Condition(column_id="a", operator="==", value=1),  # exists
-            Condition(
-                column_id="nonexistent", operator="==", value=10
-            ),  # doesn't exist
-            Condition(column_id="b", operator=">=", value=4),  # exists
-            Condition(
-                column_id="missing_col", operator="!=", value=0
-            ),  # doesn't exist
-        ],
+        filters=FilterGroup(
+            type="group",
+            operator="and",
+            children=[
+                FilterCondition(
+                    type="condition", column_id="a", operator="==", value=1
+                ),  # exists
+                FilterCondition(
+                    type="condition",
+                    column_id="nonexistent",
+                    operator="==",
+                    value=10,
+                ),  # doesn't exist
+                FilterCondition(
+                    type="condition", column_id="b", operator=">=", value=4
+                ),  # exists
+                FilterCondition(
+                    type="condition",
+                    column_id="missing_col",
+                    operator="!=",
+                    value=0,
+                ),  # doesn't exist
+            ],
+        ),
     )
 
     # Should not raise an error and should apply only the valid filters
@@ -2432,10 +2925,24 @@ def test_filters_with_nonexistent_columns(df: Any):
     search_args_all_invalid = SearchTableArgs(
         page_size=10,
         page_number=0,
-        filters=[
-            Condition(column_id="nonexistent1", operator="==", value=1),
-            Condition(column_id="nonexistent2", operator="!=", value=2),
-        ],
+        filters=FilterGroup(
+            type="group",
+            operator="and",
+            children=[
+                FilterCondition(
+                    type="condition",
+                    column_id="nonexistent1",
+                    operator="==",
+                    value=1,
+                ),
+                FilterCondition(
+                    type="condition",
+                    column_id="nonexistent2",
+                    operator="!=",
+                    value=2,
+                ),
+            ],
+        ),
     )
 
     response = table._search(search_args_all_invalid)
@@ -2803,3 +3310,18 @@ def test_search_raw_data_with_query_and_format_mapping() -> None:
     assert json.loads(result.raw_data) == [
         {"name": "bob", "score": 20},
     ]
+
+
+def test_column_widths_valid():
+    t = ui.table({"a": [1, 2], "b": [3, 4]}, column_widths={"a": 100})
+    assert t._component_args["column-widths"] == {"a": 100}
+
+
+def test_column_widths_unknown_column():
+    with pytest.raises(ValueError, match="not found in table"):
+        ui.table({"a": [1, 2]}, column_widths={"missing": 100})
+
+
+def test_column_widths_non_positive():
+    with pytest.raises(ValueError, match="positive integer"):
+        ui.table({"a": [1, 2]}, column_widths={"a": 0})

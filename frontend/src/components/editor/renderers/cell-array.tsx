@@ -24,7 +24,7 @@ import { maybeAddMarimoImport } from "@/core/cells/add-missing-import";
 import { SETUP_CELL_ID } from "@/core/cells/ids";
 import { LanguageAdapters } from "@/core/codemirror/language/LanguageAdapters";
 import { MARKDOWN_INITIAL_HIDE_CODE } from "@/core/codemirror/language/languages/markdown";
-import { aiEnabledAtom } from "@/core/config/config";
+import { aiEnabledAtom, aiFeaturesEnabledAtom } from "@/core/config/config";
 import { canInteractWithAppAtom } from "@/core/network/connection";
 import { useBoolean } from "@/hooks/useBoolean";
 import { cn } from "@/utils/cn";
@@ -59,6 +59,7 @@ interface CellArrayProps {
   mode: AppMode;
   userConfig: UserConfig;
   appConfig: AppConfig;
+  hideControls?: boolean;
 }
 
 export const CellArray: React.FC<CellArrayProps> = (props) => {
@@ -82,6 +83,7 @@ const CellArrayInternal: React.FC<CellArrayProps> = ({
   mode,
   userConfig,
   appConfig,
+  hideControls = false,
 }) => {
   const actions = useCellActions();
   const { theme } = useTheme();
@@ -147,6 +149,7 @@ const CellArrayInternal: React.FC<CellArrayProps> = ({
             mode={mode}
             userConfig={userConfig}
             theme={theme}
+            hideControls={hideControls}
           />
         ))}
       </div>
@@ -166,6 +169,7 @@ const CellColumn: React.FC<{
   mode: AppMode;
   userConfig: UserConfig;
   theme: Theme;
+  hideControls: boolean;
 }> = ({
   columnId,
   index,
@@ -174,6 +178,7 @@ const CellColumn: React.FC<{
   mode,
   userConfig,
   theme,
+  hideControls,
 }) => {
   const cellIds = useCellIds();
   const column = cellIds.get(columnId);
@@ -191,13 +196,15 @@ const CellColumn: React.FC<{
       width={appConfig.width}
       canDelete={columnsLength > 1}
       footer={
-        <AddCellButtons
-          columnId={columnId}
-          className={cn(
-            appConfig.width === "columns" &&
-              "opacity-0 group-hover/column:opacity-100",
-          )}
-        />
+        hideControls ? null : (
+          <AddCellButtons
+            columnId={columnId}
+            className={cn(
+              appConfig.width === "columns" &&
+                "opacity-0 group-hover/column:opacity-100",
+            )}
+          />
+        )
       }
     >
       <SortableContext
@@ -254,6 +261,7 @@ const AddCellButtons: React.FC<{
   const { createNewCell } = useCellActions();
   const [isAiButtonOpen, isAiButtonOpenActions] = useBoolean(false);
   const aiEnabled = useAtomValue(aiEnabledAtom);
+  const aiFeaturesEnabled = useAtomValue(aiFeaturesEnabledAtom);
   const canInteractWithApp = useAtomValue(canInteractWithAppAtom);
   const { handleClick } = useOpenSettingsToTab();
 
@@ -263,7 +271,7 @@ const AddCellButtons: React.FC<{
   );
 
   const renderBody = () => {
-    if (isAiButtonOpen) {
+    if (aiEnabled && isAiButtonOpen) {
       return <AddCellWithAI onClose={isAiButtonOpenActions.toggle} />;
     }
 
@@ -321,30 +329,32 @@ const AddCellButtons: React.FC<{
           <DatabaseIcon className="mr-2 size-4 shrink-0" />
           SQL
         </Button>
-        <Tooltip
-          content={
-            aiEnabled ? null : (
-              <span>AI provider not found or Edit model not selected</span>
-            )
-          }
-          delayDuration={100}
-          asChild={false}
-        >
-          <Button
-            className={buttonClass}
-            variant="text"
-            size="sm"
-            disabled={!canInteractWithApp}
-            onClick={
-              aiEnabled
-                ? isAiButtonOpenActions.toggle
-                : () => handleClick("ai", "ai-providers")
+        {aiEnabled && (
+          <Tooltip
+            content={
+              aiFeaturesEnabled ? null : (
+                <span>AI provider not found or Edit model not selected</span>
+              )
             }
+            delayDuration={100}
+            asChild={false}
           >
-            <SparklesIcon className="mr-2 size-4 shrink-0" />
-            Generate with AI
-          </Button>
-        </Tooltip>
+            <Button
+              className={buttonClass}
+              variant="text"
+              size="sm"
+              disabled={!canInteractWithApp}
+              onClick={
+                aiFeaturesEnabled
+                  ? isAiButtonOpenActions.toggle
+                  : () => handleClick("ai", "ai-providers")
+              }
+            >
+              <SparklesIcon className="mr-2 size-4 shrink-0" />
+              Generate with AI
+            </Button>
+          </Tooltip>
+        )}
       </>
     );
   };

@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import re
+import threading
 from functools import cache
 from importlib.util import find_spec
 from inspect import cleandoc
 from pathlib import Path
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal
 from urllib.request import urlopen
 
 import markdown  # type: ignore
@@ -68,10 +69,9 @@ class PyconDetectorPreprocessor(markdown.preprocessors.Preprocessor):
             code = match.group(3)
 
             # Only process if no language is specified
-            if not language:
-                if self._detect_pycon(code):
-                    # Replace with pycon language
-                    return f"{indent}```pycon\n{code}{indent}```"
+            if not language and self._detect_pycon(code):
+                # Replace with pycon language
+                return f"{indent}```pycon\n{code}{indent}```"
 
             # Return original
             return match.group(0)
@@ -167,8 +167,8 @@ def _has_module(module_name: str) -> bool:
 
 
 @cache
-def _get_extensions() -> list[Union[str, markdown.Extension]]:
-    extensions: list[Union[str, markdown.Extension]] = [
+def _get_extensions() -> list[str | markdown.Extension]:
+    extensions: list[str | markdown.Extension] = [
         # Syntax highlighting
         PyconDetectorExtension(),  # Python console detection (run before highlight)
         "pymdownx.highlight",
@@ -232,13 +232,35 @@ def _get_extensions() -> list[Union[str, markdown.Extension]]:
     return extensions
 
 
+@cache
+def _get_markdown() -> tuple[markdown.Markdown, threading.Lock]:
+    # 1. Markdown construction is expensive
+    # 2. User reported stack trace indicates there may be some race condition
+    #    leading to failure (jedi previews also run through here).
+    # 3. Calling reset properly bumps footnote ids.
+    return (
+        markdown.Markdown(
+            extensions=_get_extensions(),
+            extension_configs=_get_extension_configs(),
+        ),
+        threading.Lock(),
+    )
+
+
+def _render_markdown(text: str) -> str:
+    md, lock = _get_markdown()
+    with lock:
+        md.reset()
+        return md.convert(text)
+
+
 class _md(Html):
     def __init__(
         self,
         text: str,
         *,
         apply_markdown_class: bool = True,
-        size: Optional[MarkdownSize] = None,
+        size: MarkdownSize | None = None,
     ) -> None:
         # cleandoc uniformly strips leading whitespace; useful for
         # indented multiline strings
@@ -246,15 +268,17 @@ class _md(Html):
         self._markdown_text = text
 
         # markdown.markdown appends a newline, hence strip
-        html_text = markdown.markdown(
-            text,
-            extensions=_get_extensions(),
-            extension_configs=_get_extension_configs(),
-        ).strip()
-        # replace <p> tags with <span> as HTML doesn't allow nested <div>s in <p>s
-        html_text = html_text.replace(
-            "<p>", '<span class="paragraph">'
-        ).replace("</p>", "</span>")
+        html_text = _render_markdown(text).strip()
+        # replace <p> tags with <span> as HTML doesn't allow nested <div>s in
+        # <p>s, including the admonition title's <p> so its </p> stays matched
+        html_text = (
+            html_text.replace(
+                '<p class="admonition-title">',
+                '<span class="admonition-title">',
+            )
+            .replace("<p>", '<span class="paragraph">')
+            .replace("</p>", "</span>")
+        )
 
         if apply_markdown_class:
             classes = ["markdown", "prose", "dark:prose-invert", "contents"]
@@ -359,7 +383,7 @@ def md(text: str) -> Html:
     return _md(text)
 
 
-def latex(*, filename: Union[str, Path]) -> None:
+def latex(*, filename: str | Path) -> None:
     """Load LaTeX from a file or URL.
 
     ```python

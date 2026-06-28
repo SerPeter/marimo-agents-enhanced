@@ -24,7 +24,7 @@ from marimo._server.ai.config import (
     get_edit_model,
     get_max_tokens,
 )
-from marimo._server.ai.constants import DEFAULT_MAX_TOKENS, DEFAULT_MODEL
+from marimo._server.ai.constants import DEFAULT_MODEL
 from marimo._server.ai.tools.types import ToolDefinition
 from marimo._utils.http import HTTPStatus
 
@@ -318,8 +318,32 @@ class TestAnyProviderConfig:
 
         provider_config = AnyProviderConfig.for_wandb(config)
 
-        assert provider_config.api_key == "test-wandb-key"
-        assert provider_config.project == "my-project"
+    def test_for_opencode_go(self):
+        """Test OpenCode Go configuration."""
+        config: AiConfig = {
+            "opencode_go": {
+                "api_key": "test-opencode-key",
+                "base_url": "https://opencode.ai/zen/go/v1/",
+            }
+        }
+
+        provider_config = AnyProviderConfig.for_opencode_go(config)
+
+        assert provider_config.api_key == "test-opencode-key"
+        assert provider_config.base_url == "https://opencode.ai/zen/go/v1/"
+
+    def test_for_opencode_go_with_fallback_base_url(self):
+        """Test OpenCode Go configuration uses fallback base URL when not specified."""
+        config: AiConfig = {
+            "opencode_go": {
+                "api_key": "test-opencode-key",
+            }
+        }
+
+        provider_config = AnyProviderConfig.for_opencode_go(config)
+
+        assert provider_config.api_key == "test-opencode-key"
+        assert provider_config.base_url == "https://opencode.ai/zen/go/v1/"
 
     def test_for_openai_with_project(self):
         """Test OpenAI configuration with project field."""
@@ -747,6 +771,34 @@ class TestProviderConfigWithFallback:
             exc_info.value.detail
         )
 
+    @patch.dict(os.environ, {"OPENCODE_API_KEY": "env-opencode-token"})
+    def test_for_opencode_go_with_fallback_key(self) -> None:
+        """Test OpenCode Go config uses fallback key when config is missing api_key."""
+        config: AiConfig = {"opencode_go": {}}
+        provider_config = AnyProviderConfig.for_opencode_go(config)
+        assert provider_config.api_key == "env-opencode-token"
+
+    @patch.dict(os.environ, {"OPENCODE_API_KEY": "env-opencode-token"})
+    def test_for_opencode_go_config_key_takes_precedence(self) -> None:
+        """Test OpenCode Go config key takes precedence over environment variable."""
+        config: AiConfig = {
+            "opencode_go": {"api_key": "config-opencode-token"}
+        }
+        provider_config = AnyProviderConfig.for_opencode_go(config)
+        assert provider_config.api_key == "config-opencode-token"
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_for_opencode_go_no_fallback_available(self) -> None:
+        """Test OpenCode Go config fails when no config key and no env var."""
+        config: AiConfig = {"opencode_go": {}}
+        with pytest.raises(HTTPException) as exc_info:
+            AnyProviderConfig.for_opencode_go(config)
+
+        assert exc_info.value.status_code == HTTPStatus.BAD_REQUEST
+        assert "OpenCode Go API key not configured" in str(
+            exc_info.value.detail
+        )
+
 
 class TestGetKey:
     """Tests for _get_key function."""
@@ -1029,7 +1081,7 @@ class TestUtilityFunctions:
         assert result == 2048
 
     def test_get_max_tokens_default_no_ai_config(self):
-        """Test getting default max tokens when no AI config."""
+        """Test getting max tokens returns None when no AI config."""
         config = cast(
             MarimoConfig,
             {
@@ -1039,10 +1091,10 @@ class TestUtilityFunctions:
 
         result = get_max_tokens(config)
 
-        assert result == DEFAULT_MAX_TOKENS
+        assert result is None
 
     def test_get_max_tokens_default_no_max_tokens(self):
-        """Test getting default max tokens when max_tokens not specified."""
+        """Test getting max tokens returns None when max_tokens not specified."""
         config = cast(
             MarimoConfig,
             {
@@ -1052,7 +1104,7 @@ class TestUtilityFunctions:
 
         result = get_max_tokens(config)
 
-        assert result == DEFAULT_MAX_TOKENS
+        assert result is None
 
     def test_get_autocomplete_model(self) -> None:
         """Test get_autocomplete_model with new ai.models.autocomplete_model config."""

@@ -1,7 +1,7 @@
 /* Copyright 2026 Marimo. All rights reserved. */
 
-import { CornerLeftUp } from "lucide-react";
-import { type JSX, useEffect, useState } from "react";
+import { type LucideIcon, CornerLeftUp } from "lucide-react";
+import { type JSX, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { z } from "zod";
 import {
   FILE_ICON as FILE_TYPE_ICONS,
@@ -128,6 +128,61 @@ interface FileBrowserProps extends Data, PluginFunctions {
   host: HTMLElement;
 }
 
+interface CheckboxOrIconProps {
+  name: string;
+  isSelected: boolean;
+  canSelect: boolean;
+  Icon: LucideIcon;
+  onSelect: () => void;
+}
+
+function CheckboxOrIcon({
+  name,
+  isSelected,
+  canSelect,
+  Icon,
+  onSelect,
+}: CheckboxOrIconProps) {
+  if (canSelect) {
+    return (
+      <>
+        <Checkbox
+          checked={isSelected}
+          aria-label={`Select ${name}`}
+          tabIndex={-1}
+          onClick={(e) => {
+            onSelect();
+            e.stopPropagation();
+          }}
+          className={cn({
+            "hidden group-hover:flex group-focus:flex": !isSelected,
+          })}
+        />
+        <Icon
+          size={16}
+          className={cn("mr-2", {
+            hidden: isSelected,
+            "group-hover:hidden group-focus:hidden": !isSelected,
+          })}
+        />
+      </>
+    );
+  }
+  return <Icon size={16} className="mr-2" />;
+}
+
+interface RowModel {
+  key: string;
+  name: string;
+  Icon: LucideIcon;
+  isSelected: boolean;
+  canSelect: boolean;
+  /** Enter and mouse-click action. */
+  onPrimary: () => void;
+  /** Space action; null when the row has nothing to toggle. */
+  onToggleSelect: (() => void) | null;
+}
+
 /**
  * File browser component.
  *
@@ -145,9 +200,15 @@ export const FileBrowser = ({
   host,
 }: FileBrowserProps): JSX.Element | null => {
   const [path, setPath] = useInternalStateWithSync(initialPath);
-  const [selectAllLabel, setSelectAllLabel] = useState("Select all");
   const [isUpdatingPath, setIsUpdatingPath] = useState(false);
   const [showLoadingOverlay, setShowLoadingOverlay] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const rowRefs = useRef<(HTMLTableRowElement | null)[]>([]);
+  const gridRef = useRef<HTMLTableElement | null>(null);
+  // Set when navigation is triggered from within the grid, so focus can follow
+  // to the parent row after the new listing renders instead of falling to the
+  // body when the previously focused row unmounts.
+  const refocusParentRef = useRef(false);
 
   // HACK: use the random-id of the host element to force a re-render
   // when the random-id changes, this means the cell was re-rendered
@@ -158,7 +219,6 @@ export const FileBrowser = ({
   const { data, error, isPending } = useAsyncData(() => {
     return list_directory({ path: path });
   }, [path, randomId]);
-  const spinnerLabel = "Listing files...";
 
   useEffect(() => {
     if (!isPending) {
@@ -175,24 +235,44 @@ export const FileBrowser = ({
     };
   }, [isPending]);
 
-  if (!data && error) {
-    return <Banner kind="danger">{error.message}</Banner>;
+  // Reset the roving tabindex whenever the listing reloads (a new path or a
+  // same-path refresh) so activeIndex never points past the current rows.
+  const listingKey = `${path}::${randomId}`;
+  const [prevListingKey, setPrevListingKey] = useState(listingKey);
+  if (prevListingKey !== listingKey) {
+    setPrevListingKey(listingKey);
+    setActiveIndex(0);
   }
 
-  let { files } = data || {};
-  if (files === undefined) {
-    files = [];
+  useLayoutEffect(() => {
+    if (refocusParentRef.current) {
+      refocusParentRef.current = false;
+      rowRefs.current[0]?.focus();
+    }
+  }, [listingKey]);
+
+  const files = data?.files ?? [];
+  const selectedPaths = new Set(value.map((x) => x.path));
+  const canSelectDirectories =
+    selectionMode === "directory" || selectionMode === "all";
+  const canSelectFiles = selectionMode === "file" || selectionMode === "all";
+
+  const selectable = files.filter(
+    (f) =>
+      (canSelectDirectories && f.is_directory) ||
+      (canSelectFiles && !f.is_directory),
+  );
+  const allSelected =
+    selectable.length > 0 && selectable.every((f) => selectedPaths.has(f.path));
+
+  if (!data && error) {
+    return <Banner kind="danger">{error.message}</Banner>;
   }
 
   const pathBuilder = PathBuilder.guessDeliminator(initialPath);
   const delimiter = pathBuilder.deliminator;
 
-  const selectedPaths = new Set(value.map((x) => x.path));
   const selectedFiles = value.map((x) => <li key={x.id}>{x.path}</li>);
-
-  const canSelectDirectories =
-    selectionMode === "directory" || selectionMode === "all";
-  const canSelectFiles = selectionMode === "file" || selectionMode === "all";
 
   function setNewPath(newPath: string) {
     // Prevent updating path while updating
@@ -230,9 +310,9 @@ export const FileBrowser = ({
       return;
     }
 
-    // Update path and reset select all label
+    refocusParentRef.current =
+      gridRef.current?.contains(document.activeElement) ?? false;
     setPath(newPath);
-    setSelectAllLabel("Select all");
     setIsUpdatingPath(false);
   }
 
@@ -264,28 +344,18 @@ export const FileBrowser = ({
   }) {
     const fileInfo = createFileInfo({ path, name, isDirectory });
 
-    if (multiple) {
-      if (selectedPaths.has(path)) {
-        setValue(value.filter((x) => x.path !== path));
-        setSelectAllLabel("Select all");
-      } else {
-        setValue([...value, fileInfo]);
-      }
+    if (selectedPaths.has(path)) {
+      setValue(value.filter((x) => x.path !== path));
     } else {
-      setValue([fileInfo]);
+      setValue(multiple ? [...value, fileInfo] : [fileInfo]);
     }
   }
 
   function deselectAllFiles() {
     setValue(value.filter((x) => Paths.dirname(x.path) !== path));
-    setSelectAllLabel("Select all");
   }
 
   function selectAllFiles() {
-    if (!files) {
-      return;
-    }
-
     const filesInView: FileInfo[] = [];
 
     for (const file of files) {
@@ -304,104 +374,92 @@ export const FileBrowser = ({
     }
 
     setValue([...value, ...filesInView]);
-    setSelectAllLabel("Deselect all");
   }
 
-  // Create rows for directories and files
-  const fileRows: React.ReactNode[] = [];
-
-  // Parent directory ".." row button
-  fileRows.push(
-    <TableRow
-      className="hover:bg-primary hover:bg-opacity-25 select-none"
-      key={"Parent directory"}
-      onClick={() => setNewPath(PARENT_DIRECTORY)}
-    >
-      <TableCell className="w-[50px] pl-4">
-        <CornerLeftUp size={16} />
-      </TableCell>
-      <TableCell>{PARENT_DIRECTORY}</TableCell>
-    </TableRow>,
-  );
-
-  for (const file of files) {
-    let filePath = file.path;
-
-    if (filePath.startsWith("//")) {
-      filePath = filePath.slice(1) as FilePath;
-    }
-
-    // Click handler
-    const handleClick = file.is_directory
-      ? ({ path }: { path: string }) => setNewPath(path)
-      : handleSelection;
-
-    // Icon
-    const fileType: FileType = file.is_directory
-      ? "directory"
-      : guessFileType(file.name);
-
-    const Icon = FILE_TYPE_ICONS[fileType];
-
-    const isSelected = selectedPaths.has(filePath);
-    const renderCheckboxOrIcon = () => {
-      if (
-        (canSelectDirectories && file.is_directory) ||
-        (canSelectFiles && !file.is_directory)
-      ) {
-        return (
-          <>
-            <Checkbox
-              checked={isSelected}
-              onClick={(e) => {
-                handleSelection({
-                  path: filePath,
-                  name: file.name,
-                  isDirectory: file.is_directory,
-                });
-                e.stopPropagation();
-              }}
-              className={cn("", {
-                "hidden group-hover:flex": !isSelected,
-              })}
-            />
-            <Icon
-              size={16}
-              className={cn("mr-2", {
-                hidden: isSelected,
-                "group-hover:hidden": !isSelected,
-              })}
-            />
-          </>
-        );
+  const rowModels: RowModel[] = [
+    {
+      key: "parent",
+      name: PARENT_DIRECTORY,
+      Icon: CornerLeftUp,
+      isSelected: false,
+      canSelect: false,
+      onPrimary: () => setNewPath(PARENT_DIRECTORY),
+      onToggleSelect: null,
+    },
+    ...files.map((file): RowModel => {
+      let filePath = file.path;
+      if (filePath.startsWith("//")) {
+        filePath = filePath.slice(1) as FilePath;
       }
 
-      return <Icon size={16} className="mr-2" />;
-    };
+      const canSelect =
+        (canSelectDirectories && file.is_directory) ||
+        (canSelectFiles && !file.is_directory);
+      const isSelected = selectedPaths.has(filePath);
+      const fileType: FileType = file.is_directory
+        ? "directory"
+        : guessFileType(file.name);
 
-    fileRows.push(
-      <TableRow
-        key={file.id}
-        className={cn(
-          "hover:bg-primary hover:bg-opacity-25 group select-none",
-          {
-            "bg-primary bg-opacity-25": isSelected,
-          },
-        )}
-        onClick={() =>
-          handleClick({
-            path: filePath,
-            name: file.name,
-            isDirectory: file.is_directory,
-          })
-        }
-      >
-        <TableCell className="w-[50px] pl-4">
-          {renderCheckboxOrIcon()}
-        </TableCell>
-        <TableCell>{file.name}</TableCell>
-      </TableRow>,
-    );
+      const toggle = () =>
+        handleSelection({
+          path: filePath,
+          name: file.name,
+          isDirectory: file.is_directory,
+        });
+
+      return {
+        key: file.id,
+        name: file.name,
+        Icon: FILE_TYPE_ICONS[fileType],
+        isSelected,
+        canSelect,
+        onPrimary: file.is_directory
+          ? () => setNewPath(filePath)
+          : canSelect
+            ? toggle
+            : () => {},
+        onToggleSelect: canSelect ? toggle : null,
+      };
+    }),
+  ];
+
+  function focusRow(index: number) {
+    setActiveIndex(index);
+    rowRefs.current[index]?.focus();
+  }
+
+  function handleRowKeyDown(
+    e: React.KeyboardEvent<HTMLTableRowElement>,
+    index: number,
+  ) {
+    const lastIndex = rowModels.length - 1;
+    switch (e.key) {
+      case "ArrowDown":
+        e.preventDefault();
+        focusRow(Math.min(index + 1, lastIndex));
+        break;
+      case "ArrowUp":
+        e.preventDefault();
+        focusRow(Math.max(index - 1, 0));
+        break;
+      case "Home":
+        e.preventDefault();
+        focusRow(0);
+        break;
+      case "End":
+        e.preventDefault();
+        focusRow(lastIndex);
+        break;
+      case "Enter":
+        e.preventDefault();
+        rowModels[index].onPrimary();
+        break;
+      // Space is select-only; preventDefault stops the list from scrolling.
+      case " ":
+        e.preventDefault();
+        rowModels[index].onToggleSelect?.();
+        break;
+    }
   }
 
   // Get list of parent directories.
@@ -423,8 +481,9 @@ export const FileBrowser = ({
         : PluralWords.of("file");
 
   const renderHeader = () => {
-    label = label ?? `Select ${selectionKindLabel.join(" and ", 2)}...`;
-    const labelText = <Label>{renderHTML({ html: label })}</Label>;
+    const displayLabel =
+      label ?? `Select ${selectionKindLabel.join(" and ", 2)}...`;
+    const labelText = <Label>{renderHTML({ html: displayLabel })}</Label>;
 
     if (multiple) {
       return (
@@ -434,13 +493,9 @@ export const FileBrowser = ({
             <Button
               size="xs"
               variant="link"
-              onClick={
-                selectAllLabel === "Select all"
-                  ? () => selectAllFiles()
-                  : () => deselectAllFiles()
-              }
+              onClick={allSelected ? deselectAllFiles : selectAllFiles}
             >
-              {renderHTML({ html: selectAllLabel })}
+              {allSelected ? "Deselect all" : "Select all"}
             </Button>
           </div>
         </div>
@@ -461,7 +516,7 @@ export const FileBrowser = ({
         onChange={(e) => setNewPath(e.target.value)}
       >
         {parentDirectories.map((dir) => (
-          <option value={dir} key={dir} selected={dir === path}>
+          <option value={dir} key={dir}>
             {dir}
           </option>
         ))}
@@ -487,11 +542,47 @@ export const FileBrowser = ({
             role="status"
           >
             <Spinner size="small" />
-            <span>{spinnerLabel}</span>
+            <span>Listing files...</span>
           </div>
         )}
-        <Table className="cursor-pointer table-fixed">
-          <TableBody>{fileRows}</TableBody>
+        <Table
+          ref={gridRef}
+          className="cursor-pointer table-fixed"
+          role="grid"
+          aria-label="File browser"
+          aria-multiselectable={multiple}
+        >
+          <TableBody>
+            {rowModels.map((row, index) => (
+              <TableRow
+                key={row.key}
+                role="row"
+                ref={(el) => {
+                  rowRefs.current[index] = el;
+                }}
+                tabIndex={index === activeIndex ? 0 : -1}
+                onFocus={() => setActiveIndex(index)}
+                onKeyDown={(e) => handleRowKeyDown(e, index)}
+                className={cn(
+                  "hover:bg-accent group select-none focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset",
+                  { "bg-primary/25 hover:bg-primary/35": row.isSelected },
+                )}
+                aria-selected={row.canSelect ? row.isSelected : undefined}
+                onClick={row.onPrimary}
+              >
+                <TableCell role="gridcell" className="w-[50px] pl-4">
+                  <CheckboxOrIcon
+                    name={row.name}
+                    isSelected={row.isSelected}
+                    canSelect={row.canSelect}
+                    Icon={row.Icon}
+                    onSelect={() => row.onToggleSelect?.()}
+                  />
+                </TableCell>
+                <TableCell role="gridcell">{row.name}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
         </Table>
       </div>
       <div className="mt-4">

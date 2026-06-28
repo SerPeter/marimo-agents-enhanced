@@ -6,16 +6,17 @@ import os
 import subprocess
 import sys
 import time
-from typing import Optional, TypedDict
+from typing import TypedDict
 
 from marimo import _loggers
+from marimo._utils.platform import is_pyodide
 
 LOGGER = _loggers.marimo_logger()
 
 TIMEOUT = 10  # seconds
 
 # Module-level state for cgroup CPU percent calculation (like psutil does)
-_LAST_CGROUP_CPU_SAMPLE: Optional[tuple[int, float]] = (
+_LAST_CGROUP_CPU_SAMPLE: tuple[int, float] | None = (
     None  # (usage_usec, timestamp)
 )
 
@@ -49,7 +50,7 @@ CGROUP_V1_MEMORY_USAGE_FILE = "/sys/fs/cgroup/memory/memory.usage_in_bytes"
 CGROUP_V1_MEMORY_UNLIMITED_THRESHOLD = 2**60
 
 
-def get_node_version() -> Optional[str]:
+def get_node_version() -> str | None:
     try:
         process = subprocess.Popen(
             ["node", "--version"],
@@ -68,7 +69,7 @@ def get_node_version() -> Optional[str]:
         return None
 
 
-def get_uv_version() -> Optional[str]:
+def get_uv_version() -> str | None:
     from marimo._utils.uv import find_uv_bin
 
     try:
@@ -109,6 +110,11 @@ def get_required_modules_list() -> dict[str, str]:
         "uvicorn",
         "websockets",
     ]
+    try:
+        import psutil as _psutil  # noqa: F401
+    except ImportError:
+        # psutil is not available on all platforms (e.g. Emscripten, Android/Termux).
+        packages = [p for p in packages if p != "psutil"]
     return _get_versions(packages, include_missing=True)
 
 
@@ -138,6 +144,9 @@ def get_optional_modules_list() -> dict[str, str]:
         "vegafusion",
         "watchdog",
     ]
+    if is_pyodide() or sys.platform == "android":
+        # loro is not installable on Emscripten/Android.
+        packages = [p for p in packages if p != "loro"]
     return _get_versions(packages, include_missing=False)
 
 
@@ -158,8 +167,8 @@ def _get_versions(
     return package_versions
 
 
-def get_chrome_version() -> Optional[str]:
-    def get_chrome_version_windows() -> Optional[str]:
+def get_chrome_version() -> str | None:
+    def get_chrome_version_windows() -> str | None:
         process = subprocess.Popen(
             [
                 "reg",
@@ -180,7 +189,7 @@ def get_chrome_version() -> Optional[str]:
             return parts[-1]
         return None
 
-    def get_chrome_version_mac() -> Optional[str]:
+    def get_chrome_version_mac() -> str | None:
         process = subprocess.Popen(
             [
                 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -198,7 +207,7 @@ def get_chrome_version() -> Optional[str]:
             return parts[-1]
         return None
 
-    def get_chrome_version_linux() -> Optional[str]:
+    def get_chrome_version_linux() -> str | None:
         process = subprocess.Popen(
             ["google-chrome", "--version"],
             stdout=subprocess.PIPE,
@@ -260,7 +269,7 @@ def _has_cgroup_cpu_limit() -> bool:
     return False
 
 
-def get_cgroup_mem_stats() -> Optional[MemoryStats]:
+def get_cgroup_mem_stats() -> MemoryStats | None:
     """
     Get container memory stats from cgroup.
 
@@ -319,7 +328,7 @@ def get_cgroup_mem_stats() -> Optional[MemoryStats]:
     return None
 
 
-def _get_cgroup_allocated_cores() -> Optional[float]:
+def _get_cgroup_allocated_cores() -> float | None:
     """Get the number of CPU cores allocated to this cgroup (quota / period)."""
     try:
         if os.path.exists(CGROUP_V2_CPU_MAX_FILE):
@@ -339,7 +348,7 @@ def _get_cgroup_allocated_cores() -> Optional[float]:
     return None
 
 
-def get_cgroup_cpu_percent() -> Optional[float]:
+def get_cgroup_cpu_percent() -> float | None:
     """
     Get CPU usage percentage for a cgroup-limited container.
 
@@ -361,7 +370,7 @@ def get_cgroup_cpu_percent() -> Optional[float]:
 
     try:
         # Read current usage (microseconds)
-        current_usage_microseconds: Optional[int] = None
+        current_usage_microseconds: int | None = None
 
         if os.path.exists(CGROUP_V2_CPU_STAT_FILE):
             with open(CGROUP_V2_CPU_STAT_FILE, encoding="utf-8") as f:

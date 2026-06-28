@@ -2,18 +2,17 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any
 
 from marimo import _loggers
 from marimo._ast.cell import CellImpl
 from marimo._runtime.dataflow.graph import DirectedGraph
-from marimo._runtime.dataflow.runner import Runner
 from marimo._runtime.dataflow.topology import GraphTopology
 from marimo._runtime.dataflow.types import Edge, EdgeWithVar
 from marimo._types.ids import CellId_t
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Callable, Collection
 
 
 LOGGER = _loggers.marimo_logger()
@@ -78,8 +77,8 @@ def induced_subgraph(
     parents: dict[CellId_t, set[CellId_t]] = {}
     children: dict[CellId_t, set[CellId_t]] = {}
     for cid in cell_ids:
-        parents[cid] = set(p for p in graph.parents[cid] if p in cell_ids)
-        children[cid] = set(c for c in graph.children[cid] if c in cell_ids)
+        parents[cid] = {p for p in graph.parents[cid] if p in cell_ids}
+        children[cid] = {c for c in graph.children[cid] if c in cell_ids}
     return parents, children
 
 
@@ -88,9 +87,9 @@ def get_cycles(
 ) -> list[tuple[Edge, ...]]:
     """Get all cycles among `cell_ids`."""
     _, induced_children = induced_subgraph(graph, cell_ids)
-    induced_edges = set(
-        [(u, v) for u in induced_children for v in induced_children[u]]
-    )
+    induced_edges = {
+        (u, v) for u in induced_children for v in induced_children[u]
+    }
     return [c for c in graph.cycles if all(e in induced_edges for e in c)]
 
 
@@ -136,7 +135,7 @@ def prune_cells_for_overrides(
     graph: DirectedGraph,
     execution_order: Collection[CellId_t],
     overrides: dict[str, Any],
-    excluded: Optional[CellId_t] = None,
+    excluded: CellId_t | None = None,
 ) -> list[CellId_t]:
     """Prune cells from execution when their definitions are overridden.
 
@@ -250,10 +249,9 @@ def get_import_block_relatives(
 
 
 __all__ = [
+    "DirectedGraph",
     "Edge",
     "EdgeWithVar",
-    "DirectedGraph",
-    "Runner",
     "get_cycles",
     "get_import_block_relatives",
     "induced_subgraph",

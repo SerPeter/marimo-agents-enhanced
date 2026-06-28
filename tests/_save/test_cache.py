@@ -11,6 +11,7 @@ import pytest
 
 import marimo
 from marimo._ast.app import App
+from marimo._dependencies.dependencies import DependencyManager
 from marimo._plugins.ui._impl.input import dropdown
 from marimo._runtime.commands import ExecuteCellCommand
 from marimo._runtime.runtime import Kernel
@@ -293,7 +294,7 @@ class TestScriptCache:
             app.run()
         except Exception as e:
             if "--cov=marimo" not in sys.argv:
-                raise e
+                raise
             pytest.mark.xfail(
                 reason="Coverage conflict with cache introspection"
             )
@@ -342,7 +343,7 @@ class TestScriptCache:
             with persistent_cache(name="one",
                                   _loader=MockLoader(
                                     data={"X": 7, "Y": 8})
-                                  ) as cache:  # noqa: E501
+                                  ) as cache:
                 Y = 9
                 X = 10
             # fmt: on
@@ -1079,6 +1080,36 @@ class TestCacheDecorator:
             == 971183874599339129547649988289594072811608739584170445
         )
         assert k.globals["b"] == 55
+
+    async def test_lru_cache_with_maxsize_persists_across_cell_reruns(
+        self, k: Kernel, exec_req: ExecReqProvider
+    ) -> None:
+        cached_cell = exec_req.get(
+            """
+            @lru_cache(maxsize=128)
+            def foo():
+                print("ran")
+
+            foo()
+            foo()
+            """
+        )
+
+        await k.run(
+            [
+                exec_req.get(
+                    """
+                    from marimo._save.save import lru_cache
+                    """
+                ),
+                cached_cell,
+            ]
+        )
+        await k.run([cached_cell])
+
+        assert not k.stderr.messages, k.stderr
+        assert k.stdout.messages.count("ran") == 1
+        assert k.globals["foo"].hits == 3
 
     async def test_persistent_cache(
         self, k: Kernel, exec_req: ExecReqProvider
@@ -2551,6 +2582,44 @@ class TestCacheDecorator:
                 future = executor.submit(inner, extension)
                 assert future.result() == 5
             return
+
+    @pytest.mark.skipif(
+        not DependencyManager.pandas.has(),
+        reason="pandas not installed",
+    )
+    async def test_cache_dataframe_object_column(
+        self, k: Kernel, exec_req: ExecReqProvider
+    ) -> None:
+        """Regression test for marimo-team/marimo#9068.
+
+        @cache with a DataFrame containing an object-dtype column previously
+        raised: ValueError: The truth value of a DataFrame is ambiguous.
+        Caused by an unsafe truthiness check in get_type() that called
+        bool() on the scope value instead of checking key presence.
+        """
+        await k.run(
+            [
+                exec_req.get(
+                    """
+                    import pandas as pd
+                    from marimo._save.save import cache
+
+                    @cache
+                    def get_length(df):
+                        return len(df)
+
+                    result = get_length(
+                        pd.DataFrame(
+                            {"a": list(range(100)), "b": list(map(str, range(100)))}
+                        )
+                    )
+                    """
+                ),
+            ]
+        )
+
+        assert not k.stderr.messages
+        assert k.globals["result"] == 100
 
 
 class TestPersistentCache:

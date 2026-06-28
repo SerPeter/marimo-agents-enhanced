@@ -45,6 +45,7 @@ interface AIModelDropdownProps {
   showAddCustomModelDocs?: boolean;
   displayIconOnly?: boolean;
   forRole: SupportedRole;
+  disabled?: boolean;
 }
 
 export const AIModelDropdown = ({
@@ -57,6 +58,7 @@ export const AIModelDropdown = ({
   showAddCustomModelDocs = false,
   forRole,
   displayIconOnly = false,
+  disabled = false,
 }: AIModelDropdownProps) => {
   const [isOpen, setIsOpen] = React.useState(false);
 
@@ -131,6 +133,9 @@ export const AIModelDropdown = ({
   };
 
   const handleSelect = (modelId: QualifiedModelId) => {
+    if (disabled) {
+      return;
+    }
     if (onSelect) {
       onSelect(modelId);
     } else {
@@ -142,6 +147,7 @@ export const AIModelDropdown = ({
   return (
     <DropdownMenu open={isOpen} onOpenChange={setIsOpen}>
       <DropdownMenuTrigger
+        disabled={disabled}
         className={`flex items-center justify-between px-2 py-0.5 border rounded-md
             hover:bg-accent hover:text-accent-foreground ${triggerClassName}`}
       >
@@ -305,7 +311,7 @@ const AiModelDropdownItem = ({
       <div className="flex flex-row w-full items-center">
         <span>{model.name}</span>
         <div className="ml-auto">
-          {model.thinking && (
+          {model.capabilities.includes("thinking") && (
             <Tooltip content="Reasoning model">
               <BrainIcon
                 className={`h-5 w-5 rounded-md p-1 ${getTagColour("thinking")}`}
@@ -362,7 +368,7 @@ export const AiModelInfoDisplay = ({
         </div>
       )}
 
-      {model.thinking && (
+      {model.capabilities.includes("thinking") && (
         <div className="flex items-center gap-2">
           <div className="w-2 h-2 bg-purple-500 rounded-full animate-pulse" />
           <span className="text-xs text-muted-foreground">

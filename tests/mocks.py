@@ -168,7 +168,7 @@ def _replace_braced_value(text: str, key: str, placeholder: str) -> str:
 
     Uses brace-counting so it works with arbitrarily nested objects.
     The quote style is inferred from *key* so the placeholder matches the
-    surrounding context (e.g. escaped ``\\"`` vs plain ``"``).
+    surrounding context (e.g. escaped `\\"` vs plain `"`).
     """
     q = '\\"' if '\\"' in key else '"'
     idx = 0
@@ -228,6 +228,15 @@ def simplify_plotly(output: str) -> str:
     # (Plotly versions differ on whether they include the type attribute)
     output = output.replace('<script type="text/javascript">', "<script>")
     output = output.replace('<script type=\\"text/javascript\\">', "<script>")
+
+    # Normalize the outer wrapper <div> that precedes the PlotlyConfig script.
+    # (Plotly versions differ on whether it carries a style attribute, e.g.
+    # `<div style="height:100%; width:100%;">`)
+    output = re.sub(
+        r"<div\b[^>]*>(\s*<script>window\.PlotlyConfig)",
+        r"<div>\1",
+        output,
+    )
 
     # Sanitize raw Plotly HTML output (from mo.ui.plotly())
     # Replace random UUID-like div IDs (handles both escaped and unescaped quotes)

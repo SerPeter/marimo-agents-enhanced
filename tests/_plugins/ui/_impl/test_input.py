@@ -466,6 +466,14 @@ def test_dropdown_lots_of_options() -> None:
     assert dropdown._component_args["searchable"] is True
 
 
+def test_dropdown_disabled() -> None:
+    dd = ui.dropdown(options=["1", "2", "3"])
+    assert dd._component_args["disabled"] is False
+
+    dd = ui.dropdown(options=["1", "2", "3"], disabled=True)
+    assert dd._component_args["disabled"] is True
+
+
 @pytest.mark.skipif(not HAS_PANDAS, reason="pandas not installed")
 def test_dropdown_from_dataframe() -> None:
     import pandas as pd
@@ -587,6 +595,14 @@ def test_multiselect_too_many_options() -> None:
     assert "maximum number" in str(e.value)
 
 
+def test_multiselect_disabled() -> None:
+    ms = ui.multiselect(options=["1", "2", "3"])
+    assert ms._component_args["disabled"] is False
+
+    ms = ui.multiselect(options=["1", "2", "3"], disabled=True)
+    assert ms._component_args["disabled"] is True
+
+
 @pytest.mark.skipif(not HAS_PANDAS, reason="pandas not installed")
 def test_multiselect_from_dataframe() -> None:
     import pandas as pd
@@ -653,7 +669,6 @@ def test_on_change() -> None:
 def test_form_in_array_retains_on_change() -> None:
     def on_change(*args: Any) -> None:
         del args
-        ...
 
     array = ui.array([ui.form(ui.checkbox(), on_change=on_change)])
     assert array[0]._on_change == on_change

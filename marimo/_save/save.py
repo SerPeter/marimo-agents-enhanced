@@ -6,12 +6,14 @@ import asyncio
 import functools
 import inspect
 import io
+import linecache
 import sys
 import threading
 import time
 import traceback
 import weakref
 from collections import abc
+from collections.abc import Callable
 
 # NB: maxsize follows functools.cache, but renamed max_size outside of drop-in
 # api.
@@ -19,13 +21,10 @@ from sys import maxsize as MAXINT
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
     Concatenate,
     Generic,
-    Optional,
     ParamSpec,
     TypeVar,
-    Union,
     cast,
     overload,
 )
@@ -40,6 +39,8 @@ from marimo._ast.transformers import (
 from marimo._ast.variables import is_mangled_local, unmangle_local
 from marimo._messaging.tracebacks import write_traceback
 from marimo._runtime.context import get_context, safe_get_context
+from marimo._runtime.dataflow import DirectedGraph
+from marimo._runtime.scratch import SCRATCH_CELL_ID
 from marimo._runtime.side_effect import SideEffect
 from marimo._runtime.state import State
 from marimo._save.cache import (
@@ -73,7 +74,6 @@ if TYPE_CHECKING:
 
     from typing_extensions import Self
 
-    from marimo._runtime.dataflow import DirectedGraph
     from marimo._save.stores import Store
 
 P = ParamSpec("P")
@@ -86,27 +86,27 @@ class _cache_call(CacheContext, Generic[P, R]):
     """Like functools.cache but notebook-aware. See `cache` docstring"""
 
     __slots__ = (
-        "base_block",
-        "scope",
-        "scoped_refs",
-        "pin_modules",
-        "hash_type",
+        "__wrapped__",
         "_args",
-        "_kwonly_args",
+        "_bound",
         "_defaults",
-        "_var_arg",
-        "_var_kwarg",
-        "_misses",
+        "_external",
+        "_frame_offset",
+        "_kwonly_args",
+        "_last_hash",
         "_loader",
         "_loader_partial",
-        "_bound",
-        "_last_hash",
-        "_frame_offset",
-        "_external",
-        "__wrapped__",
+        "_misses",
+        "_var_arg",
+        "_var_kwarg",
+        "base_block",
+        "hash_type",
+        "pin_modules",
+        "scope",
+        "scoped_refs",
     )
 
-    base_block: Optional[BlockHasher]
+    base_block: BlockHasher | None
     scope: dict[str, Any]
     scoped_refs: set[str]
     pin_modules: bool
@@ -114,21 +114,21 @@ class _cache_call(CacheContext, Generic[P, R]):
     _args: list[str]
     _kwonly_args: list[str]
     _defaults: dict[str, Any]
-    _var_arg: Optional[str]
-    _var_kwarg: Optional[str]
+    _var_arg: str | None
+    _var_kwarg: str | None
     _misses: int
-    _loader: Optional[State[Loader]]
+    _loader: State[Loader] | None
     _loader_partial: LoaderPartial
-    _bound: Optional[dict[str, Any]]
-    _last_hash: Optional[str]
+    _bound: dict[str, Any] | None
+    _last_hash: str | None
     _frame_offset: int
     _external: bool
     # Consistent with functools.cache
-    __wrapped__: Optional[Callable[..., Any]]
+    __wrapped__: Callable[..., Any] | None
 
     def __init__(
         self,
-        _fn: Optional[Callable[..., Any]],
+        _fn: Callable[..., Any] | None,
         loader_partial: LoaderPartial,
         *,
         pin_modules: bool = False,
@@ -164,15 +164,22 @@ class _cache_call(CacheContext, Generic[P, R]):
         # Default to this case for typing.
         self._external = True
         cell_id = CellId_t("")
-        graph: Optional[DirectedGraph] = None
+        graph: DirectedGraph | None = None
         glbls = {}
         if ctx and ctx.execution_context is not None:
             maybe_cell_id = (
                 ctx.cell_id or ctx.execution_context.cell_id or CellId_t("")
             )
             # If the cell ID is "external", that means it's not from the main
-            # graph but rather from an embedded graph.
-            self._external = is_external_cell_id(maybe_cell_id)
+            # graph but rather from an embedded graph. The scratchpad cell
+            # also lives outside the main graph (it's only registered in a
+            # Runner-local DirectedGraph during run_scratchpad), so it
+            # follows the same code path: defer to graph_from_scope at call
+            # time, no main-graph lookup.
+            self._external = (
+                is_external_cell_id(maybe_cell_id)
+                or maybe_cell_id == SCRATCH_CELL_ID
+            )
             if not self._external:
                 graph = ctx.graph
                 glbls = ctx.globals
@@ -233,11 +240,11 @@ class _cache_call(CacheContext, Generic[P, R]):
         if graph is not None:
             self.scoped_refs |= graph.cells[cell_id].defs & set(glbls.keys())
             # The defined private variables of this cell, normalized
-            self.scoped_refs |= set(
+            self.scoped_refs |= {
                 unmangle_local(x).name
-                for x in glbls.keys()
+                for x in glbls
                 if is_mangled_local(x, cell_id)
-            )
+            }
 
         # Load global cache from state
         name = self.__name__
@@ -291,7 +298,10 @@ class _cache_call(CacheContext, Generic[P, R]):
             )
 
         # Rewrite scoped args to prevent shadowed variables
-        arg_dict = {f"{ARG_PREFIX}{k}": v for (k, v) in zip(self._args, args)}
+        arg_dict = {
+            f"{ARG_PREFIX}{k}": v
+            for (k, v) in zip(self._args, args, strict=False)
+        }
         kwargs_copy = {f"{ARG_PREFIX}{k}": v for (k, v) in kwargs.items()}
         # Fill in default values for arguments not explicitly provided
         # This ensures cache hashes are based on resolved argument values
@@ -378,23 +388,21 @@ class _cache_call(CacheContext, Generic[P, R]):
         return self.__wrapped__.__name__
 
     @property
-    def last_hash(self) -> Optional[str]:
+    def last_hash(self) -> str | None:
         """Return the last computed hash for this cache call."""
         return self._last_hash
 
     @overload
-    def __get__(
-        self, instance: None, owner: Optional[type] = None
-    ) -> Self: ...
+    def __get__(self, instance: None, owner: type | None = None) -> Self: ...
 
     @overload
     def __get__(
         self: _cache_call[Concatenate[Any, Q], R],
         instance: Any,
-        owner: Optional[type] = None,
+        owner: type | None = None,
     ) -> _cache_call[Q, R]: ...
 
-    def __get__(self, instance: Any, _owner: Optional[type] = None) -> Any:  # type: ignore[misc]
+    def __get__(self, instance: Any, _owner: type | None = None) -> Any:  # type: ignore[misc]
         """Enable @cache as a method decorator.
 
         __get__ is invoked on instance access;
@@ -493,9 +501,9 @@ class _cache_call(CacheContext, Generic[P, R]):
             runtime = time.time() - start_time
 
             self._finalize_cache_update(attempt, response, runtime, scope)
-        except Exception as e:
+        except Exception:
             failed = True
-            raise e
+            raise
         finally:
             # NB. Exceptions raise their own side effects.
             if ctx and not failed:
@@ -530,18 +538,16 @@ class _cache_call_async(_cache_call[P, R]):
     _pending_lock = threading.Lock()
 
     @overload
-    def __get__(
-        self, instance: None, owner: Optional[type] = None
-    ) -> Self: ...
+    def __get__(self, instance: None, owner: type | None = None) -> Self: ...
 
     @overload
     def __get__(
         self: _cache_call_async[Concatenate[Any, Q], R],
         instance: Any,
-        owner: Optional[type] = None,
+        owner: type | None = None,
     ) -> _cache_call_async[Q, R]: ...
 
-    def __get__(self, instance: Any, _owner: Optional[type] = None) -> Any:  # type: ignore[misc]
+    def __get__(self, instance: Any, _owner: type | None = None) -> Any:  # type: ignore[misc]
         return super().__get__(instance, _owner)
 
     async def __call__(  # type: ignore[override]
@@ -623,9 +629,9 @@ class _cache_call_async(_cache_call[P, R]):
             runtime = time.time() - start_time
 
             self._finalize_cache_update(attempt, response, runtime, scope)
-        except Exception as e:
+        except Exception:
             failed = True
-            raise e
+            raise
         finally:
             # NB. Exceptions raise their own side effects.
             if ctx and not failed:
@@ -646,7 +652,7 @@ class _cache_context(SkipContext, CacheContext):
         super().__init__()
         self.name = name
 
-        self._cache: Optional[Cache] = None
+        self._cache: Cache | None = None
         self._body_start: int = MAXINT
         # TODO: Consider having a user level setting.
         self.pin_modules = pin_modules
@@ -713,6 +719,23 @@ class _cache_context(SkipContext, CacheContext):
                     code = cell.code
                 elif cell_id in graph.cells:
                     code = graph.cells[cell_id].code
+                elif cell_id == SCRATCH_CELL_ID:
+                    # The scratchpad cell lives in a Runner-local graph,
+                    # not in ctx.graph (the kernel's main graph). Pull
+                    # source from linecache, which compile_cell populated
+                    # when the scratchpad was compiled. Use an empty
+                    # graph + empty cell_id for the BlockHasher call
+                    # below, mirroring how `@mo.cache._set_context`
+                    # handles cells outside the main graph.
+                    lines = linecache.getlines(filename)
+                    if not lines:
+                        raise CacheException(
+                            "Could not resolve cell for cache."
+                            f"{UNEXPECTED_FAILURE_BOILERPLATE}"
+                        )
+                    code = "".join(lines)
+                    graph = DirectedGraph()
+                    cell_id = CellId_t("")
                 else:
                     raise CacheException(
                         "Could not resolve cell for cache."
@@ -761,9 +784,9 @@ class _cache_context(SkipContext, CacheContext):
 
     def __exit__(
         self,
-        exception: Optional[type[BaseException]],
-        instance: Optional[BaseException],
-        _tracebacktype: Optional[TracebackType],
+        exception: type[BaseException] | None,
+        instance: BaseException | None,
+        _tracebacktype: TracebackType | None,
     ) -> bool:
         self.teardown()
         if not self.entered_trace:
@@ -802,16 +825,16 @@ class _cache_context(SkipContext, CacheContext):
                 sys.stderr.write(
                     "An exception was raised when attempting to cache this code "
                     "block with the following message:\n"
-                    f"{str(e)}\n"
+                    f"{e!s}\n"
                     "NOTE: The cell has run, but cache has not been saved.\n"
                 )
                 tmpio = io.StringIO()
                 traceback.print_exc(file=tmpio)
                 tmpio.seek(0)
                 write_traceback(tmpio.read())
-        except Exception as e:
+        except Exception:
             failed = True
-            raise e
+            raise
         finally:
             if not failed:
                 # Conditional because pendantically, the side effect is on restore /
@@ -822,7 +845,7 @@ class _cache_context(SkipContext, CacheContext):
         return False
 
     @property
-    def last_hash(self) -> Optional[str]:
+    def last_hash(self) -> str | None:
         """Return the last computed hash for this cache context."""
         if self._cache is None:
             return None
@@ -845,22 +868,22 @@ class _cache_context(SkipContext, CacheContext):
 @functools.singledispatch
 def _cache_invocation(
     arg: Any,
-    loader: Union[LoaderPartial, Loader, LoaderType],
+    loader: LoaderPartial | Loader | LoaderType,
     *args: Any,
     frame_offset: int = 1,
     **kwargs: Any,
-) -> Union[_cache_call[Any, Any], _cache_context]:
+) -> _cache_call[Any, Any] | _cache_context:
     del loader, args, kwargs, frame_offset
     raise TypeError(f"Invalid type for cache: {type(arg)}")
 
 
 def _invoke_call(
     _fn: Callable[..., Any] | None,
-    loader: Union[LoaderPartial, Loader, LoaderType],
+    loader: LoaderPartial | Loader | LoaderType,
     *args: Any,
     frame_offset: int = 1,
     **kwargs: Any,
-) -> Union[_cache_call[Any, Any], _cache_call_async[Any, Any]]:
+) -> _cache_call[Any, Any] | _cache_call_async[Any, Any]:
     if isinstance(loader, Loader):
         raise TypeError(
             "A loader instance cannot be passed to cache directly. "
@@ -895,7 +918,7 @@ def _invoke_call(
 @_cache_invocation.register
 def _invoke_call_none(
     _fn: None,
-    loader: Union[LoaderPartial, Loader, LoaderType],
+    loader: LoaderPartial | Loader | LoaderType,
     *args: Any,
     frame_offset: int = 1,
     **kwargs: Any,
@@ -909,11 +932,11 @@ def _invoke_call_none(
 def _invoke_call_fn(
     # mypy would like some generics, but this breaks the singledispatch
     _fn: abc.Callable,  # type: ignore[type-arg]
-    loader: Union[LoaderPartial, Loader, LoaderType],
+    loader: LoaderPartial | Loader | LoaderType,
     *args: Any,
     frame_offset: int = 1,
     **kwargs: Any,
-) -> Union[_cache_call[Any, Any], _cache_call_async[Any, Any]]:
+) -> _cache_call[Any, Any] | _cache_call_async[Any, Any]:
     return _invoke_call(
         _fn, loader, *args, frame_offset=frame_offset + 1, **kwargs
     )
@@ -922,7 +945,7 @@ def _invoke_call_fn(
 @_cache_invocation.register
 def _invoke_context(
     name: str,
-    loader: Union[LoaderPartial, Loader, LoaderType],
+    loader: LoaderPartial | Loader | LoaderType,
     *args: Any,
     frame_offset: int = 1,
     **kwargs: Any,
@@ -978,14 +1001,14 @@ def cache(
 
 
 def cache(  # type: ignore[misc]
-    name: Union[str, Optional[Callable[..., Any]]] = None,
+    name: str | Callable[..., Any] | None = None,
     *args: Any,
     pin_modules: bool = False,
-    loader: Optional[Union[LoaderPartial, Loader]] = None,
+    loader: LoaderPartial | Loader | None = None,
     _frame_offset: int = 1,
     _internal_interface_not_for_external_use: None = None,
     **kwargs: Any,
-) -> Union[_cache_call[Any, Any], _cache_call_async[Any, Any], _cache_context]:
+) -> _cache_call[Any, Any] | _cache_call_async[Any, Any] | _cache_context:
     """## Cache the value of a function based on args and closed-over variables.
 
     Decorating a function with `@mo.cache` will cache its value based on
@@ -1103,13 +1126,13 @@ def lru_cache(
 
 
 def lru_cache(  # type: ignore[misc]
-    name: Union[str, Optional[Callable[..., Any]]] = None,
+    name: str | Callable[..., Any] | None = None,
     maxsize: int = 128,
     *args: Any,
     pin_modules: bool = False,
     _internal_interface_not_for_external_use: None = None,
     **kwargs: Any,
-) -> Union[_cache_call[Any, Any], _cache_call_async[Any, Any], _cache_context]:
+) -> _cache_call[Any, Any] | _cache_call_async[Any, Any] | _cache_context:
     """Decorator for LRU caching the return value of a function.
 
     `mo.lru_cache` is a version of `mo.cache` with a bounded cache size. As an
@@ -1154,15 +1177,13 @@ def lru_cache(  # type: ignore[misc]
         )
 
     return cast(
-        Union[
-            _cache_call[Any, Any], _cache_call_async[Any, Any], _cache_context
-        ],
+        _cache_call[Any, Any] | _cache_call_async[Any, Any] | _cache_context,
         cache(  # type: ignore[call-overload]
             arg,
             *args,
             pin_modules=pin_modules,
             loader=MemoryLoader.partial(max_size=maxsize),
-            _frame_offset=2,
+            _frame_offset=2 if callable(arg) else 1,
             **kwargs,
         ),
     )
@@ -1205,16 +1226,16 @@ def persistent_cache(
 
 
 def persistent_cache(  # type: ignore[misc]
-    name: Union[str, Optional[Callable[..., Any]]] = None,
+    name: str | Callable[..., Any] | None = None,
     save_path: str | None = None,
     method: LoaderKey = "pickle",
-    store: Optional[Store] = None,
-    fn: Optional[Callable[..., Any]] = None,
+    store: Store | None = None,
+    fn: Callable[..., Any] | None = None,
     *args: Any,
     pin_modules: bool = False,
     _internal_interface_not_for_external_use: None = None,
     **kwargs: Any,
-) -> Union[_cache_call[Any, Any], _cache_call_async[Any, Any], _cache_context]:
+) -> _cache_call[Any, Any] | _cache_call_async[Any, Any] | _cache_context:
     """## Context manager to save variables to disk and restore them thereafter.
 
     The `mo.persistent_cache` context manager lets you delimit a block of code
@@ -1323,9 +1344,7 @@ def persistent_cache(  # type: ignore[misc]
         raise TypeError("Do not use fn directly, use positional arguments.")
 
     return cast(
-        Union[
-            _cache_call[Any, Any], _cache_call_async[Any, Any], _cache_context
-        ],
+        _cache_call[Any, Any] | _cache_call_async[Any, Any] | _cache_context,
         cache(  # type: ignore[call-overload]
             arg,
             *args,

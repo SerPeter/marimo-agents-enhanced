@@ -4,20 +4,104 @@ import { BigQueryDialect } from "@marimo-team/codemirror-sql/dialects";
 import { isKnownDialect } from "@/core/codemirror/language/languages/sql/utils";
 import type { SQLTableContext } from "@/core/datasets/data-source-connections";
 import { DUCKDB_ENGINE } from "@/core/datasets/engines";
-import type { DataTable, DataType } from "@/core/kernel/messages";
+import type {
+  Database,
+  DatabaseSchema,
+  DataTable,
+  DataType,
+} from "@/core/kernel/messages";
 import { logNever } from "@/utils/assertNever";
 import type { ColumnHeaderStatsKey } from "../data-table/types";
+
+/**
+ * Stable id for a table node in the datasources tree.
+ *
+ * schemaPath already includes the leaf schema for nested namespaces, so use it
+ * when present and fall back to the flat schema name otherwise (avoids
+ * duplicating the leaf, e.g. `top.nested.nested.table`).
+ */
+export function tableUniqueId(
+  sqlTableContext: SQLTableContext | undefined,
+  tableName: string,
+): string {
+  if (!sqlTableContext) {
+    return tableName;
+  }
+  const segments = (
+    sqlTableContext.schemaPath?.length
+      ? sqlTableContext.schemaPath
+      : [sqlTableContext.schema]
+  ).filter(Boolean);
+  return [sqlTableContext.database, ...segments, tableName].join(".");
+}
 
 // Some databases have no schemas, so we don't show it (eg. Clickhouse)
 export function isSchemaless(schemaName: string) {
   return schemaName === "";
 }
 
+// Lazy discovery: the `*_resolved` flags default to `true` and are only `false`
+// when enumeration was deferred. Helper functions to centralize logic
+export function areSchemasResolved(database: Database): boolean {
+  return database.schemas_resolved !== false;
+}
+export function areTablesResolved(schema: DatabaseSchema): boolean {
+  return schema.tables_resolved !== false;
+}
+export function areChildSchemasResolved(schema: DatabaseSchema): boolean {
+  return schema.child_schemas_resolved !== false;
+}
+
+/**
+ * Whether a loaded schema subtree contains a table whose name matches
+ * `searchValue`. Deferred (not-yet-fetched) tables and child schemas are
+ * treated as non-matching, so searching never triggers a lazy catalog fetch on
+ * large/remote connections.
+ */
+export function schemaSubtreeMatchesSearch(
+  schema: DatabaseSchema,
+  searchValue: string | undefined,
+): boolean {
+  const query = searchValue?.trim().toLowerCase();
+  if (!query) {
+    return false;
+  }
+  if (
+    areTablesResolved(schema) &&
+    schema.tables.some((table) => table.name.toLowerCase().includes(query))
+  ) {
+    return true;
+  }
+  if (areChildSchemasResolved(schema)) {
+    return (schema.child_schemas ?? []).some((child) =>
+      schemaSubtreeMatchesSearch(child, query),
+    );
+  }
+  return false;
+}
+
+/**
+ * Auto-expand a database row during search only when one of its loaded schemas
+ * contains a matching table. Returns false when the schema list itself is
+ * deferred.
+ */
+export function shouldExpandDatabaseForSearch(
+  database: Database,
+  searchValue: string | undefined,
+): boolean {
+  if (!searchValue?.trim() || !areSchemasResolved(database)) {
+    return false;
+  }
+  return database.schemas.some((schema) =>
+    schemaSubtreeMatchesSearch(schema, searchValue),
+  );
+}
+
 interface SqlCodeFormatter {
   /**
-   * Format the table name based on dialect-specific rules
+   * Format the table path based on dialect-specific rules
    */
-  formatTableName: (tableName: string) => string;
+  formatTablePath: (tablePath: string[]) => string;
   /**
    * Format the SELECT clause
    */
@@ -25,7 +109,7 @@ interface SqlCodeFormatter {
 }
 
 const defaultFormatter: SqlCodeFormatter = {
-  formatTableName: (tableName: string) => tableName,
+  formatTablePath: (tablePath: string[]) => tablePath.join("."),
   formatSelectClause: (columnName: string, tableName: string) =>
     `SELECT ${columnName} FROM ${tableName} LIMIT 100`,
 };
@@ -41,7 +125,8 @@ function getFormatter(dialect: string): SqlCodeFormatter {
       const quote = BigQueryDialect.spec.identifierQuotes;
       return {
         // BigQuery uses backticks for identifiers
-        formatTableName: (tableName: string) => `${quote}${tableName}${quote}`,
+        formatTablePath: (tablePath: string[]) =>
+          `${quote}${tablePath.join(".")}${quote}`,
         formatSelectClause: defaultFormatter.formatSelectClause,
       };
     }
@@ -49,7 +134,7 @@ function getFormatter(dialect: string): SqlCodeFormatter {
     case "sqlserver":
     case "microsoft sql server":
       return {
-        formatTableName: defaultFormatter.formatTableName,
+        formatTablePath: defaultFormatter.formatTablePath,
         formatSelectClause: (columnName: string, tableName: string) =>
           `SELECT TOP 100 ${columnName} FROM ${tableName}`,
       };
@@ -57,12 +142,11 @@ function getFormatter(dialect: string): SqlCodeFormatter {
     case "postgres":
     case "postgresql":
     case "duckdb":
+    case "dremio":
       // Quote column and table names to avoid raising errors on weird characters
       return {
-        formatTableName: (tableName: string) => {
-          const parts = tableName.split(".");
-          return parts.map((part) => `"${part}"`).join(".");
-        },
+        formatTablePath: (tablePath: string[]) =>
+          tablePath.map((part) => `"${part}"`).join("."),
         formatSelectClause: (columnName: string, tableName: string) =>
           `SELECT ${columnName === "*" ? "*" : `"${columnName}"`} FROM ${tableName} LIMIT 100`,
       };
@@ -114,26 +198,27 @@ export function sqlCode({
       database,
       dialect,
     } = sqlTableContext;
-    let tableName = table.name;
+    const tablePath = [table.name];
 
     // Set the fully qualified table name based on schema and database
     if (isSchemaless(schema)) {
-      tableName =
-        database === defaultDatabase ? tableName : `${database}.${tableName}`;
+      if (database !== defaultDatabase) {
+        tablePath.unshift(database);
+      }
     } else {
       // Include schema if it's not the default schema
       if (schema !== defaultSchema) {
-        tableName = `${schema}.${tableName}`;
+        tablePath.unshift(schema);
       }
 
       // Include database if it's not the default database
       if (database !== defaultDatabase) {
-        tableName = `${database}.${tableName}`;
+        tablePath.unshift(database);
       }
     }
 
     const formatter = getFormatter(dialect);
-    const formattedTableName = formatter.formatTableName(tableName);
+    const formattedTableName = formatter.formatTablePath(tablePath);
     const selectClause = formatter.formatSelectClause(
       columnName,
       formattedTableName,

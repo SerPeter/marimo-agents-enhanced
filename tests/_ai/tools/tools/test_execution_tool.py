@@ -57,7 +57,7 @@ class MockOutput:
 
 @dataclass
 class MockCellNotification:
-    cell_id: CellId_t = CellId_t("")
+    cell_id: CellId_t = field(default_factory=lambda: CellId_t(""))
     status: Optional[str] = None
     output: Optional[MockOutput] = None
     console: object = None

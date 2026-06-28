@@ -653,6 +653,10 @@ def test_lightweight_cell_map_diagnostics():
 
     context = Mock(spec=ToolContext)
     context.get_session.return_value = mock_session
+    context.resolve_session_and_id.return_value = (
+        mock_session,
+        SessionId("test"),
+    )
     tool.context = context
 
     args = GetLightweightCellMapArgs(
@@ -686,6 +690,10 @@ def test_lightweight_cell_map_no_diagnostics():
 
     context = Mock(spec=ToolContext)
     context.get_session.return_value = mock_session
+    context.resolve_session_and_id.return_value = (
+        mock_session,
+        SessionId("test"),
+    )
     tool.context = context
 
     args = GetLightweightCellMapArgs(

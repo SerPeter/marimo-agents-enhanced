@@ -6,6 +6,7 @@ import parse, {
   type HTMLReactParserOptions,
 } from "html-react-parser";
 import React, {
+  cloneElement,
   isValidElement,
   type JSX,
   type ReactNode,
@@ -16,6 +17,8 @@ import { CopyClipboardIcon } from "@/components/icons/copy-icon";
 import { QueryParamPreservingLink } from "@/components/ui/query-param-preserving-link";
 import { Tooltip } from "@/components/ui/tooltip";
 import { DocHoverTarget } from "@/core/documentation/DocHoverTarget";
+import { hasTrustedNotebookContext } from "@/core/static/export-context";
+import { Logger } from "@/utils/Logger";
 import { sanitizeHtml, useSanitizeHtml } from "./sanitize";
 
 type ReplacementFn = NonNullable<HTMLReactParserOptions["replace"]>;
@@ -98,8 +101,27 @@ const replaceSrcScripts = (domNode: DOMNode): JSX.Element | undefined => {
     if (!src) {
       return;
     }
-    // Check if script already exists
-    if (!document.querySelector(`script[src="${src}"]`)) {
+    // Only append notebook-authored scripts when the page is a trusted
+    // context (the user has run a cell, the page is a trusted export, or
+    // we're running in read/app mode). In untrusted edit mode before any
+    // user interaction, drop the script and log a warning. Outer
+    // sanitization will normally strip <script> tags already; this is
+    // defense-in-depth for flows that reparse children with
+    // alwaysSanitizeHtml: false (see registerReactComponent.getChildren).
+    if (!hasTrustedNotebookContext()) {
+      Logger.warn(
+        `[RenderHTML] refusing <script src> in untrusted context: ${src}`,
+      );
+      // oxlint-disable-next-line react/jsx-no-useless-fragment
+      return <></>;
+    }
+    // Check if script already exists. Avoid building a CSS selector from
+    // notebook-provided input, which can throw for valid URLs containing
+    // selector-significant characters (e.g. IPv6 hosts with `[`/`]`).
+    const scriptExists = [...document.querySelectorAll("script[src]")].some(
+      (existingScript) => existingScript.getAttribute("src") === src,
+    );
+    if (!scriptExists) {
       const script = document.createElement("script");
       script.src = src;
       document.head.append(script);
@@ -148,6 +170,35 @@ const addCopyButtonToCodehilite: TransformFn = (
   }
 };
 
+// Decorator (not a match-and-replace transform): applies a src-based key
+// to <img> elements so they remount on src change. Reusing an <img> across
+// src changes can leave the previous image painted (e.g. when the new
+// request is slow/blocked, served stale by a CDN, or fails CORS), so the
+// user sees the old image even though the HTML source is up to date.
+//
+// Runs unconditionally after the match-and-replace transforms so it still
+// applies when an <img> was already wrapped by, say, wrapTooltipTargets.
+const keyImagesBySrc: TransformFn = (
+  reactNode: ReactNode,
+  domNode: DOMNode,
+  index: number,
+): JSX.Element | undefined => {
+  if (!(domNode instanceof Element) || domNode.name !== "img") {
+    return undefined;
+  }
+  const src = domNode.attribs?.src;
+  if (!src || !isValidElement(reactNode)) {
+    return undefined;
+  }
+  // data: URIs are inline — no network fetch — so they can't go stale.
+  // Skip to avoid bloating the React key with a megabyte base64 payload.
+  // URI schemes are case-insensitive per RFC 3986.
+  if (/^data:/i.test(src)) {
+    return undefined;
+  }
+  return cloneElement(reactNode, { key: `${src}-${index}` });
+};
+
 // Wrap elements with data-marimo-doc attribute in a DocHoverTarget
 const wrapDocHoverTargets: TransformFn = (
   reactNode: ReactNode,
@@ -164,11 +215,20 @@ const wrapDocHoverTargets: TransformFn = (
 // Wrap elements with data-tooltip attribute in a Tooltip component.
 // This renders the tooltip in a portal (top layer), fixing clipping inside
 // containers with overflow:hidden (e.g. grid cells).
+//
+// Marimo custom elements (marimo-button, etc.) are skipped — they handle
+// tooltips via the plugin system inside their Shadow DOM. Wrapping them here
+// would create a duplicate tooltip with incorrect positioning and
+// un-decoded JSON content (the data-* value is JSON-encoded by the backend).
 const wrapTooltipTargets: TransformFn = (
   reactNode: ReactNode,
   domNode: DOMNode,
 ): JSX.Element | undefined => {
   if (domNode instanceof Element && domNode.attribs?.["data-tooltip"]) {
+    const tagName = domNode.name?.toLowerCase() ?? "";
+    if (tagName.startsWith("marimo-")) {
+      return undefined;
+    }
     const tooltipContent = domNode.attribs["data-tooltip"];
     return (
       <Tooltip content={tooltipContent}>{reactNode as JSX.Element}</Tooltip>
@@ -251,6 +311,8 @@ function parseHtml({
     ...additionalReplacements,
   ];
 
+  // Match-and-replace transforms: the first one that returns a value wins
+  // (short-circuits the rest).
   const transformFunctions: TransformFn[] = [
     addCopyButtonToCodehilite,
     preserveQueryParamsInAnchorLinks,
@@ -259,6 +321,12 @@ function parseHtml({
     removeWrappingBodyTags,
     removeWrappingHtmlTags,
   ];
+
+  // Decorators: run unconditionally on the result of the transform pipeline
+  // and may further wrap/clone it. Used for cross-cutting concerns that
+  // should apply regardless of which (if any) match-and-replace transform
+  // ran above.
+  const decoratorFunctions: TransformFn[] = [keyImagesBySrc];
 
   return parse(html, {
     replace: (domNode: DOMNode, index: number) => {
@@ -271,13 +339,21 @@ function parseHtml({
       return domNode;
     },
     transform: (reactNode: ReactNode, domNode: DOMNode, index: number) => {
+      let result: ReactNode = reactNode as JSX.Element;
       for (const transformFunction of transformFunctions) {
-        const transformed = transformFunction(reactNode, domNode, index);
+        const transformed = transformFunction(result, domNode, index);
         if (transformed) {
-          return transformed;
+          result = transformed;
+          break;
         }
       }
-      return reactNode as JSX.Element;
+      for (const decorate of decoratorFunctions) {
+        const decorated = decorate(result, domNode, index);
+        if (decorated) {
+          result = decorated;
+        }
+      }
+      return result as JSX.Element;
     },
   });
 }

@@ -7,8 +7,9 @@ import re
 import unittest
 import warnings
 from math import isnan, nan
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import narwhals.stable.v2 as nw
 import pytest
@@ -20,6 +21,7 @@ from marimo._plugins.ui._impl.table import SortArgs
 from marimo._plugins.ui._impl.tables.format import FormatMapping
 from marimo._plugins.ui._impl.tables.pandas_table import (
     PandasTableManagerFactory,
+    _extension_column_needs_stringify,
 )
 from marimo._plugins.ui._impl.tables.table_manager import TableManager
 from tests.mocks import snapshotter
@@ -181,7 +183,7 @@ class TestPandasTableManager(unittest.TestCase):
                 ),
                 "nulls": pd.Series([None, "data", None]),
                 "category": pd.Categorical(["cat", "dog", "mouse"]),
-                "set": [set([1, 2]), set([3, 4]), set([5, 6])],
+                "set": [{1, 2}, {3, 4}, {5, 6}],
                 "imaginary": [1 + 2j, 3 + 4j, 5 + 6j],
                 "time": [
                     datetime.time(12, 30),
@@ -722,7 +724,7 @@ class TestPandasTableManager(unittest.TestCase):
                 "D": [True, False, True],
                 "E": [1 + 2j, 3 + 4j, 5 + 6j],
                 "F": [None, None, None],
-                "G": [set([1, 2]), set([3, 4]), set([5, 6])],
+                "G": [{1, 2}, {3, 4}, {5, 6}],
                 "H": [
                     pd.Timestamp("2021-01-01"),
                     pd.Timestamp("2021-01-02"),
@@ -773,6 +775,20 @@ class TestPandasTableManager(unittest.TestCase):
             ],
         ]
 
+    # pandas 3 emits Pandas4Warning here (select_dtypes(include=["object"])
+    # also picks up the new "str" dtype, for back-compat with pandas 2).
+    # Suppress by message so this filter is a no-op on pandas 2, where
+    # neither the "str" dtype nor Pandas4Warning exists. Necessary because
+    # xdist's unserialize_warning_message fails to import pandas in the
+    # controller on CI and the receiver thread treats that as a fatal
+    # BaseException, killing the worker and cascading into hundreds of
+    # fake failures.
+    # TODO: fix xdist upstream — workermanage.py:462 should not tear down
+    # the session when warning deserialization fails; wrap just the
+    # unserialize call and fall back to a generic Warning.
+    @pytest.mark.filterwarnings(
+        "ignore:For backward compatibility, 'str' dtypes are included"
+    )
     def test_get_field_types_nullables(self) -> None:
         data = pd.DataFrame(
             {
@@ -1652,6 +1668,46 @@ class TestPandasTableManager(unittest.TestCase):
         last = sorted_manager.data["A"][-1]
         assert last is None or isnan(last)
 
+    def test_sort_values_with_mixed_types(self) -> None:
+        """Sorting a column with mixed types (int, str, float, bool, None)
+        should not raise, falling back to string comparison."""
+        df = pd.DataFrame(
+            {
+                "mixed": [42, "hello", 3.14, True, None, "world", 7],
+                "normal": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+            }
+        )
+        manager = self.factory.create()(df)
+
+        # descending
+        sorted_manager = manager.sort_values(
+            [SortArgs(by="mixed", descending=True)]
+        )
+        assert sorted_manager.get_num_rows() == 7
+        values = sorted_manager.data["mixed"].to_list()
+        assert values[-1] is None or (
+            isinstance(values[-1], float) and isnan(values[-1])
+        )
+
+        # ascending
+        sorted_manager = manager.sort_values(
+            [SortArgs(by="mixed", descending=False)]
+        )
+        assert sorted_manager.get_num_rows() == 7
+        values = sorted_manager.data["mixed"].to_list()
+        assert values[-1] is None or (
+            isinstance(values[-1], float) and isnan(values[-1])
+        )
+
+        # multi-column sort with one mixed column
+        sorted_manager = manager.sort_values(
+            [
+                SortArgs(by="mixed", descending=False),
+                SortArgs(by="normal", descending=False),
+            ]
+        )
+        assert sorted_manager.get_num_rows() == 7
+
     def test_dataframe_with_multiindex(self) -> None:
         df = pd.DataFrame(
             {"A": [1, 2, 3, 4], "B": [5, 6, 7, 8]},
@@ -2110,13 +2166,73 @@ class TestPandasTableManager(unittest.TestCase):
         # MultiIndex should be preserved with original names
         assert list(result._original_data.index.names) == ["x", "level"]
 
+    @pytest.mark.requires("pint_pandas")
+    def test_to_json_str_pint_pandas_series(self) -> None:
+        """pint-pandas quantities display as readable strings in tables."""
+        import pandas as pd
+
+        series = pd.Series([1, 2, 3, 4], dtype="pint[meter]")
+        manager = self.factory.create()(series.to_frame(name="value"))
+        json_str = manager.to_json_str()
+        json_data = json.loads(json_str)
+
+        expected = [{"value": value} for value in series.astype(str)]
+        assert json_data == expected
+
+    def test_extension_column_needs_stringify_skips_json_primitives(
+        self,
+    ) -> None:
+        """Extension columns with JSON-safe scalars should not be stringified."""
+        import pandas as pd
+
+        series = pd.Series([1.1, 2.2, 3.3])
+        with patch(
+            "pandas.api.types.is_extension_array_dtype", return_value=True
+        ):
+            assert not _extension_column_needs_stringify(series)
+
+    def test_extension_column_needs_stringify_for_rich_extension_values(
+        self,
+    ) -> None:
+        """Extension columns with nested JSON values should be stringified."""
+        import pandas as pd
+
+        series = pd.Series([SimpleNamespace(x=1.1)])
+        with patch(
+            "pandas.api.types.is_extension_array_dtype", return_value=True
+        ):
+            assert _extension_column_needs_stringify(series)
+
+    def test_extension_column_needs_stringify_with_duplicate_index(
+        self,
+    ) -> None:
+        """Duplicate labels should not break extension-array sampling."""
+        import pandas as pd
+
+        series = pd.Series([1.1, 2.2], index=[0, 0])
+        with patch(
+            "pandas.api.types.is_extension_array_dtype", return_value=True
+        ):
+            assert not _extension_column_needs_stringify(series)
+
+    def test_to_json_str_keeps_numeric_extension_columns(self) -> None:
+        """Numeric extension-array columns stay numeric in table JSON."""
+        import pandas as pd
+
+        df = pd.DataFrame({"value": [1.1, 2.2, 3.3]})
+        manager = self.factory.create()(df)
+        with patch(
+            "pandas.api.types.is_extension_array_dtype", return_value=True
+        ):
+            json_data = json.loads(manager.to_json_str())
+
+        assert json_data == [{"value": 1.1}, {"value": 2.2}, {"value": 3.3}]
+
     def test_to_arrow_ipc_fallback_for_unsupported_extension_dtype(
         self,
     ) -> None:
         """to_arrow_ipc falls back when a column has an extension dtype
         that PyArrow cannot convert (e.g. pint-pandas)."""
-        from unittest.mock import patch
-
         import pyarrow as pa
 
         df = pd.DataFrame({"a": [1, 2, 3], "b": [4.0, 5.0, 6.0]})

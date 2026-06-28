@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import textwrap
+from collections.abc import Callable
 from functools import wraps
-from typing import TYPE_CHECKING, Any, Callable, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 from unittest.mock import patch
 
 import pytest
@@ -13,9 +14,11 @@ from marimo._config.manager import (
     MarimoConfigManager,
     MarimoConfigReaderWithOverrides,
     ScriptConfigManager,
+    SecurityConfigManager,
     UserConfigManager,
     get_default_config_manager,
 )
+from marimo._config.settings import GLOBAL_SETTINGS
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -48,6 +51,178 @@ def test_save_config(mock_dump: Any) -> None:
     assert result == mock_config
 
     assert mock_dump.mock_calls[0][1][0] == mock_config
+
+
+@restore_config
+def test_save_config_is_deterministic(tmp_path: Path) -> None:
+    """Two configs with identical content but different dict insertion
+    order must serialize to the same bytes.
+
+    Probabilistic guard: order depends on PYTHONHASHSEED, so this test catches
+    the regression on roughly 9 in 10 random pytest invocations rather than
+    every run. The fixture is intentionally wide (many out-of-order keys across
+    several tables) to maximize the per-seed catch rate.
+    """
+    from typing import cast
+
+    from marimo._config.config import MarimoConfig
+
+    config_path = tmp_path / "marimo.toml"
+    manager = UserConfigManager()
+    manager.get_config_path = lambda: str(config_path)  # type: ignore[method-assign]
+
+    a = PartialMarimoConfig(
+        runtime={  # type: ignore[typeddict-item]
+            "auto_reload": "off",
+            "auto_instantiate": True,
+            "on_cell_change": "autorun",
+            "watcher_on_save": "lazy",
+            "reactive_tests": False,
+        },
+        ai={
+            "open_ai": {"api_key": "k", "model": "m", "base_url": "u"},
+            "models": {  # type: ignore[typeddict-item]
+                "chat_model": "c",
+                "edit_model": "e",
+                "autocomplete_model": "a",
+            },
+        },
+        display={  # type: ignore[typeddict-item]
+            "theme": "light",
+            "code_editor_font_size": 14,
+            "cell_output": "below",
+            "dataframes": "rich",
+            "default_table_page_size": 10,
+        },
+        save={  # type: ignore[typeddict-item]
+            "autosave": "off",
+            "autosave_delay": 1000,
+            "format_on_save": False,
+        },
+        completion={  # type: ignore[typeddict-item]
+            "activate_on_typing": True,
+            "signature_hint_on_typing": True,
+            "copilot": False,
+        },
+        keymap={"preset": "default", "destructive_delete": False},  # type: ignore[typeddict-item]
+        server={  # type: ignore[typeddict-item]
+            "browser": "default",
+            "follow_symlink": False,
+        },
+        package_management={"manager": "uv"},
+        formatting={"line_length": 79},
+    )
+    # b is `a` with every dict's keys reversed.
+    b = PartialMarimoConfig(
+        formatting={"line_length": 79},
+        package_management={"manager": "uv"},
+        server={  # type: ignore[typeddict-item]
+            "follow_symlink": False,
+            "browser": "default",
+        },
+        keymap={"destructive_delete": False, "preset": "default"},  # type: ignore[typeddict-item]
+        completion={  # type: ignore[typeddict-item]
+            "copilot": False,
+            "signature_hint_on_typing": True,
+            "activate_on_typing": True,
+        },
+        save={  # type: ignore[typeddict-item]
+            "format_on_save": False,
+            "autosave_delay": 1000,
+            "autosave": "off",
+        },
+        display={  # type: ignore[typeddict-item]
+            "default_table_page_size": 10,
+            "dataframes": "rich",
+            "cell_output": "below",
+            "code_editor_font_size": 14,
+            "theme": "light",
+        },
+        ai={
+            "models": {  # type: ignore[typeddict-item]
+                "autocomplete_model": "a",
+                "edit_model": "e",
+                "chat_model": "c",
+            },
+            "open_ai": {"base_url": "u", "model": "m", "api_key": "k"},
+        },
+        runtime={  # type: ignore[typeddict-item]
+            "reactive_tests": False,
+            "watcher_on_save": "lazy",
+            "on_cell_change": "autorun",
+            "auto_instantiate": True,
+            "auto_reload": "off",
+        },
+    )
+
+    manager._load_config = lambda: cast(MarimoConfig, dict(a))
+    manager.save_config(a)
+    bytes_a = config_path.read_bytes()
+
+    manager._load_config = lambda: cast(MarimoConfig, dict(b))
+    manager.save_config(b)
+    bytes_b = config_path.read_bytes()
+
+    assert bytes_a == bytes_b
+
+
+@restore_config
+@patch("tomlkit.dump")
+def test_save_config_none_deletes_key(mock_dump: Any) -> None:
+    """None-as-delete: sending {ai: {max_tokens: None}} removes the key."""
+    mock_config = merge_default_config(
+        PartialMarimoConfig(ai={"max_tokens": 8192, "rules": "be terse"})
+    )
+    manager = UserConfigManager()
+    manager._load_config = lambda: mock_config
+
+    manager.save_config(
+        cast(
+            PartialMarimoConfig,
+            {"ai": {"max_tokens": None}},
+        )
+    )
+
+    written = mock_dump.mock_calls[0][1][0]
+    assert "max_tokens" not in written["ai"]
+    # sibling key untouched
+    assert written["ai"]["rules"] == "be terse"
+
+
+@restore_config
+def test_save_config_with_none_does_not_raise(tmp_path: Path) -> None:
+    """Regression guard: TOML has no null type, so a None value reaching
+    tomlkit.dump raises ConvertError. _drop_none_values must strip it first,
+    making the real (unmocked) save succeed and omit the key."""
+    config_path = tmp_path / "marimo.toml"
+    mock_config = merge_default_config(
+        PartialMarimoConfig(ai={"max_tokens": 8192, "rules": "be terse"})
+    )
+    manager = UserConfigManager()
+    manager._load_config = lambda: mock_config
+
+    with patch.object(
+        manager, "get_config_path", return_value=str(config_path)
+    ):
+        manager.save_config(
+            cast(PartialMarimoConfig, {"ai": {"max_tokens": None}})
+        )
+
+    contents = config_path.read_text()
+    assert "max_tokens" not in contents
+    assert "be terse" in contents
+
+
+def test_drop_none_values_strips_nested_none() -> None:
+    from marimo._config.manager import _drop_none_values
+
+    d: dict[str, Any] = {
+        "keep": 1,
+        "drop": None,
+        "nested": {"keep": "x", "drop": None},
+    }
+    _drop_none_values(d)
+    assert d == {"keep": 1, "nested": {"keep": "x"}}
 
 
 @restore_config
@@ -487,3 +662,74 @@ def test_env_config_manager_no_env_vars() -> None:
     manager = EnvConfigManager()
     config = manager.get_config(hide_secrets=False)
     assert config == {}
+
+
+RESTRICTED_SHARING = {"wasm": False, "html": False, "molab": False}
+
+
+def test_restrict_sharing_clamps_config_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MARIMO_RESTRICT_SHARING forces sharing off in the served overrides.
+
+    The editor serves get_config_overrides() to the frontend, so the
+    enforcement must be visible there for the Share affordances to be hidden.
+    """
+    monkeypatch.setattr(GLOBAL_SETTINGS, "RESTRICT_SHARING", True)
+    manager = MarimoConfigManager(
+        UserConfigManager(), EnvConfigManager(), SecurityConfigManager()
+    )
+    overrides = manager.get_config_overrides(hide_secrets=False)
+    assert overrides["sharing"] == RESTRICTED_SHARING
+
+
+def test_restrict_sharing_overrides_user_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The restriction wins over a user config that enables sharing."""
+    monkeypatch.setattr(GLOBAL_SETTINGS, "RESTRICT_SHARING", True)
+    user = UserConfigManager()
+    monkeypatch.setattr(
+        user,
+        "_load_config",
+        lambda: merge_default_config(
+            {"sharing": {"wasm": True, "html": True, "molab": True}}
+        ),
+    )
+    manager = MarimoConfigManager(
+        user, EnvConfigManager(), SecurityConfigManager()
+    )
+    assert manager.get_config(hide_secrets=False)["sharing"] == (
+        RESTRICTED_SHARING
+    )
+
+
+def test_restrict_sharing_beats_later_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later with_overrides() cannot re-enable sharing.
+
+    with_overrides() appends its partial after EnvConfigManager, but
+    MarimoConfigManager keeps the SecurityConfigManager last, so the
+    enforcement still wins over the later override.
+    """
+    monkeypatch.setattr(GLOBAL_SETTINGS, "RESTRICT_SHARING", True)
+    manager = MarimoConfigManager(
+        UserConfigManager(), EnvConfigManager(), SecurityConfigManager()
+    ).with_overrides({"sharing": {"wasm": True, "html": True, "molab": True}})
+    assert manager.get_config_overrides(hide_secrets=False)["sharing"] == (
+        RESTRICTED_SHARING
+    )
+
+
+def test_restrict_sharing_disabled_keeps_user_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the flag off, an explicit sharing config is left untouched."""
+    monkeypatch.setattr(GLOBAL_SETTINGS, "RESTRICT_SHARING", False)
+    manager = MarimoConfigManager(
+        UserConfigManager(), EnvConfigManager(), SecurityConfigManager()
+    ).with_overrides({"sharing": {"wasm": True}})
+    assert manager.get_config_overrides(hide_secrets=False)["sharing"] == {
+        "wasm": True
+    }

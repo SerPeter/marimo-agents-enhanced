@@ -1,8 +1,10 @@
 # Copyright 2026 Marimo. All rights reserved.
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta  # noqa: TCH003
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union
+from datetime import date, datetime, time, timedelta  # noqa: TC003
+from typing import TYPE_CHECKING, Any, Literal
+
+import msgspec
 
 from marimo._types.ids import VariableName
 from marimo._utils.msgspec_basestruct import BaseStruct
@@ -74,19 +76,38 @@ class DataTable(BaseStruct):
     source_type: DataTableSource
     source: str
     name: str
-    num_rows: Optional[int]
-    num_columns: Optional[int]
-    variable_name: Optional[VariableName]
+    num_rows: int | None
+    num_columns: int | None
+    variable_name: VariableName | None
     columns: list[DataTableColumn]
-    engine: Optional[VariableName] = None
+    engine: VariableName | None = None
     type: DataTableType = "table"
-    primary_keys: Optional[list[str]] = None
-    indexes: Optional[list[str]] = None
+    primary_keys: list[str] | None = None
+    indexes: list[str] | None = None
 
 
 class Schema(BaseStruct):
+    """
+    Represents a database schema and its tables.
+
+    A schema may itself contain nested child schemas, e.g. for catalogs with
+    hierarchical namespaces such as Iceberg (`top.nested.deep`).
+
+    Attributes:
+        name (str): The name of the schema.
+        tables (List[DataTable]): Tables in this schema.
+        tables_resolved (bool): True when `tables` has been enumerated
+            False when table discovery was deferred. Defaults to True
+        child_schemas (List[Schema]): Nested child schemas (sub-namespaces).
+        child_schemas_resolved (bool): True when `child_schemas` has been
+            enumerated. False when discovery was deferred. Defaults to True
+    """
+
     name: str
     tables: list[DataTable]
+    tables_resolved: bool = True
+    child_schemas: list[Schema] = msgspec.field(default_factory=list)
+    child_schemas_resolved: bool = True
 
 
 class Database(BaseStruct):
@@ -96,22 +117,25 @@ class Database(BaseStruct):
     Attributes:
         name (str): The name of the database
         dialect (str): The dialect of the database
-        schemas (List[Schema]): List of schemas in the database
+        schemas (List[Schema]): List of schemas in the database.
+        schemas_resolved (bool): True when `schemas` has been enumerated.
+            False when schema discovery was deferred. Defaults to True
         engine (Optional[VariableName]): Database engine or connection handler, if any.
     """
 
     name: str
     dialect: str
     schemas: list[Schema]
-    engine: Optional[VariableName] = None
+    schemas_resolved: bool = True
+    engine: VariableName | None = None
 
 
 if TYPE_CHECKING:
     from decimal import Decimal
 
-    NumericLiteral = Union[int, float, Decimal]
-    TemporalLiteral = Union[date, time, datetime, timedelta]
-    NonNestedLiteral = Union[NumericLiteral, TemporalLiteral, str, bool, bytes]
+    NumericLiteral = int | float | Decimal
+    TemporalLiteral = date | time | datetime | timedelta
+    NonNestedLiteral = NumericLiteral | TemporalLiteral | str | bool | bytes
 else:
     # For runtime/msgspec, use Any since msgspec can't handle unions with
     # multiple str-like types (str, datetime, date, time, timedelta)
@@ -123,21 +147,21 @@ class ColumnStats(BaseStruct):
     Represents stats for a column in a data table.
     """
 
-    total: Optional[int] = None
-    nulls: Optional[int] = None
-    unique: Optional[int] = None
-    min: Optional[NonNestedLiteral] = None
-    max: Optional[NonNestedLiteral] = None
-    mean: Optional[NonNestedLiteral] = None
-    median: Optional[NonNestedLiteral] = None
-    std: Optional[NonNestedLiteral] = None
-    true: Optional[int] = None
-    false: Optional[int] = None
-    p5: Optional[NonNestedLiteral] = None
-    p25: Optional[NonNestedLiteral] = None
+    total: int | None = None
+    nulls: int | None = None
+    unique: int | None = None
+    min: NonNestedLiteral | None = None
+    max: NonNestedLiteral | None = None
+    mean: NonNestedLiteral | None = None
+    median: NonNestedLiteral | None = None
+    std: NonNestedLiteral | None = None
+    true: int | None = None
+    false: int | None = None
+    p5: NonNestedLiteral | None = None
+    p25: NonNestedLiteral | None = None
     # p50 is the median
-    p75: Optional[NonNestedLiteral] = None
-    p95: Optional[NonNestedLiteral] = None
+    p75: NonNestedLiteral | None = None
+    p95: NonNestedLiteral | None = None
 
 
 class BinValue(BaseStruct):
@@ -188,5 +212,5 @@ class DataSourceConnection(BaseStruct):
     name: str
     display_name: str
     databases: list[Database]
-    default_database: Optional[str] = None
-    default_schema: Optional[str] = None
+    default_database: str | None = None
+    default_schema: str | None = None

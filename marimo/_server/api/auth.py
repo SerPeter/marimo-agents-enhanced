@@ -5,10 +5,10 @@ import base64
 import hmac
 import secrets
 import typing
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import starlette
-import starlette.status as status
+from starlette import status
 from starlette.datastructures import Secret
 from starlette.exceptions import HTTPException
 from starlette.middleware.authentication import AuthenticationMiddleware
@@ -33,7 +33,7 @@ TOKEN_QUERY_PARAM = "access_token"
 # - Or authenticates by access_token in query params
 # - Or authenticates by basic auth
 def validate_auth(
-    conn: HTTPConnection, form_dict: Optional[dict[str, str]] = None
+    conn: HTTPConnection, form_dict: dict[str, str] | None = None
 ) -> bool:
     state = AppState.from_app(conn.app)
     auth_token = str(state.session_manager.auth_token)
@@ -100,7 +100,7 @@ def validate_auth(
 
 def _parse_basic_auth_credentials(
     credentials: str,
-) -> tuple[Optional[str], Optional[str]]:
+) -> tuple[str | None, str | None]:
     try:
         decoded = base64.b64decode(credentials).decode("utf-8")
     except Exception:
@@ -167,23 +167,20 @@ class CookieSession:
 class CustomSessionMiddleware(SessionMiddleware):
     """
     Wrapper around starlette's SessionMiddleware to:
-     - customize the session cookie based on the the port
+     - customize the session cookie based on the port and base URL
      - only run in Edit mode
     """
 
     def __init__(
         self,
         app: ASGIApp,
-        secret_key: typing.Union[str, Secret],
+        secret_key: str | Secret,
         session_cookie: str = "session",
-        max_age: typing.Optional[int] = 14
-        * 24
-        * 60
-        * 60,  # 14 days, in seconds
+        max_age: int | None = 14 * 24 * 60 * 60,  # 14 days, in seconds
         path: str = "/",
         same_site: typing.Literal["lax", "strict", "none"] = "lax",
         https_only: bool = False,
-        domain: typing.Optional[str] = None,
+        domain: str | None = None,
     ) -> None:
         from packaging import version
 
@@ -191,6 +188,7 @@ class CustomSessionMiddleware(SessionMiddleware):
         # we don't have access to the app state
 
         self.original_session_cookie = session_cookie
+        self.original_path = path
 
         if version.parse(starlette.__version__) >= version.parse("0.32.0"):
             # Domain was added in 0.32.0; we currently don't use it.
@@ -226,11 +224,21 @@ class CustomSessionMiddleware(SessionMiddleware):
 
         # We key the token cookie by port to avoid conflicts
         # with multiple marimo instances running on the same host
+        cookie_name = self.original_session_cookie
         maybe_port = state.maybe_port
         if maybe_port is not None:
-            self.session_cookie = (
-                f"{self.original_session_cookie}_{maybe_port}"
-            )
+            cookie_name = f"{cookie_name}_{maybe_port}"
+
+        base_url = getattr(state.state, "base_url", "")
+        if base_url:
+            slug = base_url.lstrip("/").replace("/", "_")
+            if slug:
+                cookie_name = f"{cookie_name}_{slug}"
+            self.path = base_url
+        else:
+            self.path = self.original_path
+
+        self.session_cookie = cookie_name
 
         return await super().__call__(scope, receive, send)
 

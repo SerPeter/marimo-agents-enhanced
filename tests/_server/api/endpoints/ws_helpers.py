@@ -1,15 +1,26 @@
 # Copyright 2026 Marimo. All rights reserved.
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from marimo._messaging.msgspec_encoder import asdict
 from marimo._messaging.notification import (
+    ConsumerCapabilities,
     KernelCapabilitiesNotification,
     KernelReadyNotification,
 )
 from marimo._utils.parse_dataclass import parse_raw
 from tests._server.mocks import token_header
+
+if TYPE_CHECKING:
+    from starlette.testclient import WebSocketTestSession
+
+
+def receive_until(op: str, websocket: WebSocketTestSession) -> dict[str, Any]:
+    while True:
+        data = websocket.receive_json()
+        if data["op"] == op:
+            return data
 
 
 def create_response(
@@ -30,6 +41,17 @@ def create_response(
         "capabilities": asdict(KernelCapabilitiesNotification()),
     }
     response.update(partial_response)
+
+    if "consumer_capabilities" not in partial_response:
+        kiosk = response.get("kiosk", False)
+        response.update(
+            {
+                "consumer_capabilities": asdict(
+                    ConsumerCapabilities(edit=not kiosk, interact=not kiosk)
+                )
+            }
+        )
+
     return response
 
 
@@ -46,7 +68,7 @@ def headers(session_id: str) -> dict[str, str]:
 
 
 def assert_kernel_ready_response(
-    raw_data: dict[str, Any], response: Optional[dict[str, Any]] = None
+    raw_data: dict[str, Any], response: dict[str, Any] | None = None
 ) -> None:
     if response is None:
         response = create_response({})
@@ -63,6 +85,7 @@ def assert_kernel_ready_response(
     assert data.kiosk == expected.kiosk
     assert data.last_execution_time == expected.last_execution_time
     assert data.capabilities == expected.capabilities
+    assert data.consumer_capabilities == expected.consumer_capabilities
 
 
 def assert_parse_ready_response(raw_data: dict[str, Any]) -> None:

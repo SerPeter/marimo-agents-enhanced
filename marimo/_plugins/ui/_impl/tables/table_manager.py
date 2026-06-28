@@ -2,15 +2,14 @@
 from __future__ import annotations
 
 import abc
+import math
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
     Generic,
     NamedTuple,
-    Optional,
     TypeVar,
-    Union,
 )
 
 from marimo._data.models import (
@@ -26,6 +25,10 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
+# Rows used when estimating the JSON-serialized size of the rendered data.
+# Bigger samples are more precise but cost more on the kernel control loop.
+SIZE_ESTIMATE_SAMPLE_ROWS = 100
+
 ColumnName = str
 RowId = str
 FieldType = DataType
@@ -33,13 +36,13 @@ FieldTypes = list[tuple[ColumnName, tuple[FieldType, ExternalDataType]]]
 
 
 class TableCoordinate(NamedTuple):
-    row_id: Union[int, str]
+    row_id: int | str
     column_name: str
 
 
 @dataclass
 class TableCell:
-    row: Union[int, str]
+    row: int | str
     column: str
     value: Any | None
 
@@ -81,7 +84,7 @@ class TableManager(abc.ABC, Generic[T]):
 
     @abc.abstractmethod
     def apply_formatting(
-        self, format_mapping: Optional[FormatMapping]
+        self, format_mapping: FormatMapping | None
     ) -> TableManager[Any]:
         pass
 
@@ -96,14 +99,14 @@ class TableManager(abc.ABC, Generic[T]):
     @abc.abstractmethod
     def to_csv_str(
         self,
-        format_mapping: Optional[FormatMapping] = None,
+        format_mapping: FormatMapping | None = None,
         separator: str | None = None,
     ) -> str:
         pass
 
     def to_csv(
         self,
-        format_mapping: Optional[FormatMapping] = None,
+        format_mapping: FormatMapping | None = None,
         encoding: str | None = "utf-8",
         separator: str | None = None,
     ) -> bytes:
@@ -118,7 +121,7 @@ class TableManager(abc.ABC, Generic[T]):
     @abc.abstractmethod
     def to_json_str(
         self,
-        format_mapping: Optional[FormatMapping] = None,
+        format_mapping: FormatMapping | None = None,
         strict_json: bool = False,
         ensure_ascii: bool = True,
     ) -> str:
@@ -126,7 +129,7 @@ class TableManager(abc.ABC, Generic[T]):
 
     def to_json(
         self,
-        format_mapping: Optional[FormatMapping] = None,
+        format_mapping: FormatMapping | None = None,
         strict_json: bool = False,  # Whether the result should be strictly JSON compliant (eg. nan -> null)
         encoding: str | None = "utf-8",
         ensure_ascii: bool = True,
@@ -137,6 +140,36 @@ class TableManager(abc.ABC, Generic[T]):
             strict_json=strict_json,
             ensure_ascii=ensure_ascii,
         ).encode(resolved_encoding)
+
+    def estimate_size_bytes(
+        self,
+        sample_rows: int = SIZE_ESTIMATE_SAMPLE_ROWS,
+    ) -> int | None:
+        """Estimate JSON-download byte size by extrapolating from a head sample.
+
+        Always models a JSON download (raw values, `strict_json=True`,
+        `ensure_ascii=True`) since the frontend gates downloads before the
+        user picks a format; JSON with ASCII escaping is the upper-bound
+        proxy.
+
+        Returns the exact size when the table fits within `sample_rows`,
+        otherwise scales the sample size by `total_rows / sample_rows`.
+        Returns `None` if serialization fails.
+        """
+        total_rows = self.get_num_rows(force=True) or 0
+        if total_rows == 0:
+            return 0
+        n = min(total_rows, sample_rows)
+        try:
+            sample = self.take(n, 0).to_json_str(
+                strict_json=True, ensure_ascii=True
+            )
+        except Exception:
+            return None
+        sample_bytes = len(sample.encode("utf-8"))
+        if n == total_rows:
+            return sample_bytes
+        return math.ceil(sample_bytes * total_rows / n)
 
     @abc.abstractmethod
     def to_parquet(self) -> bytes:
@@ -199,7 +232,7 @@ class TableManager(abc.ABC, Generic[T]):
         pass
 
     @abc.abstractmethod
-    def get_num_rows(self, force: bool = True) -> Optional[int]:
+    def get_num_rows(self, force: bool = True) -> int | None:
         # This can be expensive to compute,
         # so we allow optionals
         pass

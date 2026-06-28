@@ -7,8 +7,9 @@ import logging
 import re
 import sys
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Union
+from typing import Any
 
 from pymdownx.superfences import RE_NESTED_FENCE_START  # type: ignore
 
@@ -22,6 +23,7 @@ from marimo._convert.common.format import (
     DEFAULT_MARKDOWN_PREFIX,
     markdown_to_marimo,
 )
+from marimo._convert.ipynb.from_ir import NBCONVERT_REMOVE_INPUT_TAG
 from marimo._runtime.dataflow import DirectedGraph
 from marimo._schemas.serialization import (
     AppInstantiation,
@@ -51,18 +53,18 @@ _CLOSE_P_RE = re.compile(r"</p>", re.IGNORECASE)
 
 
 def _strip_paragraph_tags(source: str) -> str:
-    """Remove bare ``<p>`` / ``</p>`` HTML tags from markdown source.
+    """Remove bare `<p>` / `</p>` HTML tags from markdown source.
 
-    Jupyter markdown cells often wrap content in ``<p>…</p>`` tags which are
+    Jupyter markdown cells often wrap content in `<p>…</p>` tags which are
     redundant in plain markdown and can break LaTeX rendering inside
-    ``mo.md()``.
+    `mo.md()`.
 
-    Only bare ``<p>`` tags (without attributes) are removed.  Styled tags such
-    as ``<p style="color: red">`` are preserved because they carry semantic
-    meaning.  The matching ``</p>`` is only removed when it closes a bare
-    ``<p>``.
+    Only bare `<p>` tags (without attributes) are removed.  Styled tags such
+    as `<p style="color: red">` are preserved because they carry semantic
+    meaning.  The matching `</p>` is only removed when it closes a bare
+    `<p>`.
 
-    Closing ``</p>`` tags for bare opens are replaced with a newline to
+    Closing `</p>` tags for bare opens are replaced with a newline to
     preserve paragraph separation.  Content inside fenced code blocks is
     left untouched.
     """
@@ -203,15 +205,13 @@ def transform_add_marimo_import(sources: list[CodeCell]) -> list[CodeCell]:
         def is_in_import_line(line: str) -> bool:
             if line.startswith("import marimo as mo"):
                 return True
-            if line.startswith("import ") or line.startswith("from "):
+            if line.startswith(("import ", "from ")):
                 return "import marimo as mo" in line
             return False
 
         # Slow check
         lines = cell.strip().split("\n")
-        if any(is_in_import_line(line) for line in lines):
-            return True
-        return False
+        return any(is_in_import_line(line) for line in lines)
 
     already_has_marimo_import = any(
         has_marimo_import(cell.source) for cell in sources
@@ -242,15 +242,11 @@ def transform_add_subprocess_import(
 
         def is_in_import_line(line: str) -> bool:
             stripped = line.strip()
-            if stripped.startswith("import subprocess"):
-                return True
-            return False
+            return stripped.startswith("import subprocess")
 
         # Slow check
         lines = cell.strip().split("\n")
-        if any(is_in_import_line(line) for line in lines):
-            return True
-        return False
+        return any(is_in_import_line(line) for line in lines)
 
     already_has_subprocess_import = any(
         has_subprocess_import(cell.source) for cell in sources
@@ -313,13 +309,13 @@ def transform_magic_commands(sources: list[str]) -> list[str]:
         if not double:
             return "\n".join(
                 [
-                    "# magic command not supported in marimo; please file an issue to add support",  # noqa: E501
+                    "# magic command not supported in marimo; please file an issue to add support",
                     f"# {command + ' ' + source}",
                 ]
             )
 
         result = [
-            "# magic command not supported in marimo; please file an issue to add support",  # noqa: E501
+            "# magic command not supported in marimo; please file an issue to add support",
             f"# {command}",
         ]
         if source:
@@ -546,8 +542,7 @@ def _normalize_git_url_package(package: str) -> str:
         repo_name = path.rstrip("/").split("/")[-1]
 
         # Remove .git extension if present
-        if repo_name.endswith(".git"):
-            repo_name = repo_name[:-4]
+        repo_name = repo_name.removesuffix(".git")
 
         # If we couldn't extract a name, use a placeholder
         if not repo_name:
@@ -1269,13 +1264,26 @@ def bind_cell_metadata(
 
     This marks the boundary between source-only transformations and cell-level transformations.
 
-    - If "hide-cell" is present in the tags, the cell is marked hidden (and removed)
+    - If "hide-cell" or the standard nbconvert "remove-input" tag is present,
+      the cell is marked hidden (and the tag is consumed).
+    - The Jupyter UI hint `metadata.jupyter.source_hidden` is also treated as
+      a hidden-code signal.
     - Remaining tags (if any) are inserted as a comment at the top of the source.
     - If marimo-specific metadata is present, it is used to restore cell config.
     """
     cells: list[CodeCell] = []
-    for source, meta, hide_code in zip(sources, metadata, hide_flags):
+    for source, meta, hide_code in zip(
+        sources, metadata, hide_flags, strict=False
+    ):
         tags: set[str] = set(meta.get("tags", []))
+
+        # The `remove-input` tag and `jupyter.source_hidden` flag are emitted by
+        # marimo's ipynb exporter (and recognized by nbconvert / JupyterLab /
+        # VS Code) to indicate hidden code. Consume them here so they don't
+        # leak back into the .py source as a stray comment.
+        had_remove_input = NBCONVERT_REMOVE_INPUT_TAG in tags
+        tags.discard(NBCONVERT_REMOVE_INPUT_TAG)
+        source_hidden = bool(meta.get("jupyter", {}).get("source_hidden"))
 
         # Extract marimo-specific cell config if present
         marimo_meta = meta.get("marimo", {})
@@ -1287,6 +1295,8 @@ def bind_cell_metadata(
             hide_code = marimo_config["hide_code"]
         elif "hide-cell" in tags:
             tags.discard("hide-cell")
+            hide_code = True
+        elif had_remove_input or source_hidden:
             hide_code = True
         elif "marimo" in meta:
             # Cell was created by marimo; marimo would have stored hide_code=True
@@ -1486,6 +1496,17 @@ def _transform_sources(
             source_transform.__name__, source_transform, sources
         )
 
+    # Handle exclamation marks before the comment-preserving transforms.
+    # `!`-command cells are invalid Python, and several of the downstream
+    # transforms (notably `transform_fixup_multiple_definitions`) compile the
+    # whole notebook at once and bail out entirely on a SyntaxError. Rewriting
+    # `!` commands into valid Python first keeps those optimizations enabled
+    # for the rest of the notebook. Handled specially since it returns an
+    # ExclamationMarkResult carrying pip-package/subprocess metadata.
+    exclamation_result = transform_exclamation_mark(sources)
+    sources = exclamation_result.transformed_sources
+    exclamation_metadata = exclamation_result
+
     # Create comment preserver from the simplified sources
     comment_preserver = CommentPreserver(sources)
 
@@ -1493,11 +1514,6 @@ def _transform_sources(
     for base_transform in comment_preserving_transforms:
         transform = comment_preserver(base_transform)
         sources = _run_transform(base_transform.__name__, transform, sources)
-
-    # Handle exclamation_mark specially since it returns ExclamationMarkResult
-    exclamation_result = transform_exclamation_mark(sources)
-    sources = exclamation_result.transformed_sources
-    exclamation_metadata = exclamation_result
 
     cells = bind_cell_metadata(sources, metadata, hide_flags)
 
@@ -1526,7 +1542,7 @@ def convert_from_ipynb_to_notebook_ir(
     sources: list[str] = []
     metadata: list[dict[str, Any]] = []
     hide_flags: list[bool] = []
-    inline_meta: Union[str, None] = None
+    inline_meta: str | None = None
 
     for cell in notebook["cells"]:
         source = (

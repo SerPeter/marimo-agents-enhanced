@@ -7,7 +7,7 @@ from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Callable, Literal, Optional, Union
+from typing import TYPE_CHECKING, Literal, Union
 from uuid import uuid4
 
 from marimo import _loggers
@@ -24,6 +24,9 @@ from marimo._ast.variables import is_local
 from marimo._dependencies.dependencies import DependencyManager
 from marimo._sql.error_utils import log_sql_error
 from marimo._utils.strings import standardize_annotation_quotes
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 LOGGER = _loggers.marimo_logger()
 
@@ -44,8 +47,8 @@ class ImportData:
     # fully qualified import symbol:
     # import a.b => symbol == None
     # from a.b import c => symbol == a.b.c
-    imported_symbol: Optional[str] = None
-    import_level: Optional[int] = None
+    imported_symbol: str | None = None
+    import_level: int | None = None
 
     def __post_init__(self) -> None:
         self.namespace = self.module.split(".")[0]
@@ -62,18 +65,10 @@ class AnnotationData:
 @dataclass
 class VariableData:
     # "table", "view", "schema", and "catalog" are SQL variables, not Python.
-    kind: Union[
-        Literal[
-            "function",
-            "class",
-            "import",
-            "variable",
-            # NB: only used when there's a need to stub. not generally carried
-            # on cell.
-            "temporary",
-        ],
-        SQLKind,
-    ] = "variable"
+    kind: (
+        Literal["function", "class", "import", "variable", "temporary"]
+        | SQLKind
+    ) = "variable"
 
     # If kind == function or class, it may be dependent on externally defined
     # variables.
@@ -91,13 +86,13 @@ class VariableData:
     unbounded_refs: set[Name] = field(default_factory=set)
 
     # References used for annotation (typing)
-    annotation_data: Optional[AnnotationData] = None
+    annotation_data: AnnotationData | None = None
 
     # For kind == import
-    import_data: Optional[ImportData] = None
+    import_data: ImportData | None = None
 
     # In the sql case, the name may be qualified
-    qualified_name: Optional[str] = None
+    qualified_name: str | None = None
 
     @property
     def language(self) -> Language:
@@ -111,6 +106,55 @@ class VariableData:
             )
             else "python"
         )
+
+
+def _defers_ref_resolution(datum: VariableData) -> bool:
+    """Whether a definition resolves its references lazily, at call time.
+
+    Functions, lambdas, and classes (via their methods) read the names they
+    reference from the enclosing scope when they are *called*, not when they
+    are defined — i.e. they bind those names late. This is true regardless of
+    whether the definition actually captures anything: a function that
+    references nothing simply has empty `required_refs`. Contrast with eager
+    definitions like `y = _x + 1`, which read `_x` at definition time.
+    """
+    return datum.kind in ("function", "class") or (
+        "_lambda" in datum.required_refs
+    )
+
+
+def get_closure_refs(
+    variable_data: dict[Name, list[VariableData]],
+) -> set[Name]:
+    """Return the names that functions, lambdas, and classes close over.
+
+    Because closures resolve their references at call time, the names they
+    depend on must stay in scope even when they would otherwise be considered
+    temporary. References are followed transitively through closures: if a
+    closure references a private helper that is itself a closure, that helper's
+    references are included too.
+    """
+    refs: set[Name] = set()
+    # Seed the search with every reference made by a late-binding definition;
+    # these are the names that must survive so the definitions stay callable.
+    frontier: set[Name] = {
+        ref
+        for data in variable_data.values()
+        for datum in data
+        if _defers_ref_resolution(datum)
+        for ref in datum.required_refs
+    }
+    while frontier:
+        ref = frontier.pop()
+        if ref in refs:
+            continue
+        refs.add(ref)
+        # Only late-binding definitions defer resolution to call time, so only
+        # their references need to be retained transitively.
+        for datum in variable_data.get(ref, []):
+            if _defers_ref_resolution(datum):
+                frontier |= datum.required_refs - refs
+    return refs
 
 
 @dataclass
@@ -137,7 +181,7 @@ class ObscuredScope:
     """The scope in which a name is hidden."""
 
     # Variable id if this block hides a name
-    obscured: Optional[str] = None
+    obscured: str | None = None
 
 
 @dataclass
@@ -151,7 +195,7 @@ class RefData:
     # Ancestors of the block in which this ref was used
     parent_blocks: list[Block]
     # Only applicable for SQL cells
-    sql_ref: Optional[SQLRef] = None
+    sql_ref: SQLRef | None = None
 
 
 NamedNode = Union[
@@ -180,7 +224,7 @@ def find_sql_refs_cached(sql_statement: str) -> set[SQLRef]:
 class ScopedVisitor(ast.NodeVisitor):
     def __init__(
         self,
-        mangle_prefix: Optional[str] = None,
+        mangle_prefix: str | None = None,
         ignore_local: bool = False,
         on_def: Callable[[NamedNode, str, list[Block]], None] | None = None,
         on_ref: Callable[[NamedNode], None] | None = None,
@@ -253,11 +297,11 @@ class ScopedVisitor(ast.NodeVisitor):
         # so marking it as a deleted ref is in practice a big deal. For 100%
         # correctness we would prune unbound locals from refs, not here but
         # when variables added as defs and refs.
-        return set(
+        return {
             name
             for name in self._refs
             if any(ref.deleted for ref in self._refs[name])
-        )
+        }
 
     def _if_local_then_mangle(
         self, name: str, ignore_scope: bool = False
@@ -318,7 +362,7 @@ class ScopedVisitor(ast.NodeVisitor):
         name: Name,
         *,
         deleted: bool,
-        sql_ref: Optional[SQLRef] = None,
+        sql_ref: SQLRef | None = None,
     ) -> None:
         """Register a referenced name."""
         if name not in self._refs:
@@ -407,7 +451,7 @@ class ScopedVisitor(ast.NodeVisitor):
         """Pop a block from the block stack."""
         self.block_stack.pop()
 
-    def _push_obscured_scope(self, obscured: Optional[str]) -> None:
+    def _push_obscured_scope(self, obscured: str | None) -> None:
         """Push scope onto the stack."""
         self.obscured_scope_stack.append(ObscuredScope(obscured=obscured))
 
@@ -494,7 +538,7 @@ class ScopedVisitor(ast.NodeVisitor):
         return node
 
     def _visit_and_get_refs(
-        self, node: Union[ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef]
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
     ) -> tuple[set[Name], set[Name]]:
         """Create a ref scope for the variable to be declared (e.g. function,
         class), visit the children the node, propagate the refs to the higher
@@ -640,7 +684,7 @@ class ScopedVisitor(ast.NodeVisitor):
         ):
             self.language = "sql"
             first_arg = node.args[0]
-            sql: Optional[str] = None
+            sql: str | None = None
             if isinstance(first_arg, ast.Constant):
                 sql = first_arg.value
             elif isinstance(first_arg, ast.JoinedStr):
@@ -653,7 +697,7 @@ class ScopedVisitor(ast.NodeVisitor):
                 )
                 and sql
             ):
-                import duckdb  # type: ignore[import-not-found,import-untyped,unused-ignore] # noqa: E501
+                import duckdb  # type: ignore[import-not-found,import-untyped,unused-ignore]
 
                 # TODO: Handle other SQL languages
                 # TODO: Get the engine so we can differentiate tables in diff engines
@@ -715,6 +759,8 @@ class ScopedVisitor(ast.NodeVisitor):
                 # so that later statements don't create refs to tables defined in earlier statements
                 defined_names: set[str] = set()
 
+                has_sqlglot = DependencyManager.sqlglot.has()
+
                 for statement_sql in statement_queries:
                     # Parse the refs and defs of each statement
                     # Add all tables/dbs created in the query to the defs
@@ -759,14 +805,17 @@ class ScopedVisitor(ast.NodeVisitor):
                         self._define(None, _catalog, VariableData("catalog"))
                         defined_names.add(_catalog)
 
-                    sql_refs = find_sql_refs_cached(statement_sql)
+                    if has_sqlglot:
+                        sql_refs = find_sql_refs_cached(statement_sql)
 
-                    for ref in sql_refs:
-                        name = ref.qualified_name
-                        # Cells that define the same name aren't cycles, so we skip them
-                        if name in defined_names:
-                            continue
-                        self._add_ref(None, name, deleted=False, sql_ref=ref)
+                        for ref in sql_refs:
+                            name = ref.qualified_name
+                            # Cells that define the same name aren't cycles, so we skip them
+                            if name in defined_names:
+                                continue
+                            self._add_ref(
+                                None, name, deleted=False, sql_ref=ref
+                            )
 
         # Visit arguments, keyword args, etc.
         self.generic_visit(node)
@@ -915,7 +964,10 @@ class ScopedVisitor(ast.NodeVisitor):
                     )
                     break
         else:
-            self.generic_visit(node)
+            # NB: only visit the target — value was already visited above.
+            # Calling generic_visit here would re-visit value, causing names
+            # inside it to be mangled twice (issue #9274).
+            self.visit(node.target)
         return node
 
     def visit_Name(self, node: ast.Name) -> ast.Name:

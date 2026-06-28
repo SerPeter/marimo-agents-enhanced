@@ -22,6 +22,9 @@ from marimo._utils.narwhals_utils import (
 
 LOGGER = _loggers.marimo_logger()
 
+# Use Union[] instead of X | Y for narwhals types — in older narwhals versions
+# (e.g. 2.6.0 shipped in Pyodide), IntoDataFrame is a string at runtime and
+# str does not support the | operator.
 Data = Union[dict[Any, Any], IntoDataFrame, nw.DataFrame[Any]]
 _DataType = Union[dict[Any, Any], IntoDataFrame, nw.DataFrame[Any]]
 
@@ -40,7 +43,7 @@ class _ArrowFormatDict(TypedDict):
 
 class _TransformResult(TypedDict):
     url: str
-    format: Union[_CsvFormatDict, _JsonFormatDict, _ArrowFormatDict]
+    format: _CsvFormatDict | _JsonFormatDict | _ArrowFormatDict
 
 
 def _to_marimo_json(data: Data, **kwargs: Any) -> _TransformResult:

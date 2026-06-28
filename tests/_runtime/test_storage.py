@@ -52,6 +52,12 @@ class TestInMemoryStorageReadChunked:
         assert len(chunks[-1]) <= chunk_size
         assert b"".join(chunks) == data
 
+    def test_read_chunked_with_start_offset(self) -> None:
+        storage = InMemoryStorage()
+        storage.store("test_key", b"hello world")
+        chunks = list(storage.read_chunked("test_key", 5, start=6))
+        assert b"".join(chunks) == b"world"
+
 
 class TestInMemoryStorage:
     def test_store_and_read(self) -> None:
@@ -180,6 +186,20 @@ class TestSharedMemoryStorage:
         assert not storage.has("marimo_test_6")
         assert not storage.has("marimo_test_7")
 
+    def test_shutdown_with_keys_only_removes_requested_entries(self) -> None:
+        storage = SharedMemoryStorage()
+        try:
+            storage.store("marimo_test_subset_1", b"data1")
+            storage.store("marimo_test_subset_2", b"data2")
+
+            storage.shutdown(keys=["marimo_test_subset_1"])
+
+            assert not storage.has("marimo_test_subset_1")
+            assert storage.has("marimo_test_subset_2")
+            assert storage.read("marimo_test_subset_2", 5) == b"data2"
+        finally:
+            storage.shutdown()
+
     def test_cross_process_read(self) -> None:
         """Test that shared memory can be read by name from a fresh instance."""
         storage1 = SharedMemoryStorage()
@@ -253,6 +273,17 @@ class TestSharedMemoryStorage:
             assert b"".join(chunks) == data
         finally:
             storage1.shutdown()
+
+    def test_read_chunked_with_start_offset(self) -> None:
+        storage = SharedMemoryStorage()
+        try:
+            storage.store("marimo_chunk_offset", b"hello world")
+            chunks = list(
+                storage.read_chunked("marimo_chunk_offset", 5, start=6)
+            )
+            assert b"".join(chunks) == b"world"
+        finally:
+            storage.shutdown()
 
     def test_read_chunked_data_integrity(self) -> None:
         """Test that chunked read produces identical data to regular read."""

@@ -5,12 +5,8 @@ import errno
 import os
 import socket
 import sys
-from typing import TYPE_CHECKING
 
 from marimo import _loggers
-
-if TYPE_CHECKING:
-    from typing import Optional
 
 LOGGER = _loggers.marimo_logger()
 
@@ -19,7 +15,7 @@ _DEFAULT_BACKLOG = 128
 
 # From Tornado (Apache 2.0)
 # https://github.com/tornadoweb/tornado/blob/8a953697888d463f48090d500268892a7384e6b1/tornado/netutil.py#L56
-def _errno_from_exception(e: BaseException) -> Optional[int]:
+def _errno_from_exception(e: BaseException) -> int | None:
     """Provides the errno from an Exception object.
 
     There are cases that the errno attribute was not set so we pull
@@ -41,7 +37,7 @@ def _errno_from_exception(e: BaseException) -> Optional[int]:
 # https://github.com/tornadoweb/tornado/blob/8a953697888d463f48090d500268892a7384e6b1/tornado/netutil.py#L56
 def _bind_sockets(
     port: int,
-    address: Optional[str] = None,
+    address: str | None = None,
     family: socket.AddressFamily = socket.AF_UNSPEC,
     backlog: int = _DEFAULT_BACKLOG,
     flags: int | None = None,
@@ -60,13 +56,13 @@ def _bind_sockets(
     or `socket.AF_INET6` to restrict to IPv4 or IPv6 addresses, otherwise
     both will be used if available.
 
-    The ``backlog`` argument has the same meaning as for
+    The `backlog` argument has the same meaning as for
     `socket.listen() <socket.socket.listen>`.
 
-    ``flags`` is a bitmask of AI_* flags to `~socket.getaddrinfo`, like
-    ``socket.AI_PASSIVE | socket.AI_NUMERICHOST``.
+    `flags` is a bitmask of AI_* flags to `~socket.getaddrinfo`, like
+    `socket.AI_PASSIVE | socket.AI_NUMERICHOST`.
 
-    ``reuse_port`` option sets ``SO_REUSEPORT`` option for every socket
+    `reuse_port` option sets `SO_REUSEPORT` option for every socket
     in the list. If your platform doesn't support this option ValueError will
     be raised.
     """

@@ -5,9 +5,8 @@ import asyncio
 import os
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Awaitable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from pathlib import Path
-from typing import Callable, Optional
 
 from marimo import _loggers
 from marimo._dependencies.dependencies import DependencyManager
@@ -21,14 +20,17 @@ Callback = Callable[[Path], Coroutine[None, None, None]]
 class FileWatcher(ABC):
     @staticmethod
     def create(path: Path, callback: Callback) -> FileWatcher:
+        # Capture the running loop now so background callbacks scheduled
+        # via ``run_coroutine_threadsafe`` target the right loop.
+        loop = asyncio.get_running_loop()
         if DependencyManager.watchdog.has():
             LOGGER.debug("Using watchdog file watcher")
-            return _create_watchdog(path, callback, asyncio.get_event_loop())
+            return _create_watchdog(path, callback, loop)
         else:
             LOGGER.info(
                 "watchdog is not installed, using polling file watcher"
             )
-            return PollingFileWatcher(path, callback, asyncio.get_event_loop())
+            return PollingFileWatcher(path, callback, loop)
 
     def __init__(
         self,
@@ -67,17 +69,19 @@ class PollingFileWatcher(FileWatcher):
         super().__init__(path, callback)
         self._running = False
         self.loop = loop
-        self.last_modified: Optional[float] = self._get_modified()
+        self.last_modified: float | None = self._get_modified()
         self._missing_count = 0
+        self._task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
         self._running = True
-        self.loop.create_task(self._poll())
+        # Hold a strong reference so the task isn't GC'd mid-poll.
+        self._task = self.loop.create_task(self._poll())
 
     def stop(self) -> None:
         self._running = False
 
-    def _get_modified(self) -> Optional[float]:
+    def _get_modified(self) -> float | None:
         try:
             return os.path.getmtime(self.path)
         except FileNotFoundError:
@@ -107,21 +111,26 @@ class PollingFileWatcher(FileWatcher):
             # File exists again; reset the missing counter
             self._missing_count = 0
 
-            # Check for file changes
+            # Check for file changes. Note: the file may be removed between
+            # the exists() check above and the _get_modified() call here
+            # (common on Windows, where deletion is asynchronous). In that
+            # case _get_modified() returns None; skip this cycle so we don't
+            # fire a spurious callback.
             modified = self._get_modified()
-            if self.last_modified is None:
-                self.last_modified = modified
-            elif modified != self.last_modified:
-                self.last_modified = modified
-                await self.on_file_changed()
+            if modified is not None:
+                if self.last_modified is None:
+                    self.last_modified = modified
+                elif modified != self.last_modified:
+                    self.last_modified = modified
+                    await self.on_file_changed()
             await asyncio.sleep(self.POLL_SECONDS)
 
 
 def _create_watchdog(
     path: Path, callback: Callback, loop: asyncio.AbstractEventLoop
 ) -> FileWatcher:
-    import watchdog.events  # type: ignore[import-not-found,import-untyped,unused-ignore] # noqa: E501
-    import watchdog.observers  # type: ignore[import-not-found,import-untyped,unused-ignore] # noqa: E501
+    import watchdog.events  # type: ignore[import-not-found,import-untyped,unused-ignore]
+    import watchdog.observers  # type: ignore[import-not-found,import-untyped,unused-ignore]
 
     class WatchdogFileWatcher(FileWatcher):
         def __init__(
@@ -161,7 +170,7 @@ def _create_watchdog(
                 )
 
         def start(self) -> None:
-            event_handler = watchdog.events.PatternMatchingEventHandler(  # type: ignore # noqa: E501
+            event_handler = watchdog.events.PatternMatchingEventHandler(  # type: ignore
                 patterns=[str(self.path)]
             )
             event_handler.on_modified = self.on_modified  # type: ignore

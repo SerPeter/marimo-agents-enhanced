@@ -35,7 +35,7 @@ from marimo._messaging.notification_utils import (
 )
 from marimo._messaging.tracebacks import (
     _highlight_traceback,
-    _trim_traceback,
+    format_exception_message,
     write_traceback,
 )
 from marimo._messaging.variables import create_variable_value
@@ -76,9 +76,9 @@ def _set_imported_defs(
     with ctx.graph.lock:
         LOGGER.debug("Acquired graph lock to update import workspace.")
         if cell.import_workspace.is_import_block:
-            cell.import_workspace.imported_defs = set(
+            cell.import_workspace.imported_defs = {
                 name for name in cell.defs if name in ctx.glbls
-            )
+            }
 
 
 @kernel_tracer.start_as_current_span("set_status_idle")
@@ -98,7 +98,9 @@ def _set_run_result_status(
     ctx: PostExecutionHookContext,
     run_result: cell_runner.RunResult,
 ) -> None:
-    if isinstance(run_result.exception, MarimoInterruptionError):
+    if isinstance(run_result.exception, MarimoInterrupt):
+        # `MarimoInterruptionError` is a broadcast payload (never raised);
+        # the exception held here is the raised `MarimoInterrupt`.
         cell.set_run_result_status("interrupted")
     elif cell.cell_id in ctx.cancelled_cells:
         cell.set_run_result_status("cancelled")
@@ -131,7 +133,7 @@ def _broadcast_variables(
     values = [
         create_variable_value(
             name=variable,
-            value=(ctx.glbls[variable] if variable in ctx.glbls else None),
+            value=(ctx.glbls.get(variable, None)),
         )
         for variable in cell.defs
     ]
@@ -279,9 +281,9 @@ def _store_reference_to_output(
     if isinstance(run_result.output, UIElement):
         cell.set_output(run_result.output)
     elif run_result.output is not None:
-        if contains_instance(run_result.output, UIElement):
-            cell.set_output(run_result.output)
-        elif callable(getattr(run_result.output, "_repr_mimebundle_", None)):
+        if contains_instance(run_result.output, UIElement) or callable(
+            getattr(run_result.output, "_repr_mimebundle_", None)
+        ):
             cell.set_output(run_result.output)
 
 
@@ -409,7 +411,10 @@ def _broadcast_outputs(
         # don't clear console because this cell was running and
         # its console outputs are not stale
         exception_type = type(run_result.exception).__name__
-        msg = str(run_result.exception)
+        if isinstance(run_result.exception, BaseException):
+            msg = format_exception_message(run_result.exception)
+        else:
+            msg = str(run_result.exception)
         if not msg:
             msg = f"This cell raised an exception: {exception_type}"
 
@@ -421,15 +426,12 @@ def _broadcast_outputs(
                 ctx.user_config["runtime"].get("show_tracebacks", False)
             )
 
-        if show_tracebacks:
-            if (
-                isinstance(run_result.exception, BaseException)
-                and run_result.exception.__traceback__
-            ):
-                tb_lines = tb.format_exception(run_result.exception)
-                formatted_traceback = _highlight_traceback(
-                    _trim_traceback("".join(tb_lines))
-                )
+        if show_tracebacks and (
+            isinstance(run_result.exception, BaseException)
+            and run_result.exception.__traceback__
+        ):
+            tb_lines = tb.format_exception(run_result.exception)
+            formatted_traceback = _highlight_traceback("".join(tb_lines))
 
         CellNotificationUtils.broadcast_error(
             data=[
@@ -453,6 +455,7 @@ def render_toplevel_defs(
 ) -> None:
     del run_result
     variable = cell.toplevel_variable
+    served = ctx.graph.cells_serving_serialization_hint
     if variable is not None:
         extractor = TopLevelExtraction.from_graph(ctx.graph, cell=cell)
         serialization = list(iter(extractor))[-1]
@@ -460,6 +463,15 @@ def render_toplevel_defs(
             serialization=serialization,
             cell_id=cell.cell_id,
         )
+        served.add(cell.cell_id)
+    elif cell.cell_id in served:
+        # Cell stopped being a top-level definition: clear the prior hint.
+        # Only broadcast on this transition so ordinary cells don't emit an
+        # extra cell-op on every run.
+        CellNotificationUtils.broadcast_serialization_cleared(
+            cell_id=cell.cell_id,
+        )
+        served.discard(cell.cell_id)
 
 
 @kernel_tracer.start_as_current_span("run_pytest")
@@ -495,6 +507,46 @@ def _reset_matplotlib_context(
         exec("__marimo__._output.mpl.close_figures()", ctx.glbls)
 
 
+@kernel_tracer.start_as_current_span("delete_local_variables")
+def _delete_local_variables(
+    cell: CellImpl,
+    ctx: PostExecutionHookContext,
+    run_result: cell_runner.RunResult,
+) -> None:
+    # Remove temporary (local) variables from the kernel globals to relieve
+    # memory pressure once the cell has finished running.
+    #
+    # To prevent breaking existing notebooks, we make an exception for
+    # temporaries that are closed over by a function, lambda, or class defined
+    # in this cell: deleting those would cause a NameError when the closure is
+    # later invoked, since closures do late-binding. These are precomputed at
+    # compile time as `closed_over_temporaries`.
+    del run_result
+    for name in cell.temporaries - cell.closed_over_temporaries:
+        ctx.glbls.pop(name, None)
+
+
+@kernel_tracer.start_as_current_span("flush_console")
+def _flush_console(
+    cell: CellImpl,
+    ctx: PostExecutionHookContext,
+    run_result: cell_runner.RunResult,
+) -> None:
+    """Flush buffered console output before marking the cell idle.
+
+    Console messages (stdout/stderr) are batched by a background thread
+    for performance.  Without an explicit flush, the messages may arrive
+    at the frontend *after* the cell is marked idle and `completed-run`
+    is sent.  A subsequent run would then clear the console (via
+    `console=[]`) before the user sees the output.
+    """
+    del cell
+    del run_result
+    del ctx
+    stream = get_context().stream
+    stream.flush_console()
+
+
 POST_EXECUTION_HOOKS: list[PostExecutionHook] = [
     _set_imported_defs,
     _set_run_result_status,
@@ -507,6 +559,10 @@ POST_EXECUTION_HOOKS: list[PostExecutionHook] = [
     _broadcast_duckdb_datasource,
     _broadcast_outputs,
     _reset_matplotlib_context,
+    _delete_local_variables,
+    # Flush buffered console output so that stderr/stdout arrives at the
+    # frontend before the cell transitions to idle.
+    _flush_console,
     # set status to idle after all post-processing is done, in case the
     # other hooks take a long time (broadcast outputs can take a long time
     # if a formatter is slow).

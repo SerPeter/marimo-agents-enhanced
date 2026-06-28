@@ -4,8 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import (
     Any,
-    Optional,
-    Union,
     cast,
 )
 
@@ -17,7 +15,7 @@ from marimo._config.config import (
     MarimoConfig,
     PartialMarimoConfig,
 )
-from marimo._server.ai.constants import DEFAULT_MAX_TOKENS, DEFAULT_MODEL
+from marimo._server.ai.constants import DEFAULT_MODEL
 from marimo._server.ai.ids import AiModelId
 from marimo._server.ai.tools.tool_manager import get_tool_manager
 from marimo._server.ai.tools.types import ToolDefinition
@@ -31,14 +29,14 @@ GITHUB_COPILOT_BASE_URL = "https://models.github.ai/inference"
 class AnyProviderConfig:
     """Normalized config for any AI provider."""
 
-    base_url: Optional[str]
+    base_url: str | None
     api_key: str
-    project: Optional[str] = None
-    ssl_verify: Optional[bool] = None
-    ca_bundle_path: Optional[str] = None
-    client_pem: Optional[str] = None
-    extra_headers: Optional[dict[str, str]] = None
-    tools: Optional[list[ToolDefinition]] = None
+    project: str | None = None
+    ssl_verify: bool | None = None
+    ca_bundle_path: str | None = None
+    client_pem: str | None = None
+    extra_headers: dict[str, str] | None = None
+    tools: list[ToolDefinition] | None = None
 
     def __post_init__(self) -> None:
         # Only include tools if they are available
@@ -165,14 +163,27 @@ class AnyProviderConfig:
         )
 
     @classmethod
+    def for_opencode_go(cls, config: AiConfig) -> AnyProviderConfig:
+        fallback_key = cls.os_key("OPENCODE_API_KEY")
+        return cls._for_openai_like(
+            config,
+            "opencode_go",
+            "OpenCode Go",
+            fallback_key=fallback_key,
+            # Default base URL for OpenCode Go
+            fallback_base_url="https://opencode.ai/zen/go/v1/",
+            require_key=True,
+        )
+
+    @classmethod
     def _for_openai_like(
         cls,
         config: AiConfig,
         key: str,
         name: str,
         *,
-        fallback_key: Optional[str] = None,
-        fallback_base_url: Optional[str] = None,
+        fallback_key: str | None = None,
+        fallback_base_url: str | None = None,
         require_key: bool = False,
         ai_config: dict[str, Any] | None = None,
     ) -> AnyProviderConfig:
@@ -265,6 +276,8 @@ class AnyProviderConfig:
             return cls.for_openrouter(config)
         elif model_id.provider == "wandb":
             return cls.for_wandb(config)
+        elif model_id.provider == "opencode-go":
+            return cls.for_opencode_go(config)
         elif model_id.provider == "openai_compatible":
             return cls.for_openai_compatible(config)
         else:
@@ -283,7 +296,7 @@ class AnyProviderConfig:
                 return cls.for_openai(config)
 
     @classmethod
-    def os_key(cls, key: str) -> Optional[str]:
+    def os_key(cls, key: str) -> str | None:
         import os
 
         return os.environ.get(key)
@@ -321,7 +334,7 @@ def get_edit_model(config: AiConfig) -> str:
 
 
 def get_autocomplete_model(
-    config: Union[MarimoConfig, PartialMarimoConfig],
+    config: MarimoConfig | PartialMarimoConfig,
 ) -> str:
     """Get the autocomplete model from the config."""
     return (
@@ -333,11 +346,9 @@ def get_autocomplete_model(
     )
 
 
-def get_max_tokens(config: MarimoConfig) -> int:
-    if "ai" not in config:
-        return DEFAULT_MAX_TOKENS
-    if "max_tokens" not in config["ai"]:
-        return DEFAULT_MAX_TOKENS
+def get_max_tokens(config: MarimoConfig) -> int | None:
+    if "ai" not in config or "max_tokens" not in config["ai"]:
+        return None
     return config["ai"]["max_tokens"]
 
 
@@ -345,7 +356,7 @@ def _get_key(
     config: Any,
     name: str,
     *,
-    fallback_key: Optional[str] = None,
+    fallback_key: str | None = None,
     require_key: bool = False,
 ) -> str:
     """Get the API key for a given provider."""
@@ -390,7 +401,7 @@ def _get_key(
     return ""
 
 
-def _get_base_url(config: Any, name: str = "") -> Optional[str]:
+def _get_base_url(config: Any, name: str = "") -> str | None:
     """Get the base URL for a given provider."""
     if not isinstance(config, dict):
         if name:

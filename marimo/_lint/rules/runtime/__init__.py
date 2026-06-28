@@ -4,20 +4,25 @@ from __future__ import annotations
 from marimo._lint.rules.base import LintRule
 from marimo._lint.rules.runtime.branch_expression import BranchExpressionRule
 from marimo._lint.rules.runtime.nested_output import NestedOutputRule
+from marimo._lint.rules.runtime.reusable_definition_order import (
+    ReusableDefinitionOrderRule,
+)
 from marimo._lint.rules.runtime.self_import import SelfImportRule
 from marimo._lint.rules.runtime.unused_output import UnusedOutputRule
 
 RUNTIME_RULE_CODES: dict[str, type[LintRule]] = {
     "MR001": SelfImportRule,
     "MR002": BranchExpressionRule,
-    "MR003": UnusedOutputRule,
-    "MR004": NestedOutputRule,
+    "MR003": ReusableDefinitionOrderRule,
+    "MR004": UnusedOutputRule,
+    "MR005": NestedOutputRule,
 }
 
 __all__ = [
+    "RUNTIME_RULE_CODES",
     "BranchExpressionRule",
     "NestedOutputRule",
+    "ReusableDefinitionOrderRule",
     "SelfImportRule",
     "UnusedOutputRule",
-    "RUNTIME_RULE_CODES",
 ]

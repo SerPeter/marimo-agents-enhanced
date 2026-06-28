@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 from pathlib import Path
-from typing import Callable, Literal, Optional
+from typing import TYPE_CHECKING, Literal
 
 import click
 
@@ -18,9 +20,11 @@ from marimo._cli.print import (
     echo,
     green,
 )
+from marimo._cli.sandbox import maybe_prompt_run_in_sandbox, run_in_sandbox
 from marimo._cli.utils import prompt_to_overwrite
 from marimo._dependencies.dependencies import DependencyManager
 from marimo._dependencies.errors import ManyModulesNotFoundError
+from marimo._pyodide.pyodide_constraints import PYODIDE_PYTHON_VERSION
 from marimo._server.api.utils import parse_title
 from marimo._server.export import (
     ExportResult,
@@ -32,12 +36,17 @@ from marimo._server.export import (
     run_app_then_export_as_html,
     run_app_then_export_as_ipynb,
     run_app_then_export_as_pdf,
+    run_app_then_export_as_wasm,
 )
+from marimo._server.export._status import PDFExportStatusEvent
 from marimo._server.export.exporter import Exporter
 from marimo._server.utils import asyncio_run
 from marimo._utils.file_watcher import FileWatcher
 from marimo._utils.marimo_path import MarimoPath
 from marimo._utils.paths import maybe_make_dirs
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _watch_message = (
     "Watch notebook for changes and regenerate the output on modification. "
@@ -58,9 +67,23 @@ def export() -> None:
     pass
 
 
+class _PDFExportCLIReporter:
+    def __call__(self, event: PDFExportStatusEvent) -> None:
+        message = event.message
+        if event.current is not None and event.total is not None:
+            progress = f" [{event.current}/{event.total}]"
+            if message.endswith("..."):
+                message = f"{message[:-3]}{progress}..."
+            elif message.endswith("."):
+                message = f"{message[:-1]}{progress}."
+            else:
+                message = f"{message}{progress}"
+        echo(f"{green('Exporting PDF', bold=True)}: {message}", err=True)
+
+
 def watch_and_export(
     marimo_path: MarimoPath,
-    output: Optional[Path],
+    output: Path | None,
     watch: bool,
     export_callback: Callable[[MarimoPath], ExportResult],
     force: bool,
@@ -111,7 +134,7 @@ def watch_and_export(
     async def on_file_changed(file_path: Path) -> None:
         if output:
             echo(
-                f"File {str(file_path)} changed. Re-exporting to {green(str(output))}"
+                f"File {file_path!s} changed. Re-exporting to {green(str(output))}"
             )
         try:
             # `export_callback` may call `asyncio_run()` internally. This callback
@@ -206,22 +229,16 @@ def html(
     include_code: bool,
     output: Path,
     watch: bool,
-    sandbox: Optional[bool],
+    sandbox: bool | None,
     force: bool,
     args: tuple[str],
 ) -> None:
     """Run a notebook and export it as an HTML file."""
-    import sys
-
     # Set default, if not provided
     if sandbox is None:
-        from marimo._cli.sandbox import maybe_prompt_run_in_sandbox
-
         sandbox = maybe_prompt_run_in_sandbox(name)
 
     if sandbox:
-        from marimo._cli.sandbox import run_in_sandbox
-
         run_in_sandbox(sys.argv[1:], name=name)
         return
 
@@ -292,16 +309,12 @@ Watch for changes and regenerate the script on modification:
     type=click.Path(exists=True, file_okay=True, dir_okay=False),
 )
 def script(
-    name: str, output: Path, watch: bool, sandbox: Optional[bool], force: bool
+    name: str, output: Path, watch: bool, sandbox: bool | None, force: bool
 ) -> None:
     """
     Export a marimo notebook as a flat script, in topological order.
     """
-    import sys
-
     if sandbox:
-        from marimo._cli.sandbox import run_in_sandbox
-
         run_in_sandbox(sys.argv[1:], name=name)
         return
 
@@ -363,16 +376,12 @@ Watch for changes and regenerate the script on modification:
     type=click.Path(exists=True, file_okay=True, dir_okay=False),
 )
 def md(
-    name: str, output: Path, watch: bool, sandbox: Optional[bool], force: bool
+    name: str, output: Path, watch: bool, sandbox: bool | None, force: bool
 ) -> None:
     """
     Export a marimo notebook as a code fenced markdown document.
     """
-    import sys
-
     if sandbox:
-        from marimo._cli.sandbox import run_in_sandbox
-
         run_in_sandbox(sys.argv[1:], name=name)
         return
 
@@ -458,25 +467,19 @@ def ipynb(
     watch: bool,
     sort: Literal["top-down", "topological"],
     include_outputs: bool,
-    sandbox: Optional[bool],
+    sandbox: bool | None,
     force: bool,
     args: tuple[str],
 ) -> None:
     """
     Export a marimo notebook as a Jupyter notebook in topological order.
     """
-    import sys
-
     if include_outputs:
         # Set default, if not provided
-        from marimo._cli.sandbox import maybe_prompt_run_in_sandbox
-
         if sandbox is None:
             sandbox = maybe_prompt_run_in_sandbox(name)
 
         if sandbox:
-            from marimo._cli.sandbox import run_in_sandbox
-
             run_in_sandbox(
                 sys.argv[1:],
                 name=name,
@@ -632,13 +635,11 @@ def pdf(
     raster_scale: float,
     raster_server: str,
     export_as: Literal["document", "slides"] | None,
-    sandbox: Optional[bool],
+    sandbox: bool | None,
     force: bool,
     args: tuple[str],
 ) -> None:
     """Run a notebook and export it as a PDF file."""
-    import sys
-
     if not include_outputs:
         rasterize_source = ctx.get_parameter_source("rasterize_outputs")
         raster_scale_source = ctx.get_parameter_source("raster_scale")
@@ -655,13 +656,9 @@ def pdf(
     if include_outputs:
         # Set default, if not provided
         if sandbox is None:
-            from marimo._cli.sandbox import maybe_prompt_run_in_sandbox
-
             sandbox = maybe_prompt_run_in_sandbox(name)
 
         if sandbox:
-            from marimo._cli.sandbox import run_in_sandbox
-
             export_deps = ["nbformat"]
             # Adding webpdf extras to sandbox even if `webpdf` is False, since standard PDF export may fall back to it.
             export_deps.append("nbconvert[webpdf]")
@@ -732,6 +729,7 @@ def pdf(
         scale=raster_scale,
         server_mode=raster_server,
     )
+    report_status = _PDFExportCLIReporter()
 
     def export_callback(
         file_path: MarimoPath,
@@ -747,6 +745,7 @@ def pdf(
                     cli_args=cli_args,
                     argv=list(args) if include_outputs else None,
                     rasterization_options=rasterization_options,
+                    status_callback=report_status,
                 )
             )
         except ModuleNotFoundError as e:
@@ -850,11 +849,21 @@ and cannot be opened directly from the file system (e.g. file://).
     default=False,
     help="Force overwrite of the output file if it already exists.",
 )
+@click.option(
+    "--execute/--no-execute",
+    default=False,
+    help=(
+        "Execute the notebook before exporting and embed outputs as a "
+        "preview. Runs in an isolated environment pinned to WASM-compatible "
+        "packages when possible."
+    ),
+)
 @click.argument(
     "name",
     required=True,
     type=click.Path(exists=True, file_okay=True, dir_okay=False),
 )
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
 def html_wasm(
     name: str,
     output: Path,
@@ -862,23 +871,53 @@ def html_wasm(
     watch: bool,
     show_code: bool,
     include_cloudflare: bool,
-    sandbox: Optional[bool],
+    sandbox: bool | None,
     force: bool,
+    execute: bool,
+    args: tuple[str, ...],
 ) -> None:
     """Export a notebook as a WASM-powered standalone HTML file."""
-    import sys
+    if execute and watch:
+        raise click.UsageError(
+            "--execute and --watch cannot be used together."
+        )
 
-    # Set default, if not provided
-    if sandbox is None:
-        from marimo._cli.sandbox import maybe_prompt_run_in_sandbox
+    # When --execute is set, take ownership of sandboxing so we can layer
+    # the pyodide-lock constraints on top. Re-entry marker keeps the
+    # in-sandbox invocation from looping back here.
+    _BOOTSTRAPPED_ENV = "MARIMO_HTML_WASM_SANDBOX_BOOTSTRAPPED"
+    if execute and os.environ.get(_BOOTSTRAPPED_ENV) != "1":
+        if sandbox is not False and DependencyManager.which("uv"):
+            # Surface inner export failures via the outer process exit code
+            # — the bootstrap shell is a transparent wrapper, not its own
+            # success/failure boundary.
+            sys.exit(
+                run_in_sandbox(
+                    sys.argv[1:],
+                    name=name,
+                    pyodide_constraints=True,
+                    python_version_override=PYODIDE_PYTHON_VERSION,
+                    extra_env={_BOOTSTRAPPED_ENV: "1"},
+                )
+            )
+        if sandbox is not False:
+            echo(
+                "warn: uv not found; running --execute in current "
+                "environment without isolation or pyodide-lock "
+                "verification. Install uv "
+                "(https://docs.astral.sh/uv) for verified exports.",
+                err=True,
+            )
 
-        sandbox = maybe_prompt_run_in_sandbox(name)
+    # No --execute (or already bootstrapped): keep the standard
+    # --sandbox prompt path.
+    if not execute:
+        if sandbox is None:
+            sandbox = maybe_prompt_run_in_sandbox(name)
 
-    if sandbox:
-        from marimo._cli.sandbox import run_in_sandbox
-
-        run_in_sandbox(sys.argv[1:], name=name)
-        return
+        if sandbox:
+            run_in_sandbox(sys.argv[1:], name=name)
+            return
 
     out_dir = output
     filename = "index.html"
@@ -889,8 +928,35 @@ def html_wasm(
 
     marimo_file = MarimoPath(name)
 
-    def export_callback(file_path: MarimoPath) -> ExportResult:
-        return export_as_wasm(file_path, mode, show_code=show_code)
+    if execute:
+        cli_args = parse_args(args)
+
+        # Run WASM compatibility lint pass. When bootstrapped, this runs
+        # inside the uv sandbox so MW003 introspects the resolved env.
+        from marimo._lint import run_check
+
+        run_check(
+            (name,),
+            lint_config={"select": ["MW"]},
+            pipe=lambda msg: echo(msg, err=True),
+        )
+
+        def export_callback(file_path: MarimoPath) -> ExportResult:
+            return asyncio_run(
+                run_app_then_export_as_wasm(
+                    file_path,
+                    mode=mode,
+                    show_code=show_code,
+                    cli_args=cli_args,
+                    argv=list(args),
+                )
+            )
+
+        echo("Executing notebook...")
+    else:
+
+        def export_callback(file_path: MarimoPath) -> ExportResult:
+            return export_as_wasm(file_path, mode, show_code=show_code)
 
     # Export assets first
     Exporter().export_assets(out_dir)

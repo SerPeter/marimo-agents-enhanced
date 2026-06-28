@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from marimo._ai._tools.types import (
     CodeExecutionResult,
@@ -22,6 +23,7 @@ from marimo._server.scratchpad import (
     EXECUTION_TIMEOUT,
     ScratchCellListener,
     extract_result,
+    snapshot_for_scratchpad,
 )
 from marimo._types.ids import SessionId
 
@@ -125,11 +127,19 @@ def setup_code_mcp_server(
                 "Use list_sessions to find valid session IDs.",
             )
 
-        listener = ScratchCellListener()
+        # Correlation ID: see /api/kernel/execute for rationale.
+        run_id = str(uuid4())
+        listener = ScratchCellListener(run_id=run_id)
         with session.scoped(listener):
             async with session.scratchpad_lock:
+                notebook_cells, cell_outputs = snapshot_for_scratchpad(session)
                 session.put_control_request(
-                    ExecuteScratchpadCommand(code=code),
+                    ExecuteScratchpadCommand(
+                        code=code,
+                        notebook_cells=notebook_cells,
+                        cell_outputs=cell_outputs,
+                        run_id=run_id,
+                    ),
                     from_consumer_id=None,
                 )
                 await listener.wait(timeout=EXECUTION_TIMEOUT)
@@ -140,7 +150,7 @@ def setup_code_mcp_server(
                     error=f"Execution timed out after {EXECUTION_TIMEOUT}s",
                 )
 
-            return extract_result(session)
+            return extract_result(session, listener)
 
     # Build the streamable HTTP app
     mcp_app = mcp.streamable_http_app()

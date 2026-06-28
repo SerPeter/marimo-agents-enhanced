@@ -1,9 +1,6 @@
 /* Copyright 2026 Marimo. All rights reserved. */
 
 import { Provider as SlotzProvider } from "@marimo-team/react-slotz";
-import { Tooltip } from "radix-ui";
-
-const TooltipProvider = Tooltip.Provider;
 
 import type {
   ColumnFiltersState,
@@ -11,8 +8,9 @@ import type {
   PaginationState,
   RowSelectionState,
   SortingState,
+  Table as TanstackTable,
 } from "@tanstack/react-table";
-import { Provider } from "jotai";
+import { Provider, useAtomValue } from "jotai";
 import { Table2Icon } from "lucide-react";
 import type { JSX } from "react";
 import React, {
@@ -23,6 +21,7 @@ import React, {
   useMemo,
   useState,
 } from "react";
+import { useLocale } from "react-aria";
 import useEvent from "react-use-event-hook";
 import { z } from "zod";
 import type { CellSelectionState } from "@/components/data-table/cell-selection/types";
@@ -31,10 +30,8 @@ import { TablePanel } from "@/components/data-table/charts/charts";
 import { hasChart } from "@/components/data-table/charts/storage";
 import { ColumnChartSpecModel } from "@/components/data-table/column-summary/chart-spec-model";
 import { ColumnChartContext } from "@/components/data-table/column-summary/column-summary";
-import {
-  type ColumnFilterValue,
-  filterToFilterCondition,
-} from "@/components/data-table/filters";
+import { downloadSizeLimitAtom } from "@/components/data-table/download-policy/atoms";
+import { filtersToFilterGroup } from "@/components/data-table/filters";
 import { usePanelOwnership } from "@/components/data-table/hooks/use-panel-ownership";
 import { LoadingTable } from "@/components/data-table/loading-table";
 import {
@@ -71,6 +68,7 @@ import {
 import { slotsController } from "@/core/slots/slots";
 import { store } from "@/core/state/jotai";
 import { isStaticNotebook } from "@/core/static/static-state";
+import { isIslands } from "@/core/islands/utils";
 import { isInVscodeExtension } from "@/core/vscode/is-in-vscode";
 import { useAsyncData } from "@/hooks/useAsyncData";
 import { useDeepCompareMemoize } from "@/hooks/useDeepCompareMemoize";
@@ -78,6 +76,7 @@ import { useEffectSkipFirstRender } from "@/hooks/useEffectSkipFirstRender";
 import { Arrays } from "@/utils/arrays";
 import { Functions } from "@/utils/functions";
 import { Logger } from "@/utils/Logger";
+import { prettyNumber } from "@/utils/numbers";
 import {
   generateColumns,
   inferFieldTypes,
@@ -88,8 +87,8 @@ import { rpc } from "../core/rpc";
 import { Banner } from "./common/error-banner";
 import { Labeled } from "./common/labeled";
 import {
-  ConditionSchema,
-  type ConditionType,
+  FilterGroupSchema,
+  type FilterGroupType,
   columnToFieldTypesSchema,
 } from "./data-frames/schema";
 
@@ -184,6 +183,7 @@ interface Data<T> {
   maxHeight?: number;
   selection: DataTableSelection;
   showDownload: boolean;
+  showSearch: boolean;
   showFilters: boolean;
   showColumnSummaries: boolean | "stats" | "chart";
   showDataTypes: boolean;
@@ -195,8 +195,10 @@ interface Data<T> {
   fieldTypes?: FieldTypesWithExternalType | null;
   freezeColumnsLeft?: string[];
   freezeColumnsRight?: string[];
+  hiddenColumns?: string[];
   textJustifyColumns?: Record<string, "left" | "center" | "right">;
   wrappedColumns?: string[];
+  columnWidths?: Record<string, number>;
   headerTooltip?: Record<string, string>;
   totalColumns: number;
   maxColumns: number | "all";
@@ -215,7 +217,7 @@ type DataTableFunctions = {
       descending: boolean;
     }[];
     query?: string;
-    filters?: ConditionType[];
+    filters?: FilterGroupType;
     page_number: number;
     page_size: number;
     max_columns?: number | null;
@@ -230,6 +232,9 @@ type DataTableFunctions = {
   get_row_ids?: GetRowIds;
   calculate_top_k_rows?: CalculateTopKRows;
   preview_column?: PreviewColumn;
+  get_size_bytes: (opts: Record<string, never>) => Promise<{
+    size_bytes?: number | null;
+  }>;
 };
 
 type S = (number | string | { rowId: string; columnName?: string })[];
@@ -265,13 +270,18 @@ export const DataTablePlugin = createPlugin<S>("marimo-table")
       showColumnExplorer: z.boolean().default(true),
       showRowExplorer: z.boolean().default(true),
       showChartBuilder: z.boolean().default(true),
+      showSearch: z.boolean().default(true),
       rowHeaders: columnToFieldTypesSchema,
       freezeColumnsLeft: z.array(z.string()).optional(),
       freezeColumnsRight: z.array(z.string()).optional(),
+      hiddenColumns: z.array(z.string()).optional(),
       textJustifyColumns: z
         .record(z.string(), z.enum(["left", "center", "right"]))
         .optional(),
       wrappedColumns: z.array(z.string()).optional(),
+      columnWidths: z
+        .record(z.string(), z.number().int().positive())
+        .optional(),
       headerTooltip: z.record(z.string(), z.string()).optional(),
       fieldTypes: columnToFieldTypesSchema.nullish(),
       totalColumns: z.number(),
@@ -314,7 +324,7 @@ export const DataTablePlugin = createPlugin<S>("marimo-table")
             )
             .optional(),
           query: z.string().optional(),
-          filters: z.array(ConditionSchema).optional(),
+          filters: FilterGroupSchema.optional(),
           page_number: z.number(),
           page_size: z.number(),
           max_columns: z.number().nullable().optional(),
@@ -363,6 +373,9 @@ export const DataTablePlugin = createPlugin<S>("marimo-table")
         stats: columnStats.nullable(),
       }),
     ),
+    get_size_bytes: rpc
+      .input(z.object({}))
+      .output(z.object({ size_bytes: z.number().nullish() })),
   })
   .renderer((props) => {
     return (
@@ -376,7 +389,6 @@ export const DataTablePlugin = createPlugin<S>("marimo-table")
             {...props.data}
             {...props.functions}
             host={props.host}
-            enableSearch={true}
             data={props.data.data}
             value={props.value}
             setValue={props.setValue}
@@ -461,8 +473,6 @@ interface DataTableProps<T> extends Data<T>, DataTableFunctions {
   // Selection
   value: S;
   setValue: (value: S) => void;
-  // Search
-  enableSearch: boolean;
   // Filters
   enableFilters?: boolean;
   cellStyles?: CellStyleState | null;
@@ -580,12 +590,7 @@ export const LoadingDataTableComponent = memo(
         query: searchQuery,
         page_number: paginationState.pageIndex,
         page_size: paginationState.pageSize,
-        filters: filters.flatMap((filter) => {
-          return filterToFilterCondition(
-            filter.id,
-            filter.value as ColumnFilterValue,
-          );
-        }),
+        filters: filtersToFilterGroup(filters),
       });
 
       if (canShowInitialPage) {
@@ -631,6 +636,34 @@ export const LoadingDataTableComponent = memo(
       paginationState.pageIndex,
     ]);
 
+    const policy = useAtomValue(downloadSizeLimitAtom);
+    const { data: sizeBytesData, isPending: sizeBytesPending } = useAsyncData<
+      number | null
+    >(async () => {
+      if (
+        !policy ||
+        !props.showDownload ||
+        props.lazy ||
+        props.totalRows === 0
+      ) {
+        return null;
+      }
+      const result = await props.get_size_bytes({});
+      return result.size_bytes ?? null;
+    }, [
+      policy,
+      props.showDownload,
+      props.get_size_bytes,
+      props.lazy,
+      props.totalRows,
+      searchQuery,
+      useDeepCompareMemoize(filters),
+      useDeepCompareMemoize(sorting),
+    ]);
+    const sizeBytes = sizeBytesData ?? null;
+    const sizeBytesIsLoading =
+      !!policy && props.showDownload && sizeBytesPending;
+
     const getRow = useCallback(
       async (rowId: number) => {
         const sortArgs =
@@ -643,12 +676,7 @@ export const LoadingDataTableComponent = memo(
           page_size: 1,
           sort: sortArgs,
           query: searchQuery,
-          filters: filters.flatMap((filter) => {
-            return filterToFilterCondition(
-              filter.id,
-              filter.value as ColumnFilterValue,
-            );
-          }),
+          filters: filtersToFilterGroup(filters),
           // Do not clamp number of columns since we are viewing a single row
           max_columns: null,
         });
@@ -673,7 +701,9 @@ export const LoadingDataTableComponent = memo(
     >(async () => {
       // TODO: props.get_column_summaries is always true,
       // so we are unable to detect if the function is registered
-      if (props.totalRows === 0 || !props.showColumnSummaries) {
+      // Column summaries come from a kernel RPC, absent in static exports.
+      const isStatic = isStaticNotebook();
+      if (props.totalRows === 0 || !props.showColumnSummaries || isStatic) {
         return {
           data: null,
           stats: {},
@@ -704,7 +734,7 @@ export const LoadingDataTableComponent = memo(
           <LoadingTable
             pageSize={
               props.totalRows !== TOO_MANY_ROWS && props.totalRows > 0
-                ? props.totalRows
+                ? Math.min(props.totalRows, props.pageSize)
                 : props.pageSize
             }
           />
@@ -743,6 +773,8 @@ export const LoadingDataTableComponent = memo(
         setFilters={setFilters}
         reloading={isFetching && !isPending}
         totalRows={data?.totalRows ?? props.totalRows}
+        sizeBytes={sizeBytes}
+        sizeBytesIsLoading={sizeBytesIsLoading}
         paginationState={paginationState}
         setPaginationState={setPaginationState}
         cellStyles={data?.cellStyles ?? props.cellStyles}
@@ -789,6 +821,8 @@ const DataTableComponent = ({
   data,
   rawData,
   totalRows,
+  sizeBytes,
+  sizeBytesIsLoading,
   maxColumns,
   pagination,
   selection,
@@ -810,7 +844,7 @@ const DataTableComponent = ({
   setValue,
   sorting,
   setSorting,
-  enableSearch,
+  showSearch,
   searchQuery,
   setSearchQuery,
   filters,
@@ -818,8 +852,10 @@ const DataTableComponent = ({
   reloading,
   freezeColumnsLeft,
   freezeColumnsRight,
+  hiddenColumns,
   textJustifyColumns,
   wrappedColumns,
+  columnWidths,
   headerTooltip,
   totalColumns,
   get_row_ids,
@@ -839,11 +875,16 @@ const DataTableComponent = ({
     rawData?: unknown[];
     columnSummaries?: ColumnSummaries;
     getRow: (rowIdx: number) => Promise<GetRowResult>;
+    sizeBytes?: number | null;
+    sizeBytesIsLoading?: boolean;
   }): JSX.Element => {
   const id = useId();
+  const { locale } = useLocale();
   const [viewedRowIdx, setViewedRowIdx] = useState(0);
   const { isPanelOpen, isAnyPanelOpen, togglePanel, panelType, setPanelType } =
     usePanelOwnership(id, cellId);
+
+  const isStatic = isStaticNotebook();
 
   const chartSpecModel = useMemo(() => {
     if (!columnSummaries) {
@@ -905,6 +946,7 @@ const DataTableComponent = ({
   const memoizedRowHeaders = useDeepCompareMemoize(rowHeaders);
   const memoizedTextJustifyColumns = useDeepCompareMemoize(textJustifyColumns);
   const memoizedWrappedColumns = useDeepCompareMemoize(wrappedColumns);
+  const memoizedColumnWidths = useDeepCompareMemoize(columnWidths);
   const memoizedChartSpecModel = useDeepCompareMemoize(chartSpecModel);
   const fractionDigitsByColumn = useDeepCompareMemoize(computedFractionDigits);
   const shownColumns = memoizedClampedFieldTypes.length;
@@ -912,6 +954,11 @@ const DataTableComponent = ({
   // If the field types are not set, we don't show them
   if (!fieldTypes) {
     showDataTypes = false;
+  }
+
+  // Row/cell selection writes back to the kernel, absent in static exports.
+  if (isStatic) {
+    selection = null;
   }
 
   const columns = useMemo(
@@ -923,6 +970,7 @@ const DataTableComponent = ({
         fieldTypes: memoizedClampedFieldTypes,
         textJustifyColumns: memoizedTextJustifyColumns,
         wrappedColumns: memoizedWrappedColumns,
+        columnWidths: memoizedColumnWidths,
         headerTooltip: headerTooltip,
         // Only show data types if they are explicitly set
         showDataTypes: showDataTypes,
@@ -937,6 +985,7 @@ const DataTableComponent = ({
       memoizedClampedFieldTypes,
       memoizedTextJustifyColumns,
       memoizedWrappedColumns,
+      memoizedColumnWidths,
       headerTooltip,
       calculate_top_k_rows,
       fractionDigitsByColumn,
@@ -1009,6 +1058,53 @@ const DataTableComponent = ({
   const canShowColumnExplorer = showColumnExplorer && !!preview_column;
 
   const isInVscode = isInVscodeExtension();
+  const isIslandsMode = isIslands();
+
+  const renderTableExplorerPanel = useMemo(() => {
+    if (!isAnyPanelOpen || !(showRowExplorer || canShowColumnExplorer)) {
+      return undefined;
+    }
+    return (table: TanstackTable<unknown>) => (
+      <ContextAwarePanelItem>
+        <TableExplorerPanel
+          rowIdx={viewedRowIdx}
+          setRowIdx={setViewedRow}
+          totalRows={totalRows}
+          fieldTypes={memoizedUnclampedFieldTypes}
+          getRow={getRow}
+          isSelectable={isSelectable}
+          isRowSelected={Boolean(rowSelection[viewedRowIdx])}
+          handleRowSelectionChange={handleRowSelectionChange}
+          previewColumn={preview_column}
+          totalColumns={totalColumns}
+          tableId={id}
+          table={table}
+          showRowExplorer={showRowExplorer && !isInVscode}
+          showColumnExplorer={canShowColumnExplorer && !isInVscode}
+          activeTab={panelType}
+          onTabChange={setPanelType}
+        />
+      </ContextAwarePanelItem>
+    );
+  }, [
+    isAnyPanelOpen,
+    showRowExplorer,
+    canShowColumnExplorer,
+    viewedRowIdx,
+    setViewedRow,
+    totalRows,
+    memoizedUnclampedFieldTypes,
+    getRow,
+    isSelectable,
+    rowSelection,
+    handleRowSelectionChange,
+    preview_column,
+    totalColumns,
+    id,
+    isInVscode,
+    panelType,
+    setPanelType,
+  ]);
 
   return (
     <>
@@ -1025,6 +1121,13 @@ const DataTableComponent = ({
           Result clipped. Showing {shownColumns} of {totalColumns} columns.
         </Banner>
       )}
+      {isStatic && typeof totalRows === "number" && data.length < totalRows && (
+        <Banner className="mb-1 rounded">
+          Showing the first <strong>{prettyNumber(data.length, locale)}</strong>{" "}
+          of <strong>{prettyNumber(totalRows, locale)}</strong> rows. Increase
+          the table's <code>page_size</code> to embed more in the static export.
+        </Banner>
+      )}
       {columnSummaries?.is_disabled && (
         // Note: Keep the text in sync with the constant defined in table_manager.py
         //       This hard-code can be removed when Functions can pass structural
@@ -1033,28 +1136,6 @@ const DataTableComponent = ({
           Column summaries are unavailable. Filter your data to fewer than
           1,000,000 rows.
         </Banner>
-      )}
-
-      {isAnyPanelOpen && (showRowExplorer || canShowColumnExplorer) && (
-        <ContextAwarePanelItem>
-          <TableExplorerPanel
-            rowIdx={viewedRowIdx}
-            setRowIdx={setViewedRow}
-            totalRows={totalRows}
-            fieldTypes={memoizedUnclampedFieldTypes}
-            getRow={getRow}
-            isSelectable={isSelectable}
-            isRowSelected={Boolean(rowSelection[viewedRowIdx])}
-            handleRowSelectionChange={handleRowSelectionChange}
-            previewColumn={preview_column}
-            totalColumns={totalColumns}
-            tableId={id}
-            showRowExplorer={showRowExplorer && !isInVscode}
-            showColumnExplorer={canShowColumnExplorer && !isInVscode}
-            activeTab={panelType}
-            onTabChange={setPanelType}
-          />
-        </ContextAwarePanelItem>
       )}
 
       <ColumnChartContext value={chartSpecModel}>
@@ -1067,6 +1148,8 @@ const DataTableComponent = ({
             maxHeight={maxHeight}
             sorting={sorting}
             totalRows={totalRows}
+            sizeBytes={sizeBytes}
+            sizeBytesIsLoading={sizeBytesIsLoading}
             totalColumns={totalColumns}
             manualSorting={true}
             setSorting={setSorting}
@@ -1081,32 +1164,37 @@ const DataTableComponent = ({
             hoverTemplate={hoverTemplate}
             cellHoverTexts={cellHoverTexts}
             downloadAs={showDownload ? downloadAs : undefined}
-            enableSearch={enableSearch}
+            showSearch={showSearch}
             searchQuery={searchQuery}
             onSearchQueryChange={setSearchQuery}
             showFilters={showFilters}
             filters={filters}
             onFiltersChange={setFilters}
+            calculateTopKRows={calculate_top_k_rows}
             reloading={reloading}
             onRowSelectionChange={handleRowSelectionChange}
             freezeColumnsLeft={freezeColumnsLeft}
             freezeColumnsRight={freezeColumnsRight}
+            hiddenColumns={hiddenColumns}
             onCellSelectionChange={handleCellSelectionChange}
             getRowIds={get_row_ids}
             toggleDisplayHeader={toggleDisplayHeader}
-            showChartBuilder={showChartBuilder}
+            showChartBuilder={showChartBuilder && !isIslandsMode}
             isChartBuilderOpen={isChartBuilderOpen}
             showPageSizeSelector={showPageSizeSelector}
-            // Hidden in VSCode (for now) because we don't have a panel to show
+            // Hidden in VSCode and islands because there's no panel to show
             // the table explorer.
             showTableExplorer={
-              (showRowExplorer || canShowColumnExplorer) && !isInVscode
+              (showRowExplorer || canShowColumnExplorer) &&
+              !isInVscode &&
+              !isIslandsMode
             }
             togglePanel={togglePanel}
             isPanelOpen={isPanelOpen}
             isAnyPanelOpen={isAnyPanelOpen}
             viewedRowIdx={viewedRowIdx}
             onViewedRowChange={(rowIdx) => setViewedRowIdx(rowIdx)}
+            renderTableExplorerPanel={renderTableExplorerPanel}
           />
         </Labeled>
       </ColumnChartContext>
@@ -1123,9 +1211,7 @@ export const TableProviders: React.FC<{ children: React.ReactNode }> = ({
   return (
     <ErrorBoundary>
       <Provider store={store}>
-        <SlotzProvider controller={slotsController}>
-          <TooltipProvider>{children}</TooltipProvider>
-        </SlotzProvider>
+        <SlotzProvider controller={slotsController}>{children}</SlotzProvider>
       </Provider>
     </ErrorBoundary>
   );

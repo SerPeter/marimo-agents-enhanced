@@ -5,6 +5,7 @@ import datetime
 import io
 import json
 import sys
+import unittest.mock
 from contextlib import redirect_stderr
 from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
@@ -841,6 +842,61 @@ def test_parse_spec_polars() -> None:
     snapshot("parse_spec_polars.txt", json.dumps(spec, indent=2))
 
 
+@pytest.mark.skipif(not HAS_DEPS, reason="optional dependencies not installed")
+@pytest.mark.parametrize(
+    ("transformer", "expected_format"),
+    [
+        ("marimo_csv", "csv"),
+        ("marimo_json", "json"),
+        ("marimo_arrow", "arrow"),
+        ("marimo", "csv"),
+    ],
+)
+def test_parse_spec_respects_active_marimo_transformer(
+    transformer: str, expected_format: str
+) -> None:
+    import altair as alt
+    import pandas as pd
+
+    from marimo._plugins.ui._impl.charts.altair_transformer import (
+        register_transformers,
+    )
+
+    register_transformers()
+    previous = alt.data_transformers.active
+    try:
+        alt.data_transformers.enable(transformer)
+        data = pd.DataFrame({"values": [1, 2, 3]})
+        chart = alt.Chart(data).mark_point().encode(x="values:Q")
+        spec = _parse_spec(chart)
+        assert spec["data"]["format"]["type"] == expected_format
+    finally:
+        alt.data_transformers.enable(previous)
+
+
+@pytest.mark.skipif(not HAS_DEPS, reason="optional dependencies not installed")
+def test_parse_spec_defaults_to_arrow() -> None:
+    import altair as alt
+    import pandas as pd
+
+    from marimo._plugins.ui._impl.charts.altair_transformer import (
+        register_transformers,
+    )
+
+    register_transformers()
+    previous = alt.data_transformers.active
+    try:
+        # A non-marimo transformer should not be respected; we default to
+        # marimo_arrow so the frontend can render the chart.
+        alt.data_transformers.enable("default")
+        data = pd.DataFrame({"values": [1, 2, 3]})
+        chart = alt.Chart(data).mark_point().encode(x="values:Q")
+        spec = _parse_spec(chart)
+        assert spec["data"]["format"]["type"] == "arrow"
+    finally:
+        alt.data_transformers.enable(previous)
+
+
 @pytest.mark.skipif(
     not HAS_DEPS or not DependencyManager.duckdb.has(),
     reason="optional dependencies not installed",
@@ -991,6 +1047,62 @@ def test_get_binned_fields() -> None:
     assert "values" in binned_fields
     assert isinstance(binned_fields["values"], dict)
     assert binned_fields["values"]["extent"] == [0, 50]
+
+
+@pytest.mark.skipif(not HAS_DEPS, reason="optional dependencies not installed")
+def test_get_binned_fields_with_tooltip_list() -> None:
+    """Test _get_binned_fields handles tooltip encoded as a list (#9167)."""
+    import altair as alt
+
+    # Tooltip as a list should not crash _get_binned_fields or _has_binning
+    spec = _parse_spec(
+        alt.Chart(pd.DataFrame({"x": range(10), "y": range(10)}))
+        .mark_point()
+        .encode(
+            x="x",
+            y="y",
+            tooltip=["x", "y"],
+        )
+    )
+    assert _get_binned_fields(spec) == {}
+    assert _has_binning(spec) is False
+
+    # Tooltip list with binned fields on other channels
+    spec_with_bins = _parse_spec(
+        alt.Chart(pd.DataFrame({"x": range(10), "y": range(10)}))
+        .mark_bar()
+        .encode(
+            x=alt.X("x", bin=True),
+            y="count()",
+            tooltip=["x", alt.Tooltip("y", format=".2f")],
+        )
+    )
+    binned = _get_binned_fields(spec_with_bins)
+    assert "x" in binned
+    assert _has_binning(spec_with_bins) is True
+
+
+@pytest.mark.skipif(not HAS_DEPS, reason="optional dependencies not installed")
+def test_altair_chart_with_tooltip_list() -> None:
+    """Smoke test: altair_chart with tooltip list should not error (#9167)."""
+    import altair as alt
+
+    df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6], "c": ["x", "y", "z"]})
+    chart = (
+        alt.Chart(df)
+        .mark_arc()
+        .encode(
+            theta="a",
+            color="c",
+            tooltip=[
+                "c",
+                alt.Tooltip("a", format=".2f"),
+                alt.Tooltip("b", format="$.2f"),
+            ],
+        )
+    )
+    # This should not raise AttributeError
+    altair_chart(chart)
 
 
 @pytest.mark.skipif(not HAS_DEPS, reason="optional dependencies not installed")
@@ -1407,9 +1519,21 @@ def test_chart_with_url_data():
         .encode(x="Horsepower:Q", y="Miles_per_Gallon:Q")
     )
 
-    marimo_chart = altair_chart(chart)
-    assert isinstance(marimo_chart.dataframe, pl.DataFrame)
-    assert len(marimo_chart.dataframe) > 0
+    fake_payload = json.dumps(
+        [
+            {"Horsepower": 130, "Miles_per_Gallon": 18.0},
+            {"Horsepower": 165, "Miles_per_Gallon": 15.0},
+            {"Horsepower": 150, "Miles_per_Gallon": 18.0},
+        ]
+    ).encode("utf-8")
+
+    with unittest.mock.patch(
+        "urllib.request.urlopen",
+        return_value=io.BytesIO(fake_payload),
+    ):
+        marimo_chart = altair_chart(chart)
+        assert isinstance(marimo_chart.dataframe, pl.DataFrame)
+        assert len(marimo_chart.dataframe) > 0
 
 
 @pytest.mark.skipif(not HAS_DEPS, reason="optional dependencies not installed")

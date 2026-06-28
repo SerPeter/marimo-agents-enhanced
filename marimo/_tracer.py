@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from marimo import _loggers
 from marimo._config.settings import GLOBAL_SETTINGS
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from opentelemetry import trace
+    from opentelemetry.sdk.resources import Resource
 
 
 class MockSpan:
@@ -81,6 +82,63 @@ class MockTracer:
 
 
 TRACE_FILENAME = os.path.join("traces", "spans.jsonl")
+OTLPProtocol = Literal["grpc", "http/protobuf"]
+# OTEL SDK default when service.name is unset (Resource.create in
+# opentelemetry.sdk.resources). May be suffixed with :<executable>.
+_OTEL_DEFAULT_SERVICE_NAME = "unknown_service"
+
+
+def _is_otel_sdk_default_service_name(service_name: str) -> bool:
+    # SDK uses "unknown_service" or "unknown_service:<executable>" only.
+    return (
+        service_name == _OTEL_DEFAULT_SERVICE_NAME
+        or service_name.startswith(f"{_OTEL_DEFAULT_SERVICE_NAME}:")
+    )
+
+
+def _otlp_endpoint_configured() -> bool:
+    return bool(
+        os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    )
+
+
+def _otlp_protocol() -> OTLPProtocol | None:
+    protocol = (
+        (
+            os.environ.get("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL")
+            or os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL")
+            or "http/protobuf"
+        )
+        .strip()
+        .lower()
+    )
+    protocol = protocol or "http/protobuf"
+
+    if protocol in ("grpc", "http/protobuf"):
+        return cast(OTLPProtocol, protocol)
+
+    LOGGER.warning(
+        "Unsupported OTLP protocol %r; expected 'grpc' or "
+        "'http/protobuf'. Falling back to file export.",
+        protocol,
+    )
+    return None
+
+
+def _tracer_resource() -> Resource:
+    """Build the OpenTelemetry resource from standard OTEL env vars."""
+    from opentelemetry.sdk.resources import Resource
+
+    # Resource.create() reads OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES
+    # Default to marimo when unset.
+    resource = Resource.create()
+    service_name = resource.attributes.get("service.name")
+    if not isinstance(service_name, str) or _is_otel_sdk_default_service_name(
+        service_name
+    ):
+        resource = resource.merge(Resource({"service.name": "marimo"}))
+    return resource
 
 
 def _set_tracer_provider() -> None:
@@ -103,40 +161,101 @@ def _set_tracer_provider() -> None:
     except Exception:
         return
 
-    class FileExporter(SpanExporter):
-        def __init__(self, file_path: Path) -> None:
-            self.file_path = file_path
-            # Clear file
-            self.file_path.write_bytes(b"")
+    otlp_protocol = _otlp_protocol() if _otlp_endpoint_configured() else None
+    OTLPSpanExporter: Any | None = None
+    if otlp_protocol == "grpc":
+        try:
+            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+                OTLPSpanExporter as GrpcOTLPSpanExporter,
+            )
 
-        def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
-            try:
-                with self.file_path.open("a", encoding="utf-8") as f:
-                    for span in spans:
-                        f.write(span.to_json(cast(Any, None)))
-                        f.write("\n")
-                return SpanExportResult.SUCCESS
-            except Exception as e:
-                LOGGER.exception(e)
-                return SpanExportResult.FAILURE
+            OTLPSpanExporter = GrpcOTLPSpanExporter
+        except ImportError:
+            LOGGER.warning(
+                "opentelemetry-exporter-otlp-proto-grpc not installed; "
+                "install marimo[otel] for OTLP export. Falling back to file export.",
+            )
+    elif otlp_protocol == "http/protobuf":
+        try:
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+                OTLPSpanExporter as HttpOTLPSpanExporter,
+            )
 
-        def shutdown(self) -> None:
-            pass
+            OTLPSpanExporter = HttpOTLPSpanExporter
+        except ImportError:
+            LOGGER.warning(
+                "opentelemetry-exporter-otlp-proto-http not installed; "
+                "install marimo[otel] for OTLP export. Falling back to file export.",
+            )
 
-    # Create a directory for logs if it doesn't exist
-    config_ready = ConfigReader.for_filename(TRACE_FILENAME)
-    filepath = config_ready.filepath
-    filepath.parent.mkdir(parents=True, exist_ok=True)
+    resource = _tracer_resource()
 
-    # Create a file exporter
-    file_exporter: FileExporter = FileExporter(filepath)
+    if OTLPSpanExporter is not None:
+        provider = TracerProvider(resource=resource)
+        provider.add_span_processor(
+            BatchSpanProcessor(
+                OTLPSpanExporter(),
+            ),
+        )
+        LOGGER.debug(
+            "OTel tracer: OTLP export via %s",
+            otlp_protocol,
+        )
+    else:
 
-    provider = TracerProvider()
-    processor = BatchSpanProcessor(file_exporter)
-    provider.add_span_processor(processor)
+        class FileExporter(SpanExporter):
+            def __init__(self, file_path: Path) -> None:
+                self.file_path = file_path
+                self.file_path.write_bytes(b"")
+
+            def export(
+                self,
+                spans: Sequence[ReadableSpan],
+            ) -> SpanExportResult:
+                try:
+                    with self.file_path.open("a", encoding="utf-8") as f:
+                        for span in spans:
+                            f.write(span.to_json(cast(Any, None)))
+                            f.write("\n")
+                    return SpanExportResult.SUCCESS
+                except Exception as e:
+                    LOGGER.exception(e)
+                    return SpanExportResult.FAILURE
+
+            def shutdown(self) -> None:
+                pass
+
+        config_ready = ConfigReader.for_filename(TRACE_FILENAME)
+        filepath = config_ready.filepath
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+
+        provider = TracerProvider(resource=resource)
+        provider.add_span_processor(BatchSpanProcessor(FileExporter(filepath)))
+        LOGGER.debug("OTel tracer: file export to %s", filepath)
 
     # Sets the global default tracer provider
     trace.set_tracer_provider(provider)
+
+    _instrument_ai(provider)
+
+
+def _instrument_ai(provider: trace.TracerProvider) -> None:
+    """Current AI integrations use pydantic_ai, so we instrument it globally."""
+
+    if not DependencyManager.pydantic_ai.has():
+        LOGGER.debug("Skipping AI instrumentation (pydantic_ai not installed)")
+        return
+
+    try:
+        from pydantic_ai import Agent
+        from pydantic_ai.models.instrumented import InstrumentationSettings
+
+        Agent.instrument_all(
+            InstrumentationSettings(tracer_provider=provider, version=5)
+        )
+        LOGGER.debug("Enabled AI instrumentation")
+    except Exception as e:
+        LOGGER.debug("AI instrumentation failed: %s", e)
 
 
 def create_tracer(trace_name: str) -> trace.Tracer:

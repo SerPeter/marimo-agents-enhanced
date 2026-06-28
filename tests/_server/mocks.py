@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import tempfile
-from typing import TYPE_CHECKING, Any, Callable, Optional, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from marimo._config.manager import (
     MarimoConfigManager,
@@ -11,14 +12,19 @@ from marimo._config.manager import (
     get_default_config_manager,
 )
 from marimo._server.config import StarletteServerStateInit
-from marimo._server.file_router import AppFileRouter
 from marimo._server.lsp import NoopLspServer
 from marimo._server.session_manager import SessionManager
 from marimo._server.tokens import AuthToken, SkewProtectionToken
+from marimo._server.workspace import (
+    NotebookWorkspace,
+    SingleFileWorkspace,
+)
 from marimo._session.model import SessionMode
 from marimo._utils.marimo_path import MarimoPath
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
     from starlette.testclient import TestClient
 
 
@@ -28,7 +34,7 @@ def get_session_manager(client: TestClient) -> SessionManager:
 
 def get_starlette_server_state_init(
     *,
-    session_manager: Optional[SessionManager] = None,
+    session_manager: SessionManager | None = None,
     base_url: str = "",
 ) -> StarletteServerStateInit:
     return StarletteServerStateInit(
@@ -76,7 +82,7 @@ if __name__ == "__main__":
     lsp_server = NoopLspServer()
 
     sm = SessionManager(
-        file_router=AppFileRouter.from_filename(MarimoPath(temp_file.name)),
+        workspace=SingleFileWorkspace.from_path(MarimoPath(temp_file.name)),
         mode=mode,
         quiet=False,
         include_code=True,
@@ -92,22 +98,30 @@ if __name__ == "__main__":
     return sm
 
 
-def with_file_router(
-    file_router: AppFileRouter,
+@contextlib.contextmanager
+def workspace_scope(
+    client: TestClient, workspace: NotebookWorkspace
+) -> Iterator[None]:
+    session_manager: SessionManager = cast(
+        Any, client.app
+    ).state.session_manager
+    original_workspace = session_manager.workspace
+    session_manager.workspace = workspace
+    try:
+        yield
+    finally:
+        session_manager.workspace = original_workspace
+
+
+def with_workspace(
+    workspace: NotebookWorkspace,
 ) -> Callable[[Callable[..., None]], Callable[..., None]]:
-    """Decorator to create a session and close it after the test"""
+    """Decorator to swap a workspace for the duration of the test."""
 
     def decorator(func: Callable[..., None]) -> Callable[..., None]:
         def wrapper(client: TestClient, *args: Any, **kwargs: Any) -> None:
-            session_manager: SessionManager = cast(
-                Any, client.app
-            ).state.session_manager
-            original_file_router = session_manager.file_router
-            session_manager.file_router = file_router
-
-            func(client, *args, **kwargs)
-
-            session_manager.file_router = original_file_router
+            with workspace_scope(client, workspace):
+                func(client, *args, **kwargs)
 
         return wrapper
 
@@ -123,7 +137,7 @@ def with_session(
     def decorator(func: Callable[..., None]) -> Callable[..., None]:
         def wrapper(
             client: TestClient,
-            temp_marimo_file: Optional[str],
+            temp_marimo_file: str | None,
         ) -> None:
             auth_token = get_session_manager(client).auth_token
             headers = token_header(auth_token)
@@ -232,7 +246,7 @@ def with_read_session(
 def token_header(
     token: str | AuthToken = "fake-token", skew_id: str = "skew-id-1"
 ) -> dict[str, str]:
-    encoded = base64.b64encode(f"marimo:{str(token)}".encode()).decode()
+    encoded = base64.b64encode(f"marimo:{token!s}".encode()).decode()
     return {
         "Authorization": f"Basic {encoded}",
         "Marimo-Server-Token": skew_id,

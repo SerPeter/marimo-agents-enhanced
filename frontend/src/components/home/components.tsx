@@ -9,17 +9,18 @@ import {
   DatabaseIcon,
   FileIcon,
   FileTextIcon,
-  GithubIcon,
   GraduationCapIcon,
   GridIcon,
   LayoutIcon,
   LinkIcon,
   MessagesSquareIcon,
   OrbitIcon,
-  YoutubeIcon,
+  PackageIcon,
 } from "lucide-react";
 import type React from "react";
 import { MarkdownIcon } from "@/components/editor/cell/code/icons";
+import { GitHubIcon } from "@/components/icons/github";
+import { YouTubeIcon } from "@/components/icons/youtube";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -32,6 +33,7 @@ import { useRequestClient } from "@/core/network/requests";
 import type { TutorialId } from "@/core/network/types";
 import { openNotebook } from "@/utils/links";
 import { Objects } from "@/utils/objects";
+import { MarimoPlusIcon } from "../icons/marimo-icons";
 
 const TUTORIALS: Record<
   TutorialId,
@@ -56,6 +58,11 @@ const TUTORIALS: Record<
     "File format",
     FileIcon,
     "Understand marimo's pure-Python file format",
+  ],
+  "external-dependencies": [
+    "External dependencies",
+    PackageIcon,
+    "Declare dependencies with Python script metadata",
   ],
   "for-jupyter-users": [
     "For Jupyter users",
@@ -123,7 +130,7 @@ const RESOURCES = [
   {
     title: "GitHub",
     description: "View source code, report issues, or contribute",
-    icon: GithubIcon,
+    icon: GitHubIcon,
     url: Constants.githubPage,
   },
   {
@@ -133,9 +140,15 @@ const RESOURCES = [
     url: Constants.discordLink,
   },
   {
+    title: "molab",
+    description: "Run marimo notebooks in the cloud",
+    icon: MarimoPlusIcon,
+    url: Constants.molab,
+  },
+  {
     title: "YouTube",
     description: "Watch tutorials and demos",
-    icon: YoutubeIcon,
+    icon: YouTubeIcon,
     url: Constants.youtube,
   },
   {

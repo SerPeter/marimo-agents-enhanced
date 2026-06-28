@@ -7,7 +7,7 @@ import pickle
 import subprocess
 import sys
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from marimo import _loggers
 from marimo._messaging.types import KernelMessage
@@ -23,6 +23,8 @@ from marimo._session.app_host.commands import (
     encode_mgmt_command,
 )
 from marimo._session.app_host.connection import AppHostConnection
+from marimo._session.queue import ProcessLike
+from marimo._utils.subprocess import try_kill_process_and_group
 
 if TYPE_CHECKING:
     import queue
@@ -31,6 +33,7 @@ if TYPE_CHECKING:
     from marimo._ast.cell import CellConfig
     from marimo._config.config import MarimoConfig
     from marimo._runtime.commands import AppMetadata
+    from marimo._runtime.virtual_file import VirtualFileStorageType
     from marimo._types.ids import CellId_t
 
 LOGGER = _loggers.marimo_logger()
@@ -251,7 +254,7 @@ class AppHost:
         configs: dict[CellId_t, CellConfig],
         app_metadata: AppMetadata,
         user_config: MarimoConfig,
-        virtual_files_supported: bool,
+        virtual_file_storage: VirtualFileStorageType | None,
         redirect_console_to_browser: bool,
         log_level: int,
     ) -> KernelCreatedResponse:
@@ -264,7 +267,7 @@ class AppHost:
             configs=configs,
             app_metadata=app_metadata,
             user_config=user_config,
-            virtual_files_supported=virtual_files_supported,
+            virtual_file_storage=virtual_file_storage,
             redirect_console_to_browser=redirect_console_to_browser,
             log_level=log_level,
         )
@@ -357,13 +360,11 @@ class AppHost:
 
         if self._process is not None:
             try:
-                self._process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._process.terminate()
-                try:
-                    self._process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    self._process.kill()
+                try_kill_process_and_group(cast(ProcessLike, self._process))
+            except ProcessLookupError:
+                pass
+            except Exception as e:
+                LOGGER.warning(e)
 
         # Close all sockets (with linger=0).  This interrupts any
         # pending poll()/recv() in _stream_receiver_loop with ETERM,

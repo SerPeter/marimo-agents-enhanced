@@ -4,9 +4,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from marimo import _loggers
 from marimo._ast.cell_manager import CellManager
@@ -52,7 +53,44 @@ if TYPE_CHECKING:
 LOGGER = _loggers.marimo_logger()
 
 
-def _normalize_error(error: Union[MarimoError, dict[str, Any]]) -> ErrorOutput:
+# Matches the runtime's virtual-file URL shape: `./@file/<bytes>-<name>`
+# (see `marimo/_runtime/virtual_file/virtual_file.py`). Anchored to the
+# byte-length digits so a literal "./@file/" mention in user content
+# doesn't trip the check.
+_VIRTUAL_FILE_URL_RE = re.compile(r"\./@file/\d+-")
+
+
+def _references_virtual_file(data: Any) -> bool:
+    """Return True if `data` references a virtual-file URL.
+
+    Virtual files (`./@file/<bytes>-<name>`) are backed by per-process
+    storage that disappears on kernel restart, so any cached output that
+    embeds one would 404 on replay (e.g. anywidget HTML losing its binary
+    state — see #9273).
+    """
+    return _references_virtual_file_inner(data, set())
+
+
+def _references_virtual_file_inner(data: Any, seen: set[int]) -> bool:
+    if isinstance(data, str):
+        return _VIRTUAL_FILE_URL_RE.search(data) is not None
+    if isinstance(data, (dict, list)):
+        # Guard against cycles: session outputs shouldn't contain them in
+        # practice, but a self-referencing structure should return False
+        # cleanly rather than blow the stack.
+        container_id = id(data)
+        if container_id in seen:
+            return False
+        seen.add(container_id)
+        if isinstance(data, dict):
+            return any(
+                _references_virtual_file_inner(v, seen) for v in data.values()
+            )
+        return any(_references_virtual_file_inner(v, seen) for v in data)
+    return False
+
+
+def _normalize_error(error: MarimoError | dict[str, Any]) -> ErrorOutput:
     """Normalize error to consistent format."""
     if isinstance(error, dict):
         return ErrorOutput(
@@ -80,6 +118,8 @@ def _normalize_error(error: Union[MarimoError, dict[str, Any]]) -> ErrorOutput:
 def serialize_session_view(
     view: SessionView,
     cell_ids: Iterable[CellId_t],
+    *,
+    drop_virtual_file_outputs: bool,
     script_metadata_hash: str | None = None,
 ) -> NotebookSessionV1:
     """Convert a SessionView to a NotebookSession schema.
@@ -88,6 +128,20 @@ def serialize_session_view(
     the NotebookSession schema (and only these cells will be saved to the
     schema). When not provided, this method attempts to recover the notebook
     order from the SessionView object, but this is not always possible.
+
+    `./@file/...` URLs are backed by per-process buffers, so
+    `drop_virtual_file_outputs` depends on where the snapshot will be
+    consumed:
+
+    - `True` when the snapshot will be replayed in a *different*
+      process from the one that produced it. The buffers are gone, so
+      surviving URLs would 404 on replay (#9273); dropping them leaves
+      the cell un-run until the kernel re-executes it. Used by the
+      on-disk session cache.
+    - `False` when the snapshot will be consumed in the *same* process
+      while buffers are still live, and the caller resolves the URLs
+      itself before they're released — e.g. HTML export inlining them
+      as `data:` URLs.
     """
     cells: list[Cell] = []
 
@@ -106,11 +160,14 @@ def serialize_session_view(
         if cell_notif.output:
             if cell_notif.output.channel == CellChannel.MARIMO_ERROR:
                 for error in cast(
-                    list[Union[MarimoError, dict[str, Any]]],
+                    list[MarimoError | dict[str, Any]],
                     cell_notif.output.data,
                 ):
                     outputs.append(_normalize_error(error))
-            else:
+            elif not (
+                drop_virtual_file_outputs
+                and _references_virtual_file(cell_notif.output.data)
+            ):
                 outputs.append(
                     DataOutput(
                         type="data",
@@ -353,7 +410,7 @@ def get_session_cache_file(path: Path) -> Path:
     return notebook_output_dir(path) / "session" / f"{path.name}.json"
 
 
-def _hash_code(code: Optional[str]) -> Optional[str]:
+def _hash_code(code: str | None) -> str | None:
     if code is None or code == "":
         return None
     return hash_code(code)
@@ -413,6 +470,7 @@ class SessionCacheWriter(AsyncBackgroundTask):
                         script_metadata_hash=_script_metadata_hash(
                             self.notebook_path
                         ),
+                        drop_virtual_file_outputs=True,
                     )
                     if isinstance(self.path, AsyncPath):
                         await self.path.write_text(json.dumps(data, indent=2))
@@ -445,7 +503,7 @@ class SessionCacheManager:
         self,
         session_view: SessionView,
         document: NotebookDocument,
-        path: Optional[str | Path],
+        path: str | Path | None,
         interval: float,
     ):
         self.session_view = session_view
@@ -493,16 +551,16 @@ class SessionCacheManager:
             return False
         if (len(key.codes) != len(notebook_session["cells"])) or any(
             _hash_code(code) != cell["code_hash"]
-            for code, cell in zip(key.codes, notebook_session["cells"])
+            for code, cell in zip(
+                key.codes, notebook_session["cells"], strict=False
+            )
         ):
             return False
         if key.marimo_version != metadata.get("marimo_version"):
             return False
         if "script_metadata_hash" not in metadata:
             return False
-        if metadata.get("script_metadata_hash") != key.script_metadata_hash:
-            return False
-        return True
+        return metadata.get("script_metadata_hash") == key.script_metadata_hash
 
     def read_session_view(self, key: SessionCacheKey) -> SessionView:
         """Read the session view from the cache files.
@@ -529,7 +587,7 @@ class SessionCacheManager:
         # Build mapping from code_hash to cell_id based on current cell IDs
         # This handles cases where cell_ids have changed even though code matches
         code_hash_to_cell_id: dict[str, CellId_t] = {}
-        for code, cell_id in zip(key.codes, key.cell_ids):
+        for code, cell_id in zip(key.codes, key.cell_ids, strict=False):
             code_hash = _hash_code(code)
             if code_hash is not None:
                 # Map the code_hash to the current cell_id from the key

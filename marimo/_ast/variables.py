@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import builtins
 import re
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 
 from marimo._types.ids import CellId_t
 
@@ -65,6 +65,17 @@ def is_local(name: str) -> bool:
 
 def get_cell_from_local(
     name: str, cell_id: CellId_t = _EMPTY_CELL_ID
-) -> Optional[CellId_t]:
+) -> CellId_t | None:
     local = unmangle_local(if_local_then_mangle(name, cell_id)).cell
     return local if local else None
+
+
+# Demangle every occurrence of `_cell_<cell_id><_name>` inside a free-form
+# string (test output, traceback lines, etc.) back to `<_name>`. Matches
+# normal ids and UUIDs; the `(?<!_)` lookbehind skips the compiled cell-file
+# path `__marimo__cell_<id>_.py`, which carries a leading `_`.
+_MANGLED_LOCAL_IN_TEXT_RE = re.compile(r"(?<!_)_cell_(?:[^\W_][\w-]*?)(_\w*)")
+
+
+def demangle_locals_in_text(text: str) -> str:
+    return _MANGLED_LOCAL_IN_TEXT_RE.sub(r"\1", text)

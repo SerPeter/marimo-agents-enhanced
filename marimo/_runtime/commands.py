@@ -10,9 +10,9 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
-    Optional,
     TypeVar,
     Union,
+    cast,
 )
 from uuid import uuid4
 
@@ -23,6 +23,8 @@ from marimo._ast.app_config import _AppConfig
 from marimo._config.config import MarimoConfig
 from marimo._data.models import DataTableSource
 from marimo._messaging.notebook.document import NotebookCell
+from marimo._messaging.notebook.outputs import CellOutputs
+from marimo._types.encodable import Encodable
 from marimo._types.ids import CellId_t, RequestId, UIElementId, WidgetModelId
 
 LOGGER = _loggers.marimo_logger()
@@ -40,8 +42,7 @@ def kebab_case(name: str) -> str:
     Removes 'Command' suffix and converts to kebab-case for discriminated union tags.
     Handles acronyms by keeping consecutive uppercase letters together.
     """
-    if name.endswith("Command"):
-        name = name[:-7]  # Remove 'Command' (7 characters)
+    name = name.removesuffix("Command")  # Remove 'Command' (7 characters)
     if not name:
         return name
     # Insert hyphens before uppercase letters that follow lowercase letters
@@ -63,14 +64,45 @@ class Command(
     deserialization for type-safe routing.
     """
 
-    pass
-
 
 T = TypeVar("T")
+# Union required: mypy rejects `T | list[T]` as a generic type alias target.
 ListOrValue = Union[T, list[T]]
 SerializedQueryParams = dict[str, ListOrValue[str]]
-Primitive = Union[str, bool, int, float]
+Primitive = str | bool | int | float
 SerializedCLIArgs = dict[str, ListOrValue[Primitive]]
+
+
+def _user_to_dict(user: Any) -> dict[str, Encodable]:
+    """Normalize an auth user into a serializable dict.
+
+    Starlette's authentication middleware sets `request.scope["user"]` to a
+    `BaseUser` instance (commonly `SimpleUser`). Storing the raw object on
+    `HTTPRequest.user` breaks msgspec serialization on the IPC path. Convert
+    to a dict matching the documented contract: "info from authentication
+    middleware (e.g., is_authenticated, username)".
+    """
+    if user is None:
+        return {}
+    if isinstance(user, dict):
+        return user
+    return {
+        "username": getattr(user, "username", ""),
+        "is_authenticated": getattr(user, "is_authenticated", False),
+        "display_name": getattr(user, "display_name", ""),
+    }
+
+
+def _meta_to_dict(meta: Any) -> dict[str, Encodable]:
+    """Normalize user-defined `request.scope["meta"]` at the boundary.
+
+    Trusted shape per the public contract (`mo.app_meta().request`); we
+    just enforce dict-ness at the seam. Non-`Encodable` values inside will
+    surface at IPC encode time rather than being silently coerced.
+    """
+    if meta is None or not isinstance(meta, dict):
+        return {}
+    return cast("dict[str, Encodable]", meta)
 
 
 @dataclass
@@ -91,14 +123,14 @@ class HTTPRequest(Mapping[str, Any]):
         user: User info from authentication middleware (e.g., is_authenticated, username).
     """
 
-    url: dict[str, Any]  # Serialized URL
-    base_url: dict[str, Any]  # Serialized URL
+    url: dict[str, Encodable]  # Serialized URL
+    base_url: dict[str, Encodable]  # Serialized URL
     headers: dict[str, str]  # Raw headers
     query_params: dict[str, list[str]]  # Raw query params
-    path_params: dict[str, Any]
+    path_params: dict[str, Encodable]
     cookies: dict[str, str]
-    meta: dict[str, Any]  # User-defined storage
-    user: Any
+    meta: dict[str, Encodable]  # User-defined storage
+    user: Encodable
 
     # We don't include session or auth because they may contain
     # information that the app author does not want to expose.
@@ -124,11 +156,11 @@ class HTTPRequest(Mapping[str, Any]):
             return self.__dict__
 
     def __repr__(self) -> str:
-        return f"HTTPRequest(path={self.url['path']}, params={len(self.query_params)})"
+        return f"HTTPRequest(path={self.url['path']!r}, params={len(self.query_params)})"
 
     @staticmethod
     def from_request(request: HTTPConnection) -> HTTPRequest:
-        def _url_to_dict(url: URL) -> dict[str, Any]:
+        def _url_to_dict(url: URL) -> dict[str, Encodable]:
             return {
                 "path": url.path,
                 "port": url.port,
@@ -162,8 +194,8 @@ class HTTPRequest(Mapping[str, Any]):
             query_params=query_params,
             path_params=request.path_params,
             cookies=request.cookies,
-            user=request["user"] if "user" in request else {},
-            meta=request["meta"] if "meta" in request else {},
+            user=_user_to_dict(request.get("user")),
+            meta=_meta_to_dict(request.get("meta")),
             # Left out for now. This may contain information that the app author
             # does not want to expose.
             # session=request.session if "session" in request else {},
@@ -183,7 +215,7 @@ class DebugCellCommand(Command):
 
     cell_id: CellId_t
     # incoming request, e.g. from Starlette or FastAPI
-    request: Optional[HTTPRequest] = None
+    request: HTTPRequest | None = None
 
     def __repr__(self) -> str:
         return f"DebugCellCommand(cell={self.cell_id})"
@@ -205,7 +237,7 @@ class ExecuteCellCommand(Command):
     cell_id: CellId_t
     code: str
     # incoming request, e.g. from Starlette or FastAPI
-    request: Optional[HTTPRequest] = None
+    request: HTTPRequest | None = None
     timestamp: float = msgspec.field(default_factory=time.time)
 
     def __repr__(self) -> str:
@@ -225,7 +257,7 @@ class ExecuteStaleCellsCommand(Command):
         request: HTTP request context if available.
     """
 
-    request: Optional[HTTPRequest] = None
+    request: HTTPRequest | None = None
 
 
 class ExecuteCellsCommand(Command):
@@ -246,7 +278,7 @@ class ExecuteCellsCommand(Command):
     # code to register/run for each cell
     codes: list[str]
     # incoming request, e.g. from Starlette or FastAPI
-    request: Optional[HTTPRequest] = None
+    request: HTTPRequest | None = None
     # time at which the request was received
     timestamp: float = msgspec.field(default_factory=time.time)
 
@@ -267,7 +299,7 @@ class ExecuteCellsCommand(Command):
                 request=self.request,
                 timestamp=self.timestamp,
             )
-            for cell_id, code in zip(self.cell_ids, self.codes)
+            for cell_id, code in zip(self.cell_ids, self.codes, strict=False)
         ]
 
     def __post_init__(self) -> None:
@@ -329,13 +361,27 @@ class ExecuteScratchpadCommand(Command):
         notebook_cells: Snapshot of notebook cells from the session document.
             Used to populate the document ContextVar so code_mode can read
             cell ordering, code, names, and configs.
+        cell_outputs: Snapshot of per-cell outputs (main + console) from the
+            session view. Populates a parallel ContextVar so code_mode can
+            expose `cell.output` and `cell.console_outputs`. Frozen at
+            scratchpad start — not refreshed when `ctx.run_cell` produces
+            new outputs in the same batch.
+        run_id: Optional correlation ID. When set, the
+            `CompletedRunNotification` emitted at the end of this command
+            carries the same `run_id` so a caller holding a
+            `ScratchCellListener` can filter for *its* completion and
+            ignore `CompletedRun` events from unrelated commands on the
+            same session.
     """
 
     code: str
     # incoming request, e.g. from Starlette or FastAPI
-    request: Optional[HTTPRequest] = None
+    request: HTTPRequest | None = None
     # Document snapshot — set by the execution endpoint from session.document.
-    notebook_cells: Optional[tuple[NotebookCell, ...]] = None
+    notebook_cells: tuple[NotebookCell, ...] | None = None
+    # Output snapshot — set by the execution endpoint from session.session_view.
+    cell_outputs: CellOutputs | None = None
+    run_id: str | None = None
 
 
 class RenameNotebookCommand(Command):
@@ -366,7 +412,7 @@ class UpdateUIElementCommand(Command):
     object_ids: list[UIElementId]
     values: list[Any]
     # Incoming request, e.g. from Starlette or FastAPI
-    request: Optional[HTTPRequest] = None
+    request: HTTPRequest | None = None
     # uniquely identifies the request
     token: str = msgspec.field(default_factory=lambda: str(uuid4()))
 
@@ -386,7 +432,7 @@ class UpdateUIElementCommand(Command):
     @staticmethod
     def from_ids_and_values(
         ids_and_values: list[tuple[UIElementId, Any]],
-        request: Optional[HTTPRequest] = None,
+        request: HTTPRequest | None = None,
     ) -> UpdateUIElementCommand:
         """Create command from list of (id, value) tuples.
 
@@ -401,7 +447,7 @@ class UpdateUIElementCommand(Command):
             return UpdateUIElementCommand(
                 object_ids=[], values=[], request=request
             )
-        object_ids, values = zip(*ids_and_values)
+        object_ids, values = zip(*ids_and_values, strict=False)
         return UpdateUIElementCommand(
             object_ids=list(object_ids),
             values=list(values),
@@ -415,7 +461,7 @@ class UpdateUIElementCommand(Command):
         Returns:
             List of (id, value) tuples.
         """
-        return list(zip(self.object_ids, self.values))
+        return list(zip(self.object_ids, self.values, strict=False))
 
 
 class InvokeFunctionCommand(Command):
@@ -454,10 +500,10 @@ class AppMetadata(msgspec.Struct, rename="camel"):
     query_params: SerializedQueryParams
     cli_args: SerializedCLIArgs
     app_config: _AppConfig
-    argv: Union[list[str], None] = None
+    argv: list[str] | None = None
 
-    filename: Optional[str] = None
-    docstring: Optional[str] = None
+    filename: str | None = None
+    docstring: str | None = None
 
 
 class UpdateCellConfigCommand(Command):
@@ -507,7 +553,7 @@ class CreateNotebookCommand(Command):
     cell_ids: tuple[CellId_t, ...]
     set_ui_element_value_request: UpdateUIElementCommand
     auto_run: bool
-    request: Optional[HTTPRequest] = None
+    request: HTTPRequest | None = None
 
 
 class DeleteCellCommand(Command):
@@ -529,8 +575,6 @@ class StopKernelCommand(Command):
     Signals the kernel to stop processing and shut down gracefully.
     Used when closing a notebook or terminating a session.
     """
-
-    pass
 
 
 class CodeCompletionCommand(Command):
@@ -607,7 +651,7 @@ class PreviewDatasetColumnCommand(Command):
     column_name: str
     # The fully qualified name of the table
     # This is the database.schema.table name
-    fully_qualified_table_name: Optional[str] = None
+    fully_qualified_table_name: str | None = None
 
 
 class PreviewSQLTableCommand(Command):
@@ -622,6 +666,8 @@ class PreviewSQLTableCommand(Command):
         database: Database containing the table.
         schema: Schema containing the table.
         table_name: Table to preview.
+        schema_path: Path of nested schemas (relative to `database`) for
+            catalogs with nested schemas. Empty for the top level.
     """
 
     request_id: RequestId
@@ -629,6 +675,7 @@ class PreviewSQLTableCommand(Command):
     database: str
     schema: str
     table_name: str
+    schema_path: list[str] = msgspec.field(default_factory=list)
 
 
 class ListSQLTablesCommand(Command):
@@ -642,12 +689,15 @@ class ListSQLTablesCommand(Command):
         engine: SQL engine ('postgresql', 'mysql', 'duckdb', etc.).
         database: Database to query.
         schema: Schema to list tables from.
+        schema_path: Path of nested schemas (relative to `database`) for
+            catalogs with nested schemas. Empty for the top level.
     """
 
     request_id: RequestId
     engine: str
     database: str
     schema: str
+    schema_path: list[str] = msgspec.field(default_factory=list)
 
 
 class ListSQLSchemasCommand(Command):
@@ -660,11 +710,14 @@ class ListSQLSchemasCommand(Command):
         request_id: Unique identifier for this request.
         engine: SQL engine ('postgresql', 'mysql', 'duckdb', etc.).
         database: Database to query.
+        schema_path: Parent schema path whose child schemas to list.
+            Empty lists the database's top-level schemas.
     """
 
     request_id: RequestId
     engine: str
     database: str
+    schema_path: list[str] = msgspec.field(default_factory=list)
 
 
 class ListDataSourceConnectionCommand(Command):
@@ -698,8 +751,8 @@ class ValidateSQLCommand(Command):
     # Whether to only parse the query or validate against the database
     # Parsing is done without a DB connection and uses dialect, whereas validation requires a connection
     only_parse: bool
-    engine: Optional[str] = None
-    dialect: Optional[str] = None
+    engine: str | None = None
+    dialect: str | None = None
 
 
 class StorageListEntriesCommand(Command):
@@ -713,12 +766,14 @@ class StorageListEntriesCommand(Command):
         namespace: Variable name identifying the storage backend.
         limit: Max entries to return.
         prefix: Path prefix to list (None = root).
+        page_token: Token for the next page of entries.
     """
 
     request_id: RequestId
     namespace: str
     limit: int
-    prefix: Optional[str] = None
+    prefix: str | None = None
+    page_token: str | None = None
 
 
 class StorageDownloadCommand(Command):
@@ -763,8 +818,8 @@ class ModelUpdateMessage(
         buffer_paths: Paths within state dict pointing to binary buffers.
     """
 
-    state: dict[str, Any]
-    buffer_paths: list[list[Union[str, int]]]
+    state: dict[str, Encodable]
+    buffer_paths: list[list[str | int]]
 
     def into_comm_payload_content(self) -> dict[str, Any]:
         return {
@@ -785,7 +840,7 @@ class ModelCustomMessage(
         content: Arbitrary content for the custom message.
     """
 
-    content: Any
+    content: Encodable
 
     def into_comm_payload_content(self) -> dict[str, Any]:
         return {
@@ -796,7 +851,7 @@ class ModelCustomMessage(
         }
 
 
-ModelMessage = Union[ModelUpdateMessage, ModelCustomMessage]
+ModelMessage = ModelUpdateMessage | ModelCustomMessage
 
 
 class ModelCommand(Command):
@@ -825,7 +880,7 @@ class ModelCommand(Command):
 
 # Commands that can be batched and merged (last-write-wins) by the
 # SetUIElementRequestManager to avoid redundant cell re-executions.
-BatchableCommand = Union[UpdateUIElementCommand, ModelCommand]
+BatchableCommand = UpdateUIElementCommand | ModelCommand
 
 
 class RefreshSecretsCommand(Command):
@@ -833,8 +888,6 @@ class RefreshSecretsCommand(Command):
 
     Reloads secrets from the provider without restarting the kernel.
     """
-
-    pass
 
 
 class ClearCacheCommand(Command):
@@ -844,8 +897,6 @@ class ClearCacheCommand(Command):
     Affects all cells using the @cache decorator.
     """
 
-    pass
-
 
 class GetCacheInfoCommand(Command):
     """Retrieve cache statistics.
@@ -853,49 +904,47 @@ class GetCacheInfoCommand(Command):
     Collects cache usage info across all contexts (hit/miss rates, time saved, disk usage).
     """
 
-    pass
 
-
-CommandMessage = Union[
+CommandMessage = (
     # Notebook operations
-    CreateNotebookCommand,
-    RenameNotebookCommand,
-    CodeCompletionCommand,
+    CreateNotebookCommand
+    | RenameNotebookCommand
+    | CodeCompletionCommand
     # Cell execution and management
-    ExecuteCellsCommand,
-    ExecuteScratchpadCommand,
-    ExecuteStaleCellsCommand,
-    DebugCellCommand,
-    DeleteCellCommand,
-    SyncGraphCommand,
-    UpdateCellConfigCommand,
+    | ExecuteCellsCommand
+    | ExecuteScratchpadCommand
+    | ExecuteStaleCellsCommand
+    | DebugCellCommand
+    | DeleteCellCommand
+    | SyncGraphCommand
+    | UpdateCellConfigCommand
     # Package management
-    InstallPackagesCommand,
+    | InstallPackagesCommand
     # UI element and widget model operations
-    UpdateUIElementCommand,
-    ModelCommand,
-    InvokeFunctionCommand,
+    | UpdateUIElementCommand
+    | ModelCommand
+    | InvokeFunctionCommand
     # User/configuration operations
-    UpdateUserConfigCommand,
+    | UpdateUserConfigCommand
     # Data SQL operations
-    PreviewDatasetColumnCommand,
-    PreviewSQLTableCommand,
-    ListSQLTablesCommand,
-    ListSQLSchemasCommand,
-    ValidateSQLCommand,
-    ListDataSourceConnectionCommand,
+    | PreviewDatasetColumnCommand
+    | PreviewSQLTableCommand
+    | ListSQLTablesCommand
+    | ListSQLSchemasCommand
+    | ValidateSQLCommand
+    | ListDataSourceConnectionCommand
     # Storage operations
-    StorageListEntriesCommand,
-    StorageDownloadCommand,
+    | StorageListEntriesCommand
+    | StorageDownloadCommand
     # Secrets management
-    ListSecretKeysCommand,
-    RefreshSecretsCommand,
+    | ListSecretKeysCommand
+    | RefreshSecretsCommand
     # Cache management
-    ClearCacheCommand,
-    GetCacheInfoCommand,
+    | ClearCacheCommand
+    | GetCacheInfoCommand
     # Kernel operations
-    StopKernelCommand,
-]
+    | StopKernelCommand
+)
 """Union of all command messages.
 
 All commands that can be sent to the kernel.

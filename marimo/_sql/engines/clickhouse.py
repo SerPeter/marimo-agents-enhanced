@@ -1,7 +1,7 @@
 # Copyright 2026 Marimo. All rights reserved.
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 
 from marimo import _loggers
 from marimo._ast.sql_utils import classify_sql_statement
@@ -44,8 +44,8 @@ class ClickhouseEmbedded(SQLConnection[Optional["ChdbConnection"]]):
 
     def __init__(
         self,
-        connection: Optional[ChdbConnection] = None,
-        engine_name: Optional[VariableName] = None,
+        connection: ChdbConnection | None = None,
+        engine_name: VariableName | None = None,
     ) -> None:
         super().__init__(connection, engine_name)
         self._cursor = None if connection is None else connection.cursor()
@@ -143,43 +143,59 @@ class ClickhouseEmbedded(SQLConnection[Optional["ChdbConnection"]]):
     def get_schemas(
         self,
         *,
-        database: Optional[str],
+        database: str | None,
         include_tables: bool,
         include_table_details: bool,
+        schema_path: list[str] | None = None,
     ) -> list[Schema]:
         """Get all schemas and optionally their tables. Keys are schema names."""
-        _, _, _ = database, include_tables, include_table_details
+        _, _, _, _ = (
+            database,
+            include_tables,
+            include_table_details,
+            schema_path,
+        )
         return []
 
     # TODO: Implement the following functionalities
     def get_databases(
         self,
         *,
-        include_schemas: Union[bool, Literal["auto"]],
-        include_tables: Union[bool, Literal["auto"]],
-        include_table_details: Union[bool, Literal["auto"]],
+        include_schemas: bool | Literal["auto"],
+        include_tables: bool | Literal["auto"],
+        include_table_details: bool | Literal["auto"],
     ) -> list[Database]:
         _, _, _ = include_schemas, include_tables, include_table_details
         return []
 
     def get_tables_in_schema(
-        self, *, database: str, schema: str, include_table_details: bool
+        self,
+        *,
+        database: str,
+        schema: str,
+        include_table_details: bool,
+        schema_path: list[str] | None = None,
     ) -> list[DataTable]:
         """Return all tables in a schema."""
-        _, _, _ = database, schema, include_table_details
+        _, _, _, _ = database, schema, include_table_details, schema_path
         return []
 
     def get_table_details(
-        self, *, table_name: str, schema_name: str, database_name: str
-    ) -> Optional[DataTable]:
+        self,
+        *,
+        table_name: str,
+        schema_name: str,
+        database_name: str,
+        schema_path: list[str] | None = None,
+    ) -> DataTable | None:
         """Get a single table from the engine."""
-        _, _, _ = table_name, schema_name, database_name
+        _, _, _, _ = table_name, schema_name, database_name, schema_path
         return None
 
-    def get_default_database(self) -> Optional[str]:
+    def get_default_database(self) -> str | None:
         return None
 
-    def get_default_schema(self) -> Optional[str]:
+    def get_default_schema(self) -> str | None:
         return None
 
     @staticmethod
@@ -206,8 +222,8 @@ class ClickhouseServer(SQLConnection[Optional["ClickhouseClient"]]):
 
     def __init__(
         self,
-        connection: Optional[ClickhouseClient] = None,
-        engine_name: Optional[VariableName] = None,
+        connection: ClickhouseClient | None = None,
+        engine_name: VariableName | None = None,
     ) -> None:
         super().__init__(connection, engine_name)
         self._meta_dbs = ["system", "information_schema"]
@@ -234,7 +250,7 @@ class ClickhouseServer(SQLConnection[Optional["ClickhouseClient"]]):
 
         sql_output_format = self.sql_output_format()
 
-        def convert_to_polars() -> Union[pl.DataFrame, pl.Series]:
+        def convert_to_polars() -> pl.DataFrame | pl.Series:
             if self._connection is None:
                 raise ValueError("Connection is not set")
 
@@ -277,20 +293,26 @@ class ClickhouseServer(SQLConnection[Optional["ClickhouseClient"]]):
     def get_schemas(
         self,
         *,
-        database: Optional[str],
+        database: str | None,
         include_tables: bool,
         include_table_details: bool,
+        schema_path: list[str] | None = None,
     ) -> list[Schema]:
         """Get all schemas and optionally their tables. Keys are schema names."""
-        _, _, _ = database, include_tables, include_table_details
+        _, _, _, _ = (
+            database,
+            include_tables,
+            include_table_details,
+            schema_path,
+        )
         return []
 
     def get_databases(
         self,
         *,
-        include_schemas: Union[bool, Literal["auto"]],
-        include_tables: Union[bool, Literal["auto"]],
-        include_table_details: Union[bool, Literal["auto"]],
+        include_schemas: bool | Literal["auto"],
+        include_tables: bool | Literal["auto"],
+        include_table_details: bool | Literal["auto"],
     ) -> list[Database]:
         """
         Get all databases from the ClickHouse server.
@@ -323,10 +345,13 @@ class ClickhouseServer(SQLConnection[Optional["ClickhouseClient"]]):
 
         if not isinstance(db_df, pd.DataFrame):
             LOGGER.warning(
-                f"Failed to convert database result to DataFrame, result: {str(db_df)}"
+                f"Failed to convert database result to DataFrame, result: {db_df!s}"
             )
             return databases
 
+        include_tables_bool = self._resolve_should_auto_discover(
+            include_tables
+        )
         include_table_details = self._resolve_should_auto_discover(
             include_table_details
         )
@@ -339,13 +364,17 @@ class ClickhouseServer(SQLConnection[Optional["ClickhouseClient"]]):
         for db in db_names:
             db_name = cast(str, db)
             # Skip introspection for meta tables for performance
-            if db_name.lower() in self._meta_dbs or not include_tables:
-                tables = []
+            is_meta_db = db_name.lower() in self._meta_dbs
+            if is_meta_db or not include_tables_bool:
+                tables: list[DataTable] = []
+                tables_resolved = False
             else:
-                tables = self.get_tables_in_schema(
-                    schema=NO_SCHEMA_NAME,
-                    database=db,
-                    include_table_details=include_table_details,
+                tables, tables_resolved = (
+                    self._get_tables_in_schema_with_resolution(
+                        schema=NO_SCHEMA_NAME,
+                        database=db,
+                        include_table_details=include_table_details,
+                    )
                 )
             databases.append(
                 Database(
@@ -353,18 +382,20 @@ class ClickhouseServer(SQLConnection[Optional["ClickhouseClient"]]):
                     dialect=self.dialect,
                     engine=self._engine_name,
                     # ClickHouse does not have schemas
-                    schemas=[Schema(name=NO_SCHEMA_NAME, tables=tables)],
+                    schemas=[
+                        Schema(
+                            name=NO_SCHEMA_NAME,
+                            tables=tables,
+                            tables_resolved=tables_resolved,
+                        )
+                    ],
                 )
             )
         return databases
 
-    def _resolve_should_auto_discover(
-        self, value: Union[bool, Literal["auto"]]
-    ) -> bool:
-        if value == "auto":
-            # TODO: Smartly determine if we should auto-discover
-            return False
-        return value
+    def _is_cheap_discovery(self) -> bool:
+        # TODO: Smartly determine if we should auto-discover
+        return False
 
     def get_tables_in_schema(
         self,
@@ -372,6 +403,7 @@ class ClickhouseServer(SQLConnection[Optional["ClickhouseClient"]]):
         schema: str,
         database: str,
         include_table_details: bool,
+        schema_path: list[str] | None = None,
     ) -> list[DataTable]:
         """
         Return all tables in a given ClickHouse database.
@@ -380,13 +412,35 @@ class ClickhouseServer(SQLConnection[Optional["ClickhouseClient"]]):
             schema: The schema name. (ignored for ClickHouse)
             database: The name of the database.
             include_table_details: Whether to retrieve detailed table metadata.
+            schema_path: Unused; ClickHouse schemas don't nest.
 
         Returns:
             List of DataTable objects.
         """
+        del schema_path
+        tables, _ = self._get_tables_in_schema_with_resolution(
+            schema=schema,
+            database=database,
+            include_table_details=include_table_details,
+        )
+        return tables
+
+    def _get_tables_in_schema_with_resolution(
+        self,
+        *,
+        schema: str,
+        database: str,
+        include_table_details: bool,
+    ) -> tuple[list[DataTable], bool]:
+        """
+        Return tables along with whether the list is authoritative.
+
+        `False` means table enumeration failed or table details were requested
+        but could not be loaded for every table.
+        """
         _ = schema  # ClickHouse does not have schemas
         if self._connection is None:
-            return []
+            return [], False
 
         tables: list[DataTable] = []
         try:
@@ -395,18 +449,19 @@ class ClickhouseServer(SQLConnection[Optional["ClickhouseClient"]]):
             table_df = self._connection.query_df(query)
         except Exception:
             LOGGER.warning(
-                f"Failed to get tables from database {database}", exc_info=True
+                f"Failed to get tables from database {database}",
+                exc_info=True,
             )
-            return tables
+            return tables, False
 
         import pandas as pd
 
         if not isinstance(table_df, pd.DataFrame):
             LOGGER.warning("Failed to convert table result to DataFrame")
-            return tables
+            return tables, False
 
         if table_df.empty:
-            return tables
+            return tables, True
 
         # Assume the first column contains table names.
         table_names = table_df[table_df.columns[0]].tolist()
@@ -433,11 +488,16 @@ class ClickhouseServer(SQLConnection[Optional["ClickhouseClient"]]):
                         indexes=[],
                     )
                 )
-        return tables
+        return tables, len(tables) == len(table_names)
 
     def get_table_details(
-        self, *, table_name: str, schema_name: str, database_name: str
-    ) -> Optional[DataTable]:
+        self,
+        *,
+        table_name: str,
+        schema_name: str,
+        database_name: str,
+        schema_path: list[str] | None = None,
+    ) -> DataTable | None:
         """
         Get detailed metadata for a given table in a database.
 
@@ -445,12 +505,14 @@ class ClickhouseServer(SQLConnection[Optional["ClickhouseClient"]]):
             database_name: The database name.
             schema_name: The schema name. (ignored for ClickHouse)
             table_name: The table name.
+            schema_path: Unused; ClickHouse schemas don't nest.
 
         Returns:
             A DataTable object with detailed metadata,
             or None if the table cannot be described.
         """
         _ = schema_name
+        del schema_path
         if self._connection is None:
             return None
 
@@ -554,7 +616,7 @@ class ClickhouseServer(SQLConnection[Optional["ClickhouseClient"]]):
             indexes=[],  # TODO
         )
 
-    def get_default_database(self) -> Optional[str]:
+    def get_default_database(self) -> str | None:
         if self._connection is None:
             return None
 
@@ -577,6 +639,6 @@ class ClickhouseServer(SQLConnection[Optional["ClickhouseClient"]]):
             return None
         return str(db_name.iloc[0, 0])
 
-    def get_default_schema(self) -> Optional[str]:
+    def get_default_schema(self) -> str | None:
         # ClickHouse does not have schemas
         return None

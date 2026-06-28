@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from marimo._utils.platform import is_pyodide
 
@@ -10,6 +10,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
 DEFAULT_CHUNK_SIZE = 256 * 1024  # 256KB
+
+VirtualFileStorageType = Literal["in_memory", "shared_memory"]
 
 if not is_pyodide():
     # the shared_memory module is not supported in the Pyodide distribution
@@ -36,11 +38,18 @@ class VirtualFileStorage(Protocol):
         key: str,
         byte_length: int,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
+        start: int = 0,
     ) -> Iterator[bytes]:
         """Read buffer data by key in chunks.
 
         Yields chunks of bytes, avoiding allocating the full buffer at once.
         Useful for streaming large files over HTTP.
+
+        Args:
+            key: storage key
+            byte_length: total number of bytes to yield (after applying `start`)
+            chunk_size: chunk size in bytes
+            start: offset in bytes to begin reading from (default 0)
 
         Raises:
             KeyError: If key not found
@@ -144,6 +153,7 @@ class SharedMemoryStorage(VirtualFileStorage):
         key: str,
         byte_length: int,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
+        start: int = 0,
     ) -> Iterator[bytes]:
         if is_pyodide():
             raise RuntimeError(
@@ -153,7 +163,7 @@ class SharedMemoryStorage(VirtualFileStorage):
         view = None
         try:
             shm = shared_memory.SharedMemory(name=key)
-            view = shm.buf[:byte_length]
+            view = shm.buf[start : start + byte_length]
             for i in range(0, byte_length, chunk_size):
                 yield bytes(view[i : i + chunk_size])
         except FileNotFoundError as err:
@@ -174,19 +184,24 @@ class SharedMemoryStorage(VirtualFileStorage):
             del self._storage[key]
 
     def shutdown(self, keys: Iterable[str] | None = None) -> None:
-        del keys  # Always clear all - not shared
         if self._shutting_down:
             return
         try:
             self._shutting_down = True
+            if keys is not None:
+                for key in list(keys):
+                    self.remove(key)
+                return
+
             for shm in self._storage.values():
                 if sys.platform == "win32":
                     shm.close()
                 shm.unlink()
             self._storage.clear()
         finally:
-            self._stale = True
             self._shutting_down = False
+            if keys is None:
+                self._stale = True
 
     def has(self, key: str) -> bool:
         return key in self._storage
@@ -218,12 +233,13 @@ class InMemoryStorage(VirtualFileStorage):
         key: str,
         byte_length: int,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
+        start: int = 0,
     ) -> Iterator[bytes]:
         if key not in self._storage:
             raise KeyError(f"Virtual file not found: {key}")
         buffer = self._storage[key]
-        end = min(byte_length, len(buffer))
-        for i in range(0, end, chunk_size):
+        end = min(start + byte_length, len(buffer))
+        for i in range(start, end, chunk_size):
             yield buffer[i : min(i + chunk_size, end)]
 
     def remove(self, key: str) -> None:
@@ -247,7 +263,7 @@ class VirtualFileStorageManager:
     _instance: VirtualFileStorageManager | None = None
     _storage: VirtualFileStorage | None = None
 
-    def __new__(cls) -> VirtualFileStorageManager:
+    def __new__(cls) -> VirtualFileStorageManager:  # noqa: PYI034
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
@@ -267,7 +283,7 @@ class VirtualFileStorageManager:
 
         Raises:
             KeyError: If file not found
-            RuntimeError: When ``SharedMemoryStorage`` is used on the Pyodide platform.
+            RuntimeError: When `SharedMemoryStorage` is used on the Pyodide platform.
         """
         storage = self.storage
         if storage is None:
@@ -281,6 +297,7 @@ class VirtualFileStorageManager:
         filename: str,
         byte_length: int,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
+        start: int = 0,
     ) -> Iterator[bytes]:
         """Read from storage in chunks, with cross-process fallback.
 
@@ -289,12 +306,14 @@ class VirtualFileStorageManager:
 
         Raises:
             KeyError: If file not found
-            RuntimeError: When ``SharedMemoryStorage`` is used on the Pyodide platform.
+            RuntimeError: When `SharedMemoryStorage` is used on the Pyodide platform.
         """
         storage = self.storage
         if storage is None:
             yield from SharedMemoryStorage().read_chunked(
-                filename, byte_length, chunk_size
+                filename, byte_length, chunk_size, start
             )
         else:
-            yield from storage.read_chunked(filename, byte_length, chunk_size)
+            yield from storage.read_chunked(
+                filename, byte_length, chunk_size, start
+            )

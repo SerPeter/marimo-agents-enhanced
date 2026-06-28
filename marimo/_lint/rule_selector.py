@@ -27,15 +27,15 @@ def resolve_rules(
     """Resolve a LintConfig into a concrete list of enabled LintRule instances.
 
     Algorithm:
-        1. If config.select is non-empty, start with matching rules.
-           Otherwise, start with ALL available rules.
+        1. If config.select is non-empty, start with all available rules
+           Otherwise, uses `DEFAULT_RULE_CODES`.
         2. Remove rules matching config.ignore prefixes.
         3. Return instantiated rules in sorted code order.
 
     Args:
-        config: LintConfig with optional ``select`` and ``ignore`` keys.
+        config: LintConfig with optional `select` and `ignore` keys.
         all_rules: Available rule classes keyed by code.
-            Defaults to ``RULE_CODES`` when None.
+            Defaults to `RULE_CODES` when None.
 
     Returns:
         Instantiated LintRule list, sorted by code.
@@ -45,13 +45,16 @@ def resolve_rules(
 
         all_rules = RULE_CODES
 
-    codes = set(all_rules.keys())
     select = config.get("select")
     ignore = config.get("ignore")
 
-    # Step 1: base set
+    # Step 1: base set — use only default rules unless explicitly selected
     if select:
-        codes = {c for c in codes if _matches_any_prefix(c, select)}
+        codes = {c for c in all_rules if _matches_any_prefix(c, select)}
+    else:
+        from marimo._lint.rules import DEFAULT_RULE_CODES
+
+        codes = set(DEFAULT_RULE_CODES.keys()) & set(all_rules.keys())
 
     # Step 2: remove ignored
     if ignore:

@@ -1,5 +1,6 @@
 # Copyright 2026 Marimo. All rights reserved.
 import traceback
+from typing import Any
 
 import pytest
 
@@ -199,7 +200,8 @@ async def test_ui_element_update_skips_overridden_cells(
     # because x is overridden
     slider_element = k.globals["slider_element"]
     assert await k.set_ui_element_value(
-        UpdateUIElementCommand.from_ids_and_values([(slider_element._id, 8)])
+        UpdateUIElementCommand.from_ids_and_values([(slider_element._id, 8)]),
+        notify_frontend=False,
     )
 
     # After UI update, result should still be 200 because x is still overridden
@@ -275,3 +277,181 @@ async def test_converging_runs_when_all_branches_trigger(
     assert "b" in k.globals
     assert "result" in k.globals
     assert k.graph.cells["res"].run_result_status == "success"
+
+
+# --- Surface 3: registered plugin Executor runs via Runner ------------------
+
+
+async def test_runner_dispatches_to_registered_plugin_executor(
+    execution_kernel: Kernel,
+    exec_req: ExecReqProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A factory registered against `marimo.cell.executor` is the one
+    the kernel `Runner` dispatches through."""
+    from typing import Any
+
+    from marimo._runtime.executor.evaluator import _EXECUTOR_REGISTRY
+
+    recorded: list[str] = []
+    sentinel_output = object()
+
+    class _SentinelExecutor:
+        name = "sentinel"
+
+        def execute_cell(self, cell: Any, glbls: dict[str, Any]) -> object:
+            del glbls
+            recorded.append(cell.cell_id)
+            return sentinel_output
+
+        async def execute_cell_async(
+            self, cell: Any, glbls: dict[str, Any]
+        ) -> object:
+            del glbls
+            recorded.append(cell.cell_id)
+            return sentinel_output
+
+    def factory() -> _SentinelExecutor:
+        return _SentinelExecutor()
+
+    # Populate the kernel first (uses the real DefaultExecutor — the
+    # registry isn't patched yet).
+    k = execution_kernel
+    await k.run([er := exec_req.get("'hello'; 123")])
+
+    # Fully isolate the registry: replace both `_plugins` and
+    # `names` so installed third-party entry points can't shadow the
+    # sentinel. monkeypatch restores both on teardown.
+    monkeypatch.setattr(_EXECUTOR_REGISTRY, "_plugins", {"sentinel": factory})
+    monkeypatch.setattr(_EXECUTOR_REGISTRY, "names", lambda: ["sentinel"])
+
+    runner = Runner(
+        roots=set(k.graph.cells.keys()),
+        graph=k.graph,
+        glbls=k.globals,
+        debugger=k.debugger,
+        hooks=NotebookCellHooks(),
+    )
+    run_result = await runner.run(er.cell_id)
+
+    assert recorded == [er.cell_id]
+    assert run_result.output is sentinel_output
+
+
+# --- Surface 4: Runner.interrupted flips on cancellation --------------------
+
+
+async def test_runner_interrupted_flag_flips_on_sync_marimo_interrupt(
+    execution_kernel: Kernel, exec_req: ExecReqProvider
+) -> None:
+    """Sync cell body raising `MarimoInterrupt` (== `KeyboardInterrupt`)
+    surfaces as a bare `MarimoInterrupt` in the run result and flips
+    `runner.interrupted`."""
+    k = execution_kernel
+    await k.run([er := exec_req.get("raise KeyboardInterrupt")])
+
+    runner = Runner(
+        roots=set(k.graph.cells.keys()),
+        graph=k.graph,
+        glbls=k.globals,
+        debugger=k.debugger,
+        hooks=NotebookCellHooks(),
+    )
+    with capture_stderr():
+        await runner.run(er.cell_id)
+
+    assert runner.interrupted is True
+
+
+async def test_runner_interrupted_flag_flips_on_async_cell_cancellation(
+    execution_kernel: Kernel,
+    exec_req: ExecReqProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An async cell cancelled mid-await flips `runner.interrupted`.
+
+    A bare `asyncio.CancelledError` arriving in `RunResult.exception` is
+    converted to `MarimoInterrupt` by the bare-`CancelledError` branch
+    of `_finalize_run_result`, which `run()` recognises to flip the
+    flag.
+
+    Simulates the evaluator output directly (a bare `CancelledError` in
+    the `RunResult`) so this test is independent of the executor's
+    coroutine compilation.
+    """
+    import asyncio
+
+    from marimo._runtime.runner.result import RunResult
+
+    k = execution_kernel
+    await k.run([er := exec_req.get("123")])
+
+    runner = Runner(
+        roots=set(k.graph.cells.keys()),
+        graph=k.graph,
+        glbls=k.globals,
+        debugger=k.debugger,
+        hooks=NotebookCellHooks(),
+    )
+
+    async def fake_evaluate(cell, glbls):  # type: ignore[no-untyped-def]
+        del cell, glbls
+        return RunResult(output=None, exception=asyncio.CancelledError())
+
+    monkeypatch.setattr(runner._evaluator, "evaluate", fake_evaluate)
+
+    with capture_stderr():
+        await runner.run(er.cell_id)
+
+    assert runner.interrupted is True
+
+
+async def test_run_all_swallows_sigint_raise_and_fires_on_finish(
+    execution_kernel: Kernel,
+    exec_req: ExecReqProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SIGINT delivered while `run_all` is in the prescan (or between
+    cells) raises `MarimoInterrupt` (== `KeyboardInterrupt`). `run_all`
+    must catch it so on_finish_hooks still fire and the
+    `KeyboardInterrupt` doesn't unwind past the kernel control loop.
+    """
+    k = execution_kernel
+    await k.run([er := exec_req.get("123")])
+    del er
+
+    on_finish_calls: list[Any] = []
+
+    class _Hooks(NotebookCellHooks):
+        on_finish_hooks = (lambda ctx: on_finish_calls.append(ctx),)
+
+    runner = Runner(
+        roots=set(k.graph.cells.keys()),
+        graph=k.graph,
+        glbls=k.globals,
+        debugger=k.debugger,
+        hooks=_Hooks(),
+    )
+
+    # Simulate the sync-path SIGINT handler: cancel the queue and raise.
+    def _raise_via_prescan(_cell_id: Any) -> Any:
+        runner._scheduler.cancel_all()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        runner, "_find_first_blocked_missing_ref", _raise_via_prescan
+    )
+
+    # Must not raise; on_finish_hooks must still fire.
+    await runner.run_all()
+
+    assert runner.interrupted is True
+    assert len(on_finish_calls) == 1
+    assert on_finish_calls[0].interrupted is True
+    # Codex P2 regression: cells_to_run must still be visible to
+    # on_finish_hooks. SIGINT mid-prescan must not leave the queue
+    # drained.
+    assert list(on_finish_calls[0].cells_to_run), (
+        "on_finish_hooks must see the cells that were still queued "
+        "when SIGINT fired"
+    )

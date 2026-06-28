@@ -2,7 +2,7 @@
 
 import { useControllableState } from "@radix-ui/react-use-controllable-state";
 import { Check, ChevronDownIcon, XCircle } from "lucide-react";
-import React, { createContext } from "react";
+import React, { createContext, useCallback, useMemo } from "react";
 import { cn } from "../../utils/cn";
 import { Functions } from "../../utils/functions";
 import { Badge } from "./badge";
@@ -37,7 +37,11 @@ interface ComboboxCommonProps<TValue> {
   onSearchChange?: (search: string) => void;
   emptyState?: React.ReactNode;
   className?: string;
+  id?: string;
   keepPopoverOpenOnSelect?: boolean;
+  disabled?: boolean;
+  /** Override the trigger contents with a node (e.g. a compact chip summary). */
+  renderValue?: (value: TValue[] | TValue | null) => React.ReactNode;
 }
 
 type ComboboxFilterProps =
@@ -93,6 +97,9 @@ export const Combobox = <TValue,>({
   chips = false,
   chipsClassName,
   keepPopoverOpenOnSelect,
+  id,
+  disabled = false,
+  renderValue,
   ...rest
 }: ComboboxProps<TValue>) => {
   const [open = false, setOpen] = useControllableState({
@@ -108,39 +115,45 @@ export const Combobox = <TValue,>({
     },
   });
 
-  const isSelected = (selectedValue: unknown) => {
-    if (Array.isArray(value)) {
-      return value.includes(selectedValue as TValue);
-    }
-    return value === selectedValue;
-  };
-
-  const handleSelect = (selectedValue: unknown) => {
-    let newValue: TValue | TValue[] | null = selectedValue as TValue;
-
-    if (multiple) {
+  const isSelected = useCallback(
+    (selectedValue: unknown) => {
       if (Array.isArray(value)) {
-        if (value.includes(newValue)) {
-          const newArr = value.filter((val) => val !== selectedValue);
-          newValue = newArr.length > 0 ? newArr : [];
-        } else {
-          newValue = [...value, newValue];
-        }
-      } else {
-        newValue = [newValue];
+        return value.includes(selectedValue as TValue);
       }
-    } else if (value === selectedValue) {
-      newValue = null;
-    }
+      return value === selectedValue;
+    },
+    [value],
+  );
 
-    setValue(newValue);
-    const keepOpen = keepPopoverOpenOnSelect ?? multiple;
-    if (!keepOpen) {
-      setOpen(false);
-    }
-  };
+  const handleSelect = useCallback(
+    (selectedValue: unknown) => {
+      let newValue: TValue | TValue[] | null = selectedValue as TValue;
 
-  const renderValue = (): string => {
+      if (multiple) {
+        if (Array.isArray(value)) {
+          if (value.includes(newValue)) {
+            const newArr = value.filter((val) => val !== selectedValue);
+            newValue = newArr.length > 0 ? newArr : [];
+          } else {
+            newValue = [...value, newValue];
+          }
+        } else {
+          newValue = [newValue];
+        }
+      } else if (value === selectedValue) {
+        newValue = null;
+      }
+
+      setValue(newValue);
+      const keepOpen = keepPopoverOpenOnSelect ?? multiple;
+      if (!keepOpen) {
+        setOpen(false);
+      }
+    },
+    [keepPopoverOpenOnSelect, multiple, value, setValue, setOpen],
+  );
+
+  const renderValueLabel = (): string => {
     // If we show chips, we don't want to change the placeholder
     if (multiple && chips && placeholder) {
       return placeholder;
@@ -164,20 +177,42 @@ export const Combobox = <TValue,>({
     return placeholder ?? "--";
   };
 
+  const comboboxContextValue: ComboboxContextValue = useMemo(
+    () => ({
+      isSelected,
+      onSelect: handleSelect,
+    }),
+    [isSelected, handleSelect],
+  );
+
   return (
     <div className={cn("relative")} {...rest}>
-      <Popover open={open} onOpenChange={setOpen}>
+      <Popover
+        open={open}
+        onOpenChange={(v) => {
+          if (disabled && v) {
+            return;
+          }
+          setOpen(v);
+        }}
+      >
         <PopoverTrigger asChild={true}>
-          <div
+          <button
+            id={id}
+            type="button"
             className={cn(
-              "flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid disabled:cursor-not-allowed disabled:opacity-50",
+              "flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid",
+              disabled && "cursor-not-allowed opacity-50",
               className,
             )}
             aria-expanded={open}
+            aria-disabled={disabled}
           >
-            <span className="truncate flex-1 min-w-0">{renderValue()}</span>
+            <span className="truncate flex-1 min-w-0">
+              {renderValue ? renderValue(value ?? null) : renderValueLabel()}
+            </span>
             <ChevronDownIcon className="ml-3 w-4 h-4 opacity-50 shrink-0" />
-          </div>
+          </button>
         </PopoverTrigger>
         <PopoverContent
           className="w-full min-w-(--radix-popover-trigger-width) p-0"
@@ -193,7 +228,7 @@ export const Combobox = <TValue,>({
             />
             <CommandList className="max-h-60 py-.5">
               <CommandEmpty>{emptyState}</CommandEmpty>
-              <ComboboxContext value={{ isSelected, onSelect: handleSelect }}>
+              <ComboboxContext value={comboboxContextValue}>
                 {children}
               </ComboboxContext>
             </CommandList>
@@ -212,9 +247,15 @@ export const Combobox = <TValue,>({
                   {displayValue?.(val) ?? String(val)}
                   <XCircle
                     onClick={() => {
+                      if (disabled) {
+                        return;
+                      }
                       handleSelect(val);
                     }}
-                    className="w-3 h-3 opacity-50 hover:opacity-100 ml-1 cursor-pointer"
+                    className={cn(
+                      "w-3 h-3 opacity-50 hover:opacity-100 ml-1 cursor-pointer",
+                      disabled && "pointer-events-none",
+                    )}
                   />
                 </Badge>
               );
@@ -255,12 +296,14 @@ export const ComboboxItem = React.forwardRef(
         ? value.value
         : String(value);
     const context = React.use(ComboboxContext);
+    const isOptionSelected = context.isSelected(value);
 
     return (
       <CommandItem
         ref={ref}
         className={cn("pl-6 m-1 py-1", className)}
         role="option"
+        aria-selected={isOptionSelected}
         value={valueAsString}
         disabled={disabled}
         onSelect={() => {
@@ -268,9 +311,7 @@ export const ComboboxItem = React.forwardRef(
           onSelect?.(value);
         }}
       >
-        {context.isSelected(value) && (
-          <Check className="absolute left-1 h-4 w-4" />
-        )}
+        {isOptionSelected && <Check className="absolute left-1 h-4 w-4" />}
         {children}
       </CommandItem>
     );

@@ -1,11 +1,13 @@
 /* Copyright 2026 Marimo. All rights reserved. */
 
 import type { components } from "@marimo-team/marimo-api";
-import type {
-  ChatAddToolOutputFunction,
-  FileUIPart,
-  ToolUIPart,
-  UIMessage,
+import {
+  type ChatAddToolOutputFunction,
+  type FileUIPart,
+  isToolUIPart,
+  lastAssistantMessageIsCompleteWithApprovalResponses,
+  lastAssistantMessageIsCompleteWithToolCalls,
+  type UIMessage,
 } from "ai";
 import { useState } from "react";
 import useEvent from "react-use-event-hook";
@@ -134,11 +136,11 @@ export async function handleToolCall({
   try {
     if (FRONTEND_TOOL_REGISTRY.has(toolCall.toolName)) {
       // Invoke the frontend tool
-      const response = await FRONTEND_TOOL_REGISTRY.invoke(
-        toolCall.toolName,
-        toolCall.input,
-        toolContext,
-      );
+      const response = await FRONTEND_TOOL_REGISTRY.invoke({
+        toolName: toolCall.toolName,
+        rawArgs: toolCall.input,
+        toolContext: toolContext,
+      });
       addToolOutput({
         tool: toolCall.toolName,
         toolCallId: toolCall.toolCallId,
@@ -167,49 +169,25 @@ export async function handleToolCall({
 }
 
 /**
- * Checks if we should send a message automatically based on the messages.
- * We only want to send a message if all tool calls are completed and there is no reply yet.
+ * Auto-send the next turn when the last assistant message ends with a
+ * tool call ready to round-trip. Any non-tool trailing part (text, file,
+ * source-*, reasoning, data-*, new step-start) means the assistant has
+ * already answered, so we leave the next turn to the user. State checks
+ * are delegated to the SDK to stay in sync with upstream.
  */
 export function hasPendingToolCalls(messages: UIMessage[]): boolean {
-  if (messages.length === 0) {
+  const lastMessage = messages.at(-1);
+  if (!lastMessage || lastMessage.role !== "assistant") {
     return false;
   }
-
-  const lastMessage = messages[messages.length - 1];
-  const parts = lastMessage.parts;
-
-  if (parts.length === 0) {
+  const lastPart = lastMessage.parts.at(-1);
+  if (!lastPart || !isToolUIPart(lastPart)) {
     return false;
   }
-
-  // Only auto-send if the last message is an assistant message
-  // Because assistant messages are the ones that can have tool calls
-  if (lastMessage.role !== "assistant") {
-    return false;
-  }
-
-  const toolParts = parts.filter((part) =>
-    part.type.startsWith("tool-"),
-  ) as ToolUIPart[];
-
-  // Guard against no tool parts
-  if (toolParts.length === 0) {
-    return false;
-  }
-
-  const allToolCallsCompleted = toolParts.every(
-    (part) => part.state === "output-available",
+  return (
+    lastAssistantMessageIsCompleteWithToolCalls({ messages }) ||
+    lastAssistantMessageIsCompleteWithApprovalResponses({ messages })
   );
-
-  // Check if the last part has any text content
-  const lastPart = parts[parts.length - 1];
-  const hasTextContent =
-    lastPart.type === "text" && lastPart.text?.trim().length > 0;
-
-  Logger.warn("All tool calls completed: %s", allToolCallsCompleted);
-
-  // Only auto-send if we have completed tool calls and there is no reply yet
-  return allToolCallsCompleted && !hasTextContent;
 }
 
 export function useFileState() {

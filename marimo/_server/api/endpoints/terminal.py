@@ -9,18 +9,21 @@ import signal
 import struct
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
 from marimo import _loggers
+from marimo._server.api.auth import validate_auth
 from marimo._server.api.deps import AppState
+from marimo._server.codes import WebSocketCloseReason, WebSocketCodes
 from marimo._server.router import APIRouter
 from marimo._session.model import SessionMode
+from marimo._utils.asyncio_utils import cancel_and_wait
 from marimo._utils.platform import is_pyodide, is_windows
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
 LOGGER = _loggers.marimo_logger()
 
@@ -329,12 +332,7 @@ async def _write_to_pty(
 
 async def _cancel_tasks(tasks: Iterable[asyncio.Task[Any]]) -> None:
     for task in tasks:
-        if not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        await cancel_and_wait(task)
 
 
 def supports_terminal() -> bool:
@@ -353,6 +351,13 @@ def supports_terminal() -> bool:
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     app_state = AppState(websocket)
+
+    if app_state.enable_auth and not validate_auth(websocket):
+        await websocket.close(
+            WebSocketCodes.UNAUTHORIZED, WebSocketCloseReason.UNAUTHORIZED
+        )
+        return
+
     if app_state.mode != SessionMode.EDIT:
         await websocket.close(
             code=1008, reason="Terminal only available in edit mode"

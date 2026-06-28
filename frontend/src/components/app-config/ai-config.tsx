@@ -79,7 +79,11 @@ import { Tooltip } from "../ui/tooltip";
 import { formItemClasses, SettingSubtitle } from "./common";
 import { AWS_REGIONS } from "./constants";
 import { IncorrectModelId } from "./incorrect-model-id";
-import { IsOverridden } from "./is-overridden";
+import {
+  IsOverridden,
+  OverriddenFormField,
+  useConfigOverride,
+} from "./is-overridden";
 import { MCPConfig } from "./mcp-config";
 import { aiSettingsSubTabAtom } from "./state";
 
@@ -98,6 +102,11 @@ interface CustomProviderConfig {
   api_key?: string;
   base_url?: string;
 }
+
+const SUPPORTED_PROVIDERS_UI = new Set(KNOWN_PROVIDERS);
+// We use deepseek as an example of a custom provider in our docs, so we don't show it in the UI.
+// Else, we would need to wire up the UI and config for it. Consider if many users request.
+SUPPORTED_PROVIDERS_UI.delete("deepseek");
 
 export const AiProviderTitle: React.FC<AiProviderTitleProps> = ({
   provider,
@@ -123,7 +132,6 @@ interface ApiKeyProps {
 
 export const ApiKey: React.FC<ApiKeyProps> = ({
   form,
-  config,
   name,
   placeholder,
   testId,
@@ -131,10 +139,10 @@ export const ApiKey: React.FC<ApiKeyProps> = ({
   onChange,
 }) => {
   return (
-    <FormField
+    <OverriddenFormField
       control={form.control}
       name={name}
-      render={({ field }) => (
+      render={({ field, override }) => (
         <div className="flex flex-col space-y-1">
           <FormItem className={formItemClasses}>
             <FormLabel>API Key</FormLabel>
@@ -146,7 +154,8 @@ export const ApiKey: React.FC<ApiKeyProps> = ({
                 placeholder={placeholder}
                 type="password"
                 {...field}
-                value={asStringOrEmpty(field.value)}
+                value={asStringOrEmpty(override.value)}
+                disabled={override.isOverridden}
                 onChange={(e) => {
                   const value = e.target.value;
                   if (!value.includes("*")) {
@@ -157,7 +166,7 @@ export const ApiKey: React.FC<ApiKeyProps> = ({
               />
             </FormControl>
             <FormMessage />
-            <IsOverridden userConfig={config} name={name} />
+            <IsOverridden override={override} />
           </FormItem>
           {description && <FormDescription>{description}</FormDescription>}
         </div>
@@ -191,7 +200,6 @@ function asStringOrEmpty<T>(value: T): string {
 
 export const BaseUrl: React.FC<BaseUrlProps> = ({
   form,
-  config,
   name,
   placeholder,
   testId,
@@ -200,10 +208,10 @@ export const BaseUrl: React.FC<BaseUrlProps> = ({
   onChange,
 }) => {
   return (
-    <FormField
+    <OverriddenFormField
       control={form.control}
       name={name}
-      render={({ field }) => (
+      render={({ field, override }) => (
         <div className="flex flex-col space-y-1">
           <FormItem className={formItemClasses}>
             <FormLabel>Base URL</FormLabel>
@@ -214,8 +222,8 @@ export const BaseUrl: React.FC<BaseUrlProps> = ({
                 className="m-0 inline-flex h-7"
                 placeholder={placeholder}
                 {...field}
-                value={asStringOrEmpty(field.value)}
-                disabled={disabled}
+                value={asStringOrEmpty(override.value)}
+                disabled={disabled || override.isOverridden}
                 onChange={(e) => {
                   field.onChange(e.target.value);
                   onChange?.(e.target.value);
@@ -223,7 +231,7 @@ export const BaseUrl: React.FC<BaseUrlProps> = ({
               />
             </FormControl>
             <FormMessage />
-            <IsOverridden userConfig={config} name={name} />
+            <IsOverridden override={override} />
           </FormItem>
           {description && <FormDescription>{description}</FormDescription>}
         </div>
@@ -245,7 +253,6 @@ interface ModelSelectorProps {
 
 export const ModelSelector: React.FC<ModelSelectorProps> = ({
   form,
-  config,
   name,
   placeholder,
   description,
@@ -254,11 +261,12 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
   onSubmit,
 }) => {
   return (
-    <FormField
+    <OverriddenFormField
       control={form.control}
       name={name}
-      render={({ field }) => {
-        const value = asStringOrEmpty(field.value);
+      render={({ field, override }) => {
+        const value = asStringOrEmpty(override.value);
+        const overridden = override.isOverridden;
 
         const selectModel = (modelId: QualifiedModelId) => {
           field.onChange(modelId);
@@ -274,6 +282,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
                 value={value}
                 placeholder={placeholder}
                 onSelect={selectModel}
+                disabled={overridden}
                 triggerClassName="text-sm"
                 customDropdownContent={
                   <>
@@ -289,7 +298,8 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
                         className="w-full border-border shadow-none focus-visible:shadow-xs"
                         placeholder={placeholder}
                         {...field}
-                        value={asStringOrEmpty(field.value)}
+                        value={value}
+                        disabled={overridden}
                         onKeyDown={Events.stopPropagation()}
                       />
                       {value && (
@@ -311,7 +321,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
         return (
           <div className="flex flex-col space-y-1">
             {renderFormItem()}
-            <IsOverridden userConfig={config} name={name} />
+            <IsOverridden override={override} />
             <IncorrectModelId value={value} />
             {description && <FormDescription>{description}</FormDescription>}
           </div>
@@ -332,17 +342,16 @@ interface ProviderSelectProps {
 
 export const ProviderSelect: React.FC<ProviderSelectProps> = ({
   form,
-  config,
   name,
   options,
   testId,
   disabled = false,
 }) => {
   return (
-    <FormField
+    <OverriddenFormField
       control={form.control}
       name={name}
-      render={({ field }) => (
+      render={({ field, override }) => (
         <div className="flex flex-col space-y-1">
           <FormItem className={formItemClasses}>
             <FormLabel>Provider</FormLabel>
@@ -357,13 +366,13 @@ export const ProviderSelect: React.FC<ProviderSelectProps> = ({
                   }
                 }}
                 value={asStringOrEmpty(
-                  field.value === true
+                  override.value === true
                     ? "github"
-                    : field.value === false
+                    : override.value === false
                       ? "none"
-                      : field.value,
+                      : override.value,
                 )}
-                disabled={disabled}
+                disabled={disabled || override.isOverridden}
                 className="inline-flex mr-2"
               >
                 {options.map((option) => (
@@ -374,7 +383,7 @@ export const ProviderSelect: React.FC<ProviderSelectProps> = ({
               </NativeSelect>
             </FormControl>
             <FormMessage />
-            <IsOverridden userConfig={config} name={name} />
+            <IsOverridden override={override} />
           </FormItem>
         </div>
       )}
@@ -386,12 +395,13 @@ const renderCopilotProvider = ({
   form,
   config,
   onSubmit,
+  copilot,
 }: {
   form: UseFormReturn<UserConfig>;
   config: UserConfig;
   onSubmit: (values: UserConfig) => void;
+  copilot: UserConfig["completion"]["copilot"];
 }) => {
-  const copilot = form.getValues("completion.copilot");
   if (copilot === false) {
     return null;
   }
@@ -478,11 +488,11 @@ const ModelListItem: React.FC<ModelListItemProps> = ({
     <TreeItem
       id={qualifiedId}
       textValue={model.name}
-      className="pl-6 outline-none data-focused:bg-muted/50 hover:bg-muted/50"
+      className="pl-6 outline-hidden data-focused:bg-muted/50 hover:bg-muted/50"
       onAction={handleToggle}
     >
       <TreeItemContent>
-        <div className="flex items-center justify-between px-3 py-2.5 border-b last:border-b-0 cursor-pointer outline-none">
+        <div className="flex items-center justify-between px-3 py-2.5 border-b last:border-b-0 cursor-pointer outline-hidden">
           <ModelInfoCard model={model} />
           {model.custom && (
             <Button
@@ -509,7 +519,7 @@ const ModelInfoCard = ({ model }: { model: AiModel }) => {
         <Tooltip content="Custom model">
           {model.custom && <BotIcon className="h-4 w-4" />}
         </Tooltip>
-        {model.thinking && (
+        {model.capabilities.includes("thinking") && (
           <div
             className={cn(
               "flex items-center gap-1 rounded px-1 py-0.5 w-fit",
@@ -535,6 +545,15 @@ export const AiCodeCompletionConfig: React.FC<AiConfigProps> = ({
   config,
   onSubmit,
 }) => {
+  const getOverride = useConfigOverride();
+  // Watch (not `getValues`) so the sub-form re-renders when the provider
+  // changes, then resolve the effective value so an overridden
+  // `completion.copilot` shows the matching sub-form (not the user's saved one).
+  const watchedCopilot = useWatch({
+    control: form.control,
+    name: "completion.copilot",
+  });
+  const { value: copilot } = getOverride("completion.copilot", watchedCopilot);
   return (
     <SettingGroup>
       <SettingSubtitle>Code Completion</SettingSubtitle>
@@ -551,7 +570,7 @@ export const AiCodeCompletionConfig: React.FC<AiConfigProps> = ({
         testId="copilot-select"
       />
 
-      {renderCopilotProvider({ form, config, onSubmit })}
+      {renderCopilotProvider({ form, config, onSubmit, copilot })}
     </SettingGroup>
   );
 };
@@ -608,7 +627,7 @@ export const CustomProvidersConfig: React.FC<AiConfigProps> = ({
   const normalizedName = newProviderName.toLowerCase().replaceAll(/\s+/g, "_");
   const customProviders = form.watch("ai.custom_providers");
   const isDuplicate =
-    KNOWN_PROVIDERS.includes(normalizedName as KnownProviderId) ||
+    SUPPORTED_PROVIDERS_UI.has(normalizedName as KnownProviderId) ||
     (customProviders && Object.keys(customProviders).includes(normalizedName));
   const hasInvalidChars = normalizedName.includes(".");
 
@@ -1059,6 +1078,36 @@ export const AiProvidersConfig: React.FC<AiConfigProps> = ({
         </AccordionFormItem>
 
         <AccordionFormItem
+          title="OpenCode Go"
+          provider="opencode-go"
+          isConfigured={hasValue("ai.opencode_go.api_key")}
+        >
+          <ApiKey
+            form={form}
+            config={config}
+            name="ai.opencode_go.api_key"
+            placeholder="your-opencode-api-key"
+            testId="ai-opencode-go-api-key-input"
+            description={
+              <>
+                Your OpenCode API key from{" "}
+                <ExternalLink href="https://opencode.ai/auth">
+                  opencode.ai
+                </ExternalLink>
+                . OpenCode Go is a low-cost subscription for open coding models.
+              </>
+            }
+          />
+          <BaseUrl
+            form={form}
+            config={config}
+            name="ai.opencode_go.base_url"
+            placeholder="https://opencode.ai/zen/go/v1/"
+            testId="ai-opencode-go-base-url-input"
+          />
+        </AccordionFormItem>
+
+        <AccordionFormItem
           title="Azure"
           provider="azure"
           isConfigured={
@@ -1104,11 +1153,11 @@ export const AiProvidersConfig: React.FC<AiConfigProps> = ({
             for more details.
           </p>
 
-          <FormField
+          <OverriddenFormField
             control={form.control}
             disabled={isWasmRuntime}
             name="ai.bedrock.region_name"
-            render={({ field }) => (
+            render={({ field, override }) => (
               <div className="flex flex-col space-y-1">
                 <FormItem className={formItemClasses}>
                   <FormLabel>AWS Region</FormLabel>
@@ -1117,11 +1166,11 @@ export const AiProvidersConfig: React.FC<AiConfigProps> = ({
                       data-testid="bedrock-region-select"
                       onChange={(e) => field.onChange(e.target.value)}
                       value={
-                        typeof field.value === "string"
-                          ? field.value
+                        typeof override.value === "string"
+                          ? override.value
                           : "us-east-1"
                       }
-                      disabled={field.disabled}
+                      disabled={field.disabled || override.isOverridden}
                       className="inline-flex mr-2"
                     >
                       {AWS_REGIONS.map((option) => (
@@ -1132,10 +1181,7 @@ export const AiProvidersConfig: React.FC<AiConfigProps> = ({
                     </NativeSelect>
                   </FormControl>
                   <FormMessage />
-                  <IsOverridden
-                    userConfig={config}
-                    name="ai.bedrock.region_name"
-                  />
+                  <IsOverridden override={override} />
                 </FormItem>
                 <FormDescription>
                   The AWS region where Bedrock service is available.
@@ -1144,11 +1190,11 @@ export const AiProvidersConfig: React.FC<AiConfigProps> = ({
             )}
           />
 
-          <FormField
+          <OverriddenFormField
             control={form.control}
             disabled={isWasmRuntime}
             name="ai.bedrock.profile_name"
-            render={({ field }) => (
+            render={({ field, override }) => (
               <div className="flex flex-col space-y-1">
                 <FormItem className={formItemClasses}>
                   <FormLabel>AWS Profile Name (Optional)</FormLabel>
@@ -1159,14 +1205,12 @@ export const AiProvidersConfig: React.FC<AiConfigProps> = ({
                       className="m-0 inline-flex h-7"
                       placeholder="default"
                       {...field}
-                      value={field.value || ""}
+                      value={override.value || ""}
+                      disabled={field.disabled || override.isOverridden}
                     />
                   </FormControl>
                   <FormMessage />
-                  <IsOverridden
-                    userConfig={config}
-                    name="ai.bedrock.profile_name"
-                  />
+                  <IsOverridden override={override} />
                 </FormItem>
                 <FormDescription>
                   The AWS profile name from your ~/.aws/credentials file. Leave
@@ -1223,6 +1267,13 @@ export const AiAssistConfig: React.FC<AiConfigProps> = ({
   config,
   onSubmit,
 }) => {
+  // Tracked locally rather than derived from the field value so that clearing
+  // the input (a transient empty value, which commits `null`) does not disable
+  // the input mid-edit and force the user to re-tick the Override checkbox.
+  const [maxTokensEnabled, setMaxTokensEnabled] = useState(
+    config.ai?.max_tokens != null,
+  );
+
   return (
     <SettingGroup>
       <SettingSubtitle>AI Assistant</SettingSubtitle>
@@ -1247,6 +1298,71 @@ export const AiAssistConfig: React.FC<AiConfigProps> = ({
             </FormDescription>
           </div>
         )}
+      />
+
+      <FormField
+        control={form.control}
+        name="ai.max_tokens"
+        render={({ field }) => {
+          return (
+            <div className="flex flex-col gap-y-1">
+              <div className="flex items-center gap-x-2">
+                <FormItem className={formItemClasses}>
+                  <FormLabel className="font-normal">
+                    Max output tokens
+                  </FormLabel>
+                  <FormControl>
+                    <Input
+                      data-testid="ai-max-tokens-input"
+                      type="number"
+                      min={1}
+                      disabled={!maxTokensEnabled}
+                      className="w-28 h-6"
+                      value={field.value ?? (maxTokensEnabled ? "" : 32768)}
+                      onChange={(e) => {
+                        const n = Number.parseInt(e.target.value, 10);
+                        field.onChange(Number.isFinite(n) && n > 0 ? n : null);
+                      }}
+                    />
+                  </FormControl>
+                </FormItem>
+                <FormItem className={formItemClasses}>
+                  <Checkbox
+                    data-testid="ai-max-tokens-checkbox"
+                    checked={maxTokensEnabled}
+                    onCheckedChange={(checked) => {
+                      const isChecked = checked === true;
+                      setMaxTokensEnabled(isChecked);
+                      // null signals delete to the server; cast because
+                      // UserConfig (OpenAPI-derived) types max_tokens as
+                      // `number | undefined`, but zod accepts `null`.
+                      const next = (
+                        isChecked ? (field.value ?? 32768) : null
+                      ) as number | undefined;
+                      // shouldDirty: true forces RHF to keep this in
+                      // dirtyFields even when `next` happens to equal the
+                      // form's defaultValue (e.g. untick → tick when disk
+                      // started with 32768). Otherwise getDirtyValues
+                      // would skip it and the save body would be empty.
+                      form.setValue("ai.max_tokens", next, {
+                        shouldDirty: true,
+                        shouldTouch: true,
+                      });
+                      onSubmit(form.getValues());
+                    }}
+                  />
+                  <FormLabel className="font-normal">Override</FormLabel>
+                </FormItem>
+              </div>
+
+              <FormDescription>
+                Each provider sets its own max output tokens (Anthropic uses a
+                recommended default). Adjust to control costs or enable more
+                output.
+              </FormDescription>
+            </div>
+          );
+        }}
       />
 
       <FormErrorsBanner />
@@ -1278,10 +1394,10 @@ export const AiAssistConfig: React.FC<AiConfigProps> = ({
         onSubmit={onSubmit}
       />
 
-      <FormField
+      <OverriddenFormField
         control={form.control}
         name="ai.rules"
-        render={({ field }) => (
+        render={({ field, override }) => (
           <div className="flex flex-col">
             <FormItem>
               <FormLabel>Custom Rules</FormLabel>
@@ -1291,11 +1407,12 @@ export const AiAssistConfig: React.FC<AiConfigProps> = ({
                   className="m-0 inline-flex w-full h-32 p-2 text-sm"
                   placeholder="e.g. Always use type hints; prefer polars over pandas"
                   {...field}
-                  value={field.value}
+                  value={override.value}
+                  disabled={override.isOverridden}
                 />
               </FormControl>
               <FormMessage />
-              <IsOverridden userConfig={config} name="ai.rules" />
+              <IsOverridden override={override} />
             </FormItem>
             <FormDescription>
               Custom rules to include in all AI completion prompts.
@@ -1348,10 +1465,10 @@ const ProviderTreeItem: React.FC<ProviderTreeItemProps> = ({
       id={providerId}
       hasChildItems={true}
       textValue={providerId}
-      className="outline-none data-focused:bg-muted/50 group"
+      className="outline-hidden data-focused:bg-muted/50 group"
     >
       <TreeItemContent>
-        <div className="flex items-center gap-3 px-2 py-3 hover:bg-muted/50 cursor-pointer outline-none focus-visible:outline-none border-b group-data-expanded:border-b-0 rounded-sm">
+        <div className="flex items-center gap-3 px-2 py-3 hover:bg-muted/50 cursor-pointer outline-hidden focus-visible:outline-hidden border-b group-data-expanded:border-b-0 rounded-sm">
           <Checkbox
             checked={checkboxState}
             onCheckedChange={handleProviderToggle}
@@ -1483,7 +1600,7 @@ export const AiModelDisplayConfig: React.FC<AiConfigProps> = ({
       <div className="bg-background">
         <Tree
           aria-label="AI Models by Provider"
-          className="flex-1 overflow-auto outline-none focus-visible:outline-none"
+          className="flex-1 overflow-auto outline-hidden focus-visible:outline-hidden"
           selectionMode="none"
         >
           {listModelsByProvider.map(([providerId, models]) => (
@@ -1747,6 +1864,39 @@ export type AiSettingsSubTab =
   | "ai-models"
   | "mcp";
 
+const AiEnabledConfig: React.FC<AiConfigProps> = ({ form }) => {
+  return (
+    <SettingGroup>
+      <OverriddenFormField
+        control={form.control}
+        name="ai.enabled"
+        render={({ field, override }) => (
+          <div className="flex flex-col gap-y-1">
+            <FormItem className={formItemClasses}>
+              <FormLabel className="font-normal">Enable AI features</FormLabel>
+              <FormControl>
+                <Checkbox
+                  data-testid="ai-enabled-checkbox"
+                  checked={override.value !== false}
+                  disabled={override.isOverridden}
+                  onCheckedChange={(checked) =>
+                    field.onChange(checked === true)
+                  }
+                />
+              </FormControl>
+              <IsOverridden override={override} />
+            </FormItem>
+            <FormDescription>
+              When disabled, AI actions and panels are hidden from the marimo
+              UI.
+            </FormDescription>
+          </div>
+        )}
+      />
+    </SettingGroup>
+  );
+};
+
 export const AiConfig: React.FC<AiConfigProps> = ({
   form,
   config,
@@ -1755,18 +1905,32 @@ export const AiConfig: React.FC<AiConfigProps> = ({
   // MCP is not supported in WASM
   const wasm = isWasm();
   const [activeTab, setActiveTab] = useAtom(aiSettingsSubTabAtom);
+  const getOverride = useConfigOverride();
+  const watchedAiEnabled = useWatch({
+    control: form.control,
+    name: "ai.enabled",
+  });
+  const { value: aiEnabled } = getOverride("ai.enabled", watchedAiEnabled);
+  const activeVisibleTab =
+    aiEnabled === false && activeTab !== "ai-features"
+      ? "ai-features"
+      : activeTab;
 
   return (
     <Tabs
-      value={activeTab}
+      value={activeVisibleTab}
       onValueChange={(value) => setActiveTab(value as AiSettingsSubTab)}
       className="flex-1"
     >
       <TabsList className="mb-2">
         <TabsTrigger value="ai-features">AI Features</TabsTrigger>
-        <TabsTrigger value="ai-providers">AI Providers</TabsTrigger>
-        <TabsTrigger value="ai-models">AI Models</TabsTrigger>
-        {!wasm && <TabsTrigger value="mcp">MCP</TabsTrigger>}
+        {aiEnabled !== false && (
+          <>
+            <TabsTrigger value="ai-providers">AI Providers</TabsTrigger>
+            <TabsTrigger value="ai-models">AI Models</TabsTrigger>
+            {!wasm && <TabsTrigger value="mcp">MCP</TabsTrigger>}
+          </>
+        )}
       </TabsList>
 
       <TabsContent value="ai-features">
@@ -1775,18 +1939,33 @@ export const AiConfig: React.FC<AiConfigProps> = ({
           config={config}
           onSubmit={onSubmit}
         />
-        <AiAssistConfig form={form} config={config} onSubmit={onSubmit} />
+        <AiEnabledConfig form={form} config={config} onSubmit={onSubmit} />
+        {aiEnabled !== false && (
+          <AiAssistConfig form={form} config={config} onSubmit={onSubmit} />
+        )}
       </TabsContent>
-      <TabsContent value="ai-providers">
-        <AiProvidersConfig form={form} config={config} onSubmit={onSubmit} />
-      </TabsContent>
-      <TabsContent value="ai-models">
-        <AiModelDisplayConfig form={form} config={config} onSubmit={onSubmit} />
-      </TabsContent>
-      {!wasm && (
-        <TabsContent value="mcp">
-          <MCPConfig form={form} onSubmit={onSubmit} />
-        </TabsContent>
+      {aiEnabled !== false && (
+        <>
+          <TabsContent value="ai-providers">
+            <AiProvidersConfig
+              form={form}
+              config={config}
+              onSubmit={onSubmit}
+            />
+          </TabsContent>
+          <TabsContent value="ai-models">
+            <AiModelDisplayConfig
+              form={form}
+              config={config}
+              onSubmit={onSubmit}
+            />
+          </TabsContent>
+          {!wasm && (
+            <TabsContent value="mcp">
+              <MCPConfig form={form} onSubmit={onSubmit} />
+            </TabsContent>
+          )}
+        </>
       )}
     </Tabs>
   );

@@ -6,6 +6,7 @@ import { useAtomValue } from "jotai";
 import { CopyIcon, DownloadIcon } from "lucide-react";
 import type React from "react";
 import { Constants } from "@/core/constants";
+import { useResolvedMarimoConfig } from "@/core/config/config";
 import { codeAtom } from "@/core/saving/file-state";
 import { useFilename } from "@/core/saving/filename";
 import { isStaticNotebook } from "@/core/static/static-state";
@@ -22,6 +23,7 @@ import {
   DialogTrigger,
 } from "../ui/dialog";
 import { toast } from "../ui/use-toast";
+import { MarimoPlusIcon } from "../icons/marimo-icons";
 
 export const StaticBanner: React.FC = () => {
   const code = useAtomValue(codeAtom);
@@ -65,8 +67,14 @@ const StaticBannerDialog = ({ code }: { code: string }) => {
     filename = filename.slice(lastSlash + 1);
   }
 
+  const [resolvedConfig] = useResolvedMarimoConfig();
+  const molabEnabled = resolvedConfig.sharing?.molab !== false;
+
   const href = window.location.href;
-  const wasmLink = createShareableLink({ code });
+  const molabLink = createShareableLink({
+    code,
+    baseUrl: `${Constants.molab}/new`,
+  });
 
   return (
     <Dialog>
@@ -114,23 +122,30 @@ const StaticBannerDialog = ({ code }: { code: string }) => {
               </div>
             )}
 
-            <div className="pt-3 border-t border-(--sky-7)">
-              <p className="text-sm text-(--sky-12) mb-2">
-                <strong>Try in browser with WebAssembly:</strong>{" "}
-                <a
-                  href={wasmLink}
-                  target="_blank"
-                  className="text-(--sky-11) hover:underline break-all"
-                  rel="noreferrer"
+            {molabEnabled && (
+              <div className="pt-3 border-t flex gap-2 items-center">
+                <Button
+                  asChild={true}
+                  variant="outline"
+                  size="xs"
+                  className="shrink-0"
                 >
-                  {wasmLink.slice(0, 50)}...
-                </a>
-              </p>
-              <p className="text-sm text-(--sky-12)">
-                Note: WebAssembly may not work for all notebooks. Additionally,
-                some dependencies may not be available in the browser.
-              </p>
-            </div>
+                  <a href={molabLink} target="_blank" rel="noopener noreferrer">
+                    <MarimoPlusIcon
+                      size={12}
+                      strokeWidth={1.5}
+                      className="mr-1.5 mt-px text-(--grass-11)"
+                    />
+                    Open in molab
+                  </a>
+                </Button>
+                <p className="text-sm text-(--sky-12)">
+                  Run this notebook in{" "}
+                  <span className="font-semibold">molab</span>, marimo's
+                  cloud-hosted notebook platform.
+                </p>
+              </div>
+            )}
           </DialogDescription>
         </DialogHeader>
         <div className="flex gap-3 pt-2">

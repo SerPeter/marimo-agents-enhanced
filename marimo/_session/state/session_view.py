@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Literal, Optional, Union, cast
+from typing import Any, Literal, cast
+
+import msgspec
 
 from marimo import _loggers
 from marimo._data.models import DataSourceConnection, DataTable
@@ -55,7 +57,7 @@ ExportType = Literal["html", "md", "ipynb", "session"]
 MIMEBUNDLE_TYPE: KnownMimeType = "application/vnd.marimo+mimebundle"
 
 
-BufferPath = tuple[Union[str, int], ...]
+BufferPath = tuple[str | int, ...]
 
 
 @dataclass
@@ -64,7 +66,7 @@ class ModelReplayState:
 
     Internally uses a dict for buffers (path → bytes) so merging
     updates is a simple dict operation. Converted back to the wire
-    format (parallel lists) on replay via ``to_notification()``.
+    format (parallel lists) on replay via `to_notification()`.
     """
 
     model_id: WidgetModelId
@@ -73,7 +75,10 @@ class ModelReplayState:
 
     @staticmethod
     def from_open(model_id: WidgetModelId, msg: ModelOpen) -> ModelReplayState:
-        buffers = {tuple(p): b for p, b in zip(msg.buffer_paths, msg.buffers)}
+        buffers = {
+            tuple(p): b
+            for p, b in zip(msg.buffer_paths, msg.buffers, strict=False)
+        }
         return ModelReplayState(
             model_id=model_id,
             state=dict(msg.state),
@@ -91,7 +96,7 @@ class ModelReplayState:
         }
         # Merge new state and buffers
         self.state.update(msg.state)
-        for path, buf in zip(msg.buffer_paths, msg.buffers):
+        for path, buf in zip(msg.buffer_paths, msg.buffers, strict=False):
             self.buffers[tuple(path)] = buf
 
     def to_notification(self) -> ModelLifecycleNotification:
@@ -167,8 +172,6 @@ class SessionView:
         self.last_execution_time: dict[CellId_t, float] = {}
         # Map of cell id to the number of times the cell has been executed
         self.execution_count: dict[CellId_t, int] = {}
-        # Any stale code that was read from a file-watcher
-        self.stale_code: Optional[UpdateCellCodesNotification] = None
         # Aggregated model state — one snapshot per live model.
         # Updates merge in; close removes the entry.
         self.model_states: dict[WidgetModelId, ModelReplayState] = {}
@@ -178,7 +181,7 @@ class SessionView:
         ] = {}
 
         # Startup logs for startup command - only one at a time
-        self.startup_logs: Optional[StartupLogsNotification] = None
+        self.startup_logs: StartupLogsNotification | None = None
 
         # Package installation logs - accumulated per package
         self.package_logs: dict[
@@ -258,9 +261,9 @@ class SessionView:
             self.variable_notifications = notification
 
             # Set of variable names that are in scope.
-            variable_names: set[str] = set(
-                [v.name for v in self.variable_notifications.variables]
-            )
+            variable_names: set[str] = {
+                v.name for v in self.variable_notifications.variables
+            }
 
             # Remove any variable values that are no longer in scope.
             next_values: dict[str, VariableValue] = {}
@@ -634,7 +637,7 @@ def _merge_consecutive_console_outputs(
 
 
 def merge_cell_notification(
-    previous: Optional[CellNotification],
+    previous: CellNotification | None,
     current: CellNotification,
 ) -> CellNotification:
     """Merge two cell notifications."""
@@ -646,8 +649,14 @@ def merge_cell_notification(
     if current.status is None:
         current.status = previous.status
 
-    # If we went from queued to running, clear the console.
-    if current.status == "running" and previous.status == "queued":
+    # Reset the console on an explicit empty list (the `[]` clears contract,
+    # e.g. mo.output.clear_console()) or on queued -> running. Otherwise stale
+    # console output would persist in the session view.
+    explicit_clear = isinstance(current.console, list) and not current.console
+    queued_to_running = (
+        current.status == "running" and previous.status == "queued"
+    )
+    if explicit_clear or queued_to_running:
         current.console = []
     else:
         combined_console: list[CellOutput] = as_list(previous.console)
@@ -660,5 +669,11 @@ def merge_cell_notification(
 
     if current.output is None:
         current.output = previous.output
+
+    # UNSET means "unchanged" — inherit the previously broadcast hint so a
+    # reconnect snapshot keeps the reusability badge. None (explicit clear) and
+    # concrete values are left as-is.
+    if current.serialization is msgspec.UNSET:
+        current.serialization = previous.serialization
 
     return current

@@ -8,9 +8,10 @@ import platform
 import re
 import shutil
 import subprocess
+import tempfile
 from collections import deque
 from pathlib import Path
-from typing import Literal, Optional, Union
+from typing import Literal, Protocol
 
 from marimo import _loggers
 from marimo._server.files.file_system import FileSystem
@@ -20,10 +21,14 @@ from marimo._utils.files import natural_sort
 
 LOGGER = _loggers.marimo_logger()
 
-IGNORE_LIST = [
+LIST_IGNORE_LIST = [
     ".",
     "..",
     ".DS_Store",
+]
+
+SEARCH_IGNORE_LIST = [
+    *LIST_IGNORE_LIST,
     "__pycache__",
     "node_modules",
     ".git",
@@ -36,6 +41,29 @@ DISALLOWED_NAMES = [
     "..",
 ]
 
+# 1 MiB. Large enough to amortize syscall overhead, small enough to keep
+# peak memory bounded when streaming.
+_STREAM_CHUNK_SIZE = 1024 * 1024
+
+# Hard cap on streamed uploads. Streaming removes the implicit OOM ceiling
+# that buffered uploads had, so without a cap an authenticated client could
+# exhaust disk. 1 GiB covers normal notebook-data use cases with margin.
+MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
+
+
+class UploadTooLargeError(ValueError):
+    """Raised when a streamed upload exceeds `MAX_UPLOAD_BYTES`.
+
+    Separate type (vs. a bare `ValueError`) so the HTTP layer can map it
+    to a 413 response instead of the generic error path.
+    """
+
+
+class AsyncByteSource(Protocol):
+    """Structural type for things like Starlette's `UploadFile`."""
+
+    async def read(self, size: int = -1, /) -> bytes: ...
+
 
 class OSFileSystem(FileSystem):
     def get_root(self) -> str:
@@ -47,7 +75,7 @@ class OSFileSystem(FileSystem):
         try:
             with os.scandir(path) as it:
                 for entry in it:
-                    if entry.name in IGNORE_LIST:
+                    if entry.name in LIST_IGNORE_LIST:
                         continue
                     try:
                         is_directory = entry.is_dir()
@@ -133,33 +161,34 @@ class OSFileSystem(FileSystem):
         except UnicodeDecodeError:
             return file_path.read_bytes()
 
-    def create_file_or_directory(
-        self,
-        path: str,
-        file_type: Literal["file", "directory", "notebook"],
-        name: str,
-        contents: Optional[bytes],
-    ) -> FileInfo:
+    @staticmethod
+    def _validate_create_name(name: str) -> None:
+        """Reject names that are empty, reserved, or traverse out of the
+        parent. Centralized so HTTP, WASM, and streaming paths all share it.
+        """
         if name in DISALLOWED_NAMES:
             raise ValueError(
                 f"Cannot create file or directory with name {name}"
             )
         if name.strip() == "":
             raise ValueError("Cannot create file or directory with empty name")
+        if "/" in name or "\\" in name or "\x00" in name:
+            raise ValueError(
+                f"Invalid name {name!r}: must not contain path separators "
+                "or refer to a parent directory"
+            )
+
+    def create_file_or_directory(
+        self,
+        path: str,
+        file_type: Literal["file", "directory", "notebook"],
+        name: str,
+        contents: bytes | None,
+    ) -> FileInfo:
+        self._validate_create_name(name)
 
         full_path = Path(path) / name
-        # If the file already exists, generate a new name
-        if full_path.exists():
-            i = 1
-            name_without_extension = full_path.stem
-            extension = full_path.suffix
-            while True:
-                new_name = f"{name_without_extension}_{i}{extension}"
-                new_full_path = full_path.parent / new_name
-                if not new_full_path.exists():
-                    full_path = new_full_path
-                    break
-                i += 1
+        full_path = _generate_unique_path(full_path)
 
         if file_type == "directory":
             full_path.mkdir(parents=True, exist_ok=True)
@@ -190,6 +219,63 @@ class OSFileSystem(FileSystem):
             ),
         ).file
 
+    async def stream_create_file(
+        self,
+        path: str,
+        name: str,
+        source: AsyncByteSource,
+    ) -> FileInfo:
+        """Stream-write an uploaded file to disk, chunk by chunk.
+
+        Avoids loading the full payload into memory (the HTTP multipart
+        path can otherwise buffer 100 MB at once). Writes to a `.part`
+        temp file and atomically renames on success so a failed upload
+        doesn't leave a half-written file at the final path.
+        """
+        self._validate_create_name(name)
+
+        parent = Path(path)
+        os.makedirs(parent, exist_ok=True)
+
+        # Atomic O_CREAT|O_EXCL reservation closes the TOCTOU window between
+        # picking a unique name and writing to it.
+        full_path = _claim_unique_path(parent / name)
+
+        tmp = tempfile.NamedTemporaryFile(
+            dir=full_path.parent,
+            prefix=full_path.name + ".",
+            suffix=".part",
+            delete=False,
+        )
+        tmp_path = tmp.name
+        try:
+            # Sync writes are bounded to one chunk between awaits, so event
+            # loop blockage stays small without pulling in aiofiles.
+            written = 0
+            with tmp:
+                while chunk := await source.read(_STREAM_CHUNK_SIZE):
+                    written += len(chunk)
+                    if written > MAX_UPLOAD_BYTES:
+                        raise UploadTooLargeError(
+                            f"Upload exceeds maximum size of "
+                            f"{MAX_UPLOAD_BYTES} bytes"
+                        )
+                    tmp.write(chunk)
+            os.replace(tmp_path, full_path)
+        except BaseException:
+            # Both paths may or may not exist depending on where we failed;
+            # FileNotFoundError on either is expected.
+            for p in (tmp_path, str(full_path)):
+                try:
+                    os.unlink(p)
+                except FileNotFoundError:
+                    pass
+            raise
+
+        # `get_details` would re-read the file (and base64-encode binary),
+        # defeating the streaming win.
+        return self._get_file_info(str(full_path))
+
     def delete_file_or_directory(self, path: str) -> bool:
         if os.path.isdir(path):
             safe_rmtree(path)
@@ -197,16 +283,22 @@ class OSFileSystem(FileSystem):
             os.remove(path)
         return True
 
+    def copy_file_or_directory(self, path: str, new_path: str) -> FileInfo:
+        new_path = str(_generate_unique_path(new_path))
+        if not _is_allowed_paths(path, new_path):
+            raise ValueError(f"Cannot copy to {new_path}")
+        if Path(path).is_dir():
+            shutil.copytree(path, new_path)
+        else:
+            shutil.copy2(path, new_path)
+        return self.get_details(new_path).file
+
     def move_file_or_directory(self, path: str, new_path: str) -> FileInfo:
-        file_name = os.path.basename(new_path)
-        # Disallow renaming to . or ..
-        if file_name in DISALLOWED_NAMES:
+        if not _is_allowed_paths(path, new_path):
             raise ValueError(f"Cannot rename to {new_path}")
-        # Disallow moving to an existing path or directory
-        if os.path.exists(new_path) or os.path.isdir(new_path):
-            raise ValueError(
-                f"Destination path {new_path} already exists or is a directory"
-            )
+        # Disallow moving to an existing path
+        if os.path.exists(new_path):
+            raise ValueError(f"Destination path {new_path} already exists")
         safe_move(path, new_path)
         return self.get_details(new_path).file
 
@@ -219,7 +311,7 @@ class OSFileSystem(FileSystem):
         self,
         query: str,
         *,
-        path: Optional[str] = None,
+        path: str | None = None,
         include_directories: bool = True,
         include_files: bool = True,
         depth: int = 3,
@@ -268,7 +360,7 @@ class OSFileSystem(FileSystem):
                             break
 
                         # Skip ignored files/directories
-                        if entry.name in IGNORE_LIST:
+                        if entry.name in SEARCH_IGNORE_LIST:
                             continue
 
                         # Check if name matches query
@@ -394,7 +486,7 @@ def editor_open_file_in_line_args(
         return [f"+{line_number}", path]
 
 
-def natural_sort_file(file: FileInfo) -> list[Union[int, str]]:
+def natural_sort_file(file: FileInfo) -> list[int | str]:
     return natural_sort(file.name)
 
 
@@ -459,3 +551,52 @@ def safe_move(src: str, dst: str) -> None:
         else:
             shutil.copy2(src, dst)
             src_path.unlink()
+
+
+def _generate_unique_path(new_path: str | Path) -> Path:
+    # If the file already exists, generate a new name
+    new_path = Path(new_path)
+    if not new_path.exists():
+        return new_path
+    i = 1
+    name_without_extension = new_path.stem
+    extension = new_path.suffix
+    while True:
+        new_name = f"{name_without_extension}_{i}{extension}"
+        new_path = new_path.parent / new_name
+        if not new_path.exists():
+            return new_path
+        i += 1
+
+
+def _claim_unique_path(target: Path) -> Path:
+    """Race-safe variant of `_generate_unique_path`: opens with O_EXCL and
+    walks numbered suffixes on collision. Returns an empty file at the
+    claimed path; the caller writes into or replaces it.
+    """
+    name_without_extension = target.stem
+    extension = target.suffix
+    candidate = target
+    i = 0
+    while True:
+        try:
+            fd = os.open(
+                candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644
+            )
+            os.close(fd)
+            return candidate
+        except FileExistsError:
+            i += 1
+            candidate = target.parent / (
+                f"{name_without_extension}_{i}{extension}"
+            )
+
+
+def _is_allowed_paths(path: str | Path, new_path: str | Path) -> bool:
+    file_name = os.path.basename(new_path)
+    if file_name in DISALLOWED_NAMES or not file_name.strip():
+        return False
+
+    src = Path(path).resolve()
+    dst = Path(new_path).resolve()
+    return not (src.is_dir() and dst.is_relative_to(src))

@@ -37,13 +37,17 @@ import {
   extractTimezone,
   type FieldTypesWithExternalType,
   INDEX_COLUMN_NAME,
+  isNumericType,
 } from "./types";
+import { SentinelCell, WhitespaceMarkers } from "./sentinel-cell";
+import { detectSentinel, splitLeadingTrailingWhitespace } from "./utils";
 import { uniformSample } from "./uniformSample";
 import { MarkdownUrlDetector, UrlDetector } from "./url-detector";
 
+export const NAMELESS_COLUMN_PREFIX = "__m_column__";
 // Artificial limit to display long strings
+export const SELECT_ID = "__select__";
 const MAX_STRING_LENGTH = 50;
-const SELECT_ID = "__select__";
 
 function inferDataType(value: unknown): [type: DataType, displayType: string] {
   if (typeof value === "string") {
@@ -103,8 +107,6 @@ export function inferFieldTypes<T>(items: T[]): FieldTypesWithExternalType {
   return Objects.entries(fieldTypes);
 }
 
-export const NAMELESS_COLUMN_PREFIX = "__m_column__";
-
 export function generateColumns<T>({
   rowHeaders,
   selection,
@@ -116,6 +118,7 @@ export function generateColumns<T>({
   showDataTypes,
   calculateTopKRows,
   fractionDigitsByColumn,
+  columnWidths,
 }: {
   rowHeaders: FieldTypesWithExternalType;
   selection: DataTableSelection;
@@ -127,6 +130,7 @@ export function generateColumns<T>({
   showDataTypes?: boolean;
   calculateTopKRows?: CalculateTopKRows;
   fractionDigitsByColumn?: Record<string, number>;
+  columnWidths?: Record<string, number>;
 }): ColumnDef<T>[] {
   // Row-headers are typically index columns
   const rowHeadersSet = new Set(rowHeaders.map(([columnName]) => columnName));
@@ -163,7 +167,7 @@ export function generateColumns<T>({
     }
     // Auto right-align numeric columns
     const dataType = getMeta(key).dataType;
-    if (dataType === "number" || dataType === "integer") {
+    if (isNumericType(dataType)) {
       return "right";
     }
     return undefined;
@@ -189,14 +193,22 @@ export function generateColumns<T>({
       accessorFn: (row) => {
         return row[key as keyof T];
       },
-
+      enableHiding: !rowHeadersSet.has(key) && key !== "",
       header: ({ column, table }) => {
         const stats = chartSpecModel?.getColumnStats(key);
         const dtype = column.columnDef.meta?.dtype;
         const headerTitle = headerTooltip?.[key];
+        const headerJustify = textJustifyColumns?.[key];
+
         const dtypeHeader =
           showDataTypes && dtype ? (
-            <div className="flex flex-row gap-1">
+            <div
+              className={cn(
+                "flex flex-row gap-1",
+                headerJustify === "center" && "justify-center",
+                headerJustify === "right" && "justify-end",
+              )}
+            >
               <span className="text-xs text-muted-foreground">{dtype}</span>
               {stats && typeof stats.nulls === "number" && stats.nulls > 0 && (
                 <span className="text-xs text-muted-foreground">
@@ -206,41 +218,31 @@ export function generateColumns<T>({
             </div>
           ) : null;
 
-        const justify = getJustify(key);
-
-        const headerWithType = (
-          <div
+        const headerName = (
+          <span
             className={cn(
-              "flex flex-col",
-              justify === "center" && "items-center",
-              justify === "right" && "items-end",
+              "font-bold",
+              headerTitle && "underline decoration-dotted",
             )}
           >
-            <span
-              className={cn(
-                "font-bold",
-                headerTitle && "underline decoration-dotted",
-              )}
-            >
-              {key === "" ? " " : key}
-            </span>
-            {dtypeHeader}
-          </div>
+            {key === "" ? " " : key}
+          </span>
         );
 
         const headerWithTooltip = headerTitle ? (
           <Tooltip content={headerTitle} delayDuration={300}>
-            {headerWithType}
+            {headerName}
           </Tooltip>
         ) : (
-          headerWithType
+          headerName
         );
 
         const dataTableColumnHeader = (
           <DataTableColumnHeader
             header={headerWithTooltip}
+            subheader={dtypeHeader}
             column={column}
-            justify={justify}
+            justify={headerJustify}
             calculateTopKRows={calculateTopKRows}
             table={table}
           />
@@ -255,8 +257,8 @@ export function generateColumns<T>({
           <div
             className={cn(
               "flex flex-col h-full pt-0.5 pb-3 justify-between items-start",
-              justify === "center" && "items-center",
-              justify === "right" && "items-end",
+              headerJustify === "center" && "items-center",
+              headerJustify === "right" && "items-end",
             )}
           >
             {dataTableColumnHeader}
@@ -282,14 +284,14 @@ export function generateColumns<T>({
           !isCellSelected;
 
         const dataType = column.columnDef.meta?.dataType;
-        const isNumeric = dataType === "number" || dataType === "integer";
-        const cellStyles = getCellStyleClass(
+        const isNumeric = isNumericType(dataType);
+        const cellStyles = getCellStyleClass({
           justify,
           wrapped,
           canSelectCell,
-          isCellSelected,
+          isSelected: isCellSelected,
           isNumeric,
-        );
+        });
 
         const renderedCell = renderCellValue({
           column,
@@ -311,7 +313,20 @@ export function generateColumns<T>({
       // Can only sort if key is defined
       // For example, unnamed index columns, won't be sortable
       enableSorting: !!key,
-      meta: getMeta(key),
+      meta: {
+        ...getMeta(key),
+        width: columnWidths?.[key],
+      },
+      // size seeds the width before measurement; minSize/maxSize pin
+      // getSize() to the fixed width so the per-paint measurement writeback
+      // cannot drift the header width or sticky-pin offsets.
+      ...(columnWidths?.[key] !== undefined
+        ? {
+            size: columnWidths[key],
+            minSize: columnWidths[key],
+            maxSize: columnWidths[key],
+          }
+        : {}),
     }),
   );
 
@@ -356,6 +371,7 @@ const PopoutColumn = ({
   cellStyles,
   selectCell,
   rawStringValue,
+  edges,
   contentClassName,
   buttonText,
   wrapped,
@@ -364,11 +380,25 @@ const PopoutColumn = ({
   cellStyles?: string;
   selectCell?: () => void;
   rawStringValue: string;
+  // Edge whitespace shown as visible markers in the trigger; copy/title
+  // still use `rawStringValue`. Middle is sliced from `rawStringValue`.
+  edges?: { leading: string; trailing: string };
   contentClassName?: string;
   buttonText?: string;
   wrapped?: boolean;
   children: React.ReactNode;
 }) => {
+  const hasEdgeWhitespace =
+    edges !== undefined &&
+    (edges.leading.length > 0 || edges.trailing.length > 0);
+
+  const displayText = hasEdgeWhitespace
+    ? rawStringValue.slice(
+        edges.leading.length,
+        rawStringValue.length - edges.trailing.length,
+      )
+    : rawStringValue;
+
   return (
     <EmotionCacheProvider container={null}>
       <Popover>
@@ -387,7 +417,9 @@ const PopoutColumn = ({
             )}
             title={rawStringValue}
           >
-            {rawStringValue}
+            {edges ? <WhitespaceMarkers value={edges.leading} /> : null}
+            {displayText}
+            {edges ? <WhitespaceMarkers value={edges.trailing} /> : null}
           </span>
         </PopoverTrigger>
         <PopoverContent
@@ -448,13 +480,19 @@ function getFilterTypeForFieldType(
   }
 }
 
-function getCellStyleClass(
-  justify: "left" | "center" | "right" | undefined,
-  wrapped: boolean | undefined,
-  canSelectCell: boolean,
-  isSelected: boolean,
-  isNumeric?: boolean,
-): string {
+function getCellStyleClass({
+  justify = "left",
+  wrapped,
+  canSelectCell,
+  isSelected,
+  isNumeric = false,
+}: {
+  justify: "left" | "center" | "right" | undefined;
+  wrapped: boolean | undefined;
+  canSelectCell: boolean;
+  isSelected: boolean;
+  isNumeric?: boolean;
+}): string {
   return cn(
     canSelectCell && "cursor-pointer",
     isSelected &&
@@ -465,7 +503,7 @@ function getCellStyleClass(
     isNumeric && "tabular-nums",
     justify === "center" && "text-center",
     justify === "right" && "text-right",
-    wrapped && `${COLUMN_WRAPPING_STYLES} break-words`,
+    wrapped && `${COLUMN_WRAPPING_STYLES} wrap-break-word`,
   );
 }
 
@@ -529,6 +567,17 @@ export function renderCellValue<TData, TValue>({
 
   const isWrapped = column.getColumnWrapping?.() === "wrap";
 
+  // Sentinel values (null, whitespace, NaN, Infinity, NaT) rendered specially.
+  // Empty strings are left as-is
+  const sentinel = detectSentinel(value, dataType);
+  if (sentinel && sentinel.type !== "empty-string") {
+    return (
+      <div onClick={selectCell} className={cellStyles}>
+        <SentinelCell sentinel={sentinel} />
+      </div>
+    );
+  }
+
   if (dataType === "datetime" && typeof value === "string") {
     try {
       if (!isValid(value)) {
@@ -575,7 +624,13 @@ export function renderCellValue<TData, TValue>({
       ? String(column.applyColumnFormatting(value))
       : String(renderValue());
 
-    const parts = parseContent(stringValue);
+    const { leading, middle, trailing } =
+      splitLeadingTrailingWhitespace(stringValue);
+    const hasEdgeWhitespace = leading.length > 0 || trailing.length > 0;
+
+    // Parse only the inner content for URL detection so URLDetector doesn't
+    // split on the whitespace padding.
+    const parts = parseContent(hasEdgeWhitespace ? middle : stringValue);
     const allMarkup = parts.every((part) => part.type !== "text");
     if (allMarkup || stringValue.length < MAX_STRING_LENGTH || isWrapped) {
       return (
@@ -583,7 +638,9 @@ export function renderCellValue<TData, TValue>({
           onClick={selectCell}
           className={cn(cellStyles, isWrapped && COLUMN_WRAPPING_STYLES)}
         >
+          <WhitespaceMarkers value={leading} />
           <UrlDetector parts={parts} />
+          <WhitespaceMarkers value={trailing} />
         </div>
       );
     }
@@ -593,11 +650,15 @@ export function renderCellValue<TData, TValue>({
         cellStyles={cellStyles}
         selectCell={selectCell}
         rawStringValue={stringValue}
-        contentClassName="max-h-64 overflow-auto whitespace-pre-wrap break-words text-sm w-96"
+        edges={{ leading, trailing }}
+        contentClassName="max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word text-sm w-96"
         buttonText="X"
         wrapped={isWrapped}
       >
-        <MarkdownUrlDetector content={stringValue} parts={parts} />
+        <MarkdownUrlDetector
+          content={stringValue}
+          parts={parseContent(stringValue)}
+        />
       </PopoutColumn>
     );
   }

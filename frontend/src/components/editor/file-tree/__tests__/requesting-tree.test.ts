@@ -8,6 +8,7 @@ import { RequestingTree } from "../requesting-tree";
 const sendListFiles = vi.fn();
 const sendCreateFileOrFolder = vi.fn();
 const sendDeleteFileOrFolder = vi.fn();
+const sendCopyFileOrFolder = vi.fn();
 const sendRenameFileOrFolder = vi.fn();
 
 vi.mock("@/components/ui/use-toast", () => MockModules.toast());
@@ -21,6 +22,7 @@ describe("RequestingTree", () => {
       listFiles: sendListFiles,
       createFileOrFolder: sendCreateFileOrFolder,
       deleteFileOrFolder: sendDeleteFileOrFolder,
+      copyFileOrFolder: sendCopyFileOrFolder,
       renameFileOrFolder: sendRenameFileOrFolder,
     });
     sendListFiles.mockResolvedValue({
@@ -169,10 +171,35 @@ describe("RequestingTree", () => {
     `);
   });
 
+  test("copy should duplicate a file", async () => {
+    sendCopyFileOrFolder.mockResolvedValue({ success: true });
+
+    await requestingTree.copy("1.1", "file1_copy");
+    expect(sendCopyFileOrFolder).toHaveBeenCalledWith({
+      path: "/root/file1",
+      newPath: "/root/file1_copy",
+    });
+    expect(mockOnChange).toHaveBeenCalled();
+  });
+
+  test("delete should drop a file on success", async () => {
+    sendDeleteFileOrFolder.mockResolvedValue({ success: true });
+
+    await requestingTree.delete("1.1");
+    expect(sendDeleteFileOrFolder).toHaveBeenCalledWith({
+      path: "/root/file1",
+    });
+    const lastCall = mockOnChange.mock.calls.at(-1);
+    expect(lastCall?.[0].map((f: { id: string }) => f.id)).toEqual([
+      "1.2",
+      "1.3",
+    ]);
+  });
+
   test("createFile should create a new file", async () => {
     sendCreateFileOrFolder.mockResolvedValue({ success: true });
 
-    await requestingTree.createFile("file3", "1.2");
+    await requestingTree.createFile({ name: "file3", parentId: "1.2" });
     expect(sendCreateFileOrFolder).toHaveBeenCalledWith({
       path: "/root/folder1",
       type: "file",
@@ -184,7 +211,11 @@ describe("RequestingTree", () => {
   test("createFile should create a new notebook", async () => {
     sendCreateFileOrFolder.mockResolvedValue({ success: true });
 
-    await requestingTree.createFile("notebook1", "1.2", "notebook");
+    await requestingTree.createFile({
+      name: "notebook1",
+      parentId: "1.2",
+      type: "notebook",
+    });
     expect(sendCreateFileOrFolder).toHaveBeenCalledWith({
       path: "/root/folder1",
       type: "notebook",
@@ -236,6 +267,7 @@ describe("RequestingTree", () => {
         listFiles: sendListFiles,
         createFileOrFolder: sendCreateFileOrFolder,
         deleteFileOrFolder: sendDeleteFileOrFolder,
+        copyFileOrFolder: sendCopyFileOrFolder,
         renameFileOrFolder: sendRenameFileOrFolder,
       });
       sendListFiles.mockRejectedValue(new Error("Network error"));
@@ -263,6 +295,87 @@ describe("RequestingTree", () => {
       });
     });
 
+    test("rename should NOT mutate the local tree on API failure", async () => {
+      sendRenameFileOrFolder.mockResolvedValue({
+        success: false,
+        message: "Error renaming",
+      });
+      const changesBefore = mockOnChange.mock.calls.length;
+
+      await requestingTree.rename("1.1", "file2");
+
+      // No further onChange calls should fire after the failed rename, so the
+      // tree stays in sync with the backend.
+      expect(mockOnChange.mock.calls.length).toBe(changesBefore);
+    });
+
+    test("delete should NOT drop the node on API failure", async () => {
+      sendDeleteFileOrFolder.mockResolvedValue({
+        success: false,
+        message: "Error deleting",
+      });
+      const changesBefore = mockOnChange.mock.calls.length;
+
+      await requestingTree.delete("1.1");
+      expect(sendDeleteFileOrFolder).toHaveBeenCalledWith({
+        path: "/root/file1",
+      });
+      expect(toast).toHaveBeenCalledWith({
+        title: "Failed",
+        description: "Error deleting",
+      });
+      expect(mockOnChange.mock.calls.length).toBe(changesBefore);
+    });
+
+    test("move should NOT mutate the local tree when rename fails", async () => {
+      sendRenameFileOrFolder.mockResolvedValue({
+        success: false,
+        message: "Error moving",
+      });
+
+      await requestingTree.move(["1.1"], "1.2");
+
+      expect(toast).toHaveBeenCalledWith({
+        title: "Failed",
+        description: "Error moving",
+      });
+      // The last emitted state should still have file1 at the top level, not
+      // moved under folder1.
+      const lastCall = mockOnChange.mock.calls.at(-1);
+      expect(lastCall?.[0]).toEqual([
+        { id: "1.1", name: "file1", path: "/root/file1" },
+        {
+          id: "1.2",
+          name: "folder1",
+          isDirectory: true,
+          path: "/root/folder1",
+        },
+        {
+          id: "1.3",
+          name: "folder2",
+          isDirectory: true,
+          path: "/root/folder2",
+        },
+      ]);
+    });
+
+    test("copy should handle API failure", async () => {
+      sendCopyFileOrFolder.mockResolvedValue({
+        success: false,
+        message: "Error duplicating",
+      });
+
+      await requestingTree.copy("1.1", "file1_copy");
+      expect(sendCopyFileOrFolder).toHaveBeenCalledWith({
+        path: "/root/file1",
+        newPath: "/root/file1_copy",
+      });
+      expect(toast).toHaveBeenCalledWith({
+        title: "Failed",
+        description: "Error duplicating",
+      });
+    });
+
     test("move should handle missing parent node gracefully", async () => {
       await requestingTree.move(["1.x"], "2");
       expect(sendRenameFileOrFolder).not.toHaveBeenCalled();
@@ -284,6 +397,7 @@ describe("RequestingTree", () => {
         listFiles: sendListFiles,
         createFileOrFolder: sendCreateFileOrFolder,
         deleteFileOrFolder: sendDeleteFileOrFolder,
+        copyFileOrFolder: sendCopyFileOrFolder,
         renameFileOrFolder: sendRenameFileOrFolder,
       });
 
@@ -305,6 +419,7 @@ describe("RequestingTree", () => {
         listFiles: sendListFiles,
         createFileOrFolder: sendCreateFileOrFolder,
         deleteFileOrFolder: sendDeleteFileOrFolder,
+        copyFileOrFolder: sendCopyFileOrFolder,
         renameFileOrFolder: sendRenameFileOrFolder,
       });
 

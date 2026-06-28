@@ -5,6 +5,7 @@ import base64
 import json
 import pathlib
 import sys
+import textwrap
 from typing import TYPE_CHECKING, Any
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
@@ -20,8 +21,12 @@ from marimo._messaging.msgspec_encoder import encode_json_str
 from marimo._messaging.notification import CellNotification
 from marimo._server.export import (
     export_as_wasm,
+    run_app_then_export_as_html,
+    run_app_then_export_as_ipynb,
+    run_app_then_export_as_pdf,
     run_app_until_completion,
 )
+from marimo._server.export._status import PDFExportStatusEvent
 from marimo._server.export.exporter import Exporter
 from marimo._server.models.export import ExportAsHTMLRequest
 from marimo._session.notebook import AppFileManager
@@ -637,6 +642,108 @@ def test_export_as_html_with_error_outputs(session_view: SessionView) -> None:
     assert "Test error" in html or "ValueError" in html
 
 
+def _write_lazy_notebook(path: Path, lazy_arg: str) -> None:
+    path.write_text(
+        textwrap.dedent(
+            f"""
+            import marimo
+
+            app = marimo.App()
+
+
+            @app.cell
+            def _():
+                import marimo as mo
+
+                def _make_async():
+                    async def inner():
+                        return "ASYNC_RESULT"
+                    return inner
+
+                mo.lazy({lazy_arg})
+                return ()
+
+
+            if __name__ == "__main__":
+                app.run()
+            """
+        )
+    )
+
+
+@pytest.mark.skipif(
+    not DependencyManager.nbformat.has(), reason="nbformat not installed"
+)
+@pytest.mark.parametrize(
+    ("lazy_arg", "expected_marker", "should_resolve"),
+    [
+        pytest.param('"EAGER_VALUE"', "EAGER_VALUE", True, id="eager_value"),
+        pytest.param(
+            'lambda: "SYNC_RESULT"', "SYNC_RESULT", True, id="sync_callable"
+        ),
+        pytest.param(
+            "_make_async()", "ASYNC_RESULT", False, id="async_callable"
+        ),
+    ],
+)
+async def test_run_app_then_export_as_ipynb_resolves_lazy(
+    tmp_path: Path,
+    lazy_arg: str,
+    expected_marker: str,
+    should_resolve: bool,
+) -> None:
+    """Regression test for https://github.com/marimo-team/marimo/issues/9624.
+
+    Non-interactive exports (ipynb, PDF) resolve sync `mo.lazy` content
+    eagerly. Async elements can't be awaited from `__new__` and stay as
+    placeholders.
+    """
+    notebook = tmp_path / "lazy_notebook.py"
+    _write_lazy_notebook(notebook, lazy_arg)
+
+    result = await run_app_then_export_as_ipynb(
+        filepath=MarimoPath(str(notebook)),
+        sort_mode="top-down",
+        cli_args={},
+        argv=[],
+    )
+
+    # The rendered HTML is wrapped in <span> by as_html; the raw marker
+    # alone appears in the cell source regardless, so check the wrapped
+    # form to confirm resolution.
+    rendered = f"<span>{expected_marker}</span>"
+    if should_resolve:
+        assert rendered in result.contents
+        assert "marimo-lazy" not in result.contents
+    else:
+        assert "marimo-lazy" in result.contents
+        assert rendered not in result.contents
+
+
+async def test_run_app_then_export_as_html_keeps_lazy_placeholder(
+    tmp_path: Path,
+) -> None:
+    """HTML export ships interactive widgets and leaves `mo.lazy` as a placeholder.
+
+    Static HTML exports don't resolve `mo.lazy` because the global
+    `is_non_interactive` flag would also switch tables/altair/plotly/etc.
+    to non-interactive fallbacks. A lazy-specific resolution path can be
+    added later as a follow-up.
+    """
+    notebook = tmp_path / "lazy_notebook.py"
+    _write_lazy_notebook(notebook, 'lambda: "SYNC_RESULT"')
+
+    result = await run_app_then_export_as_html(
+        path=MarimoPath(str(notebook)),
+        include_code=False,
+        cli_args={},
+        argv=[],
+    )
+
+    assert "marimo-lazy" in result.contents
+    assert "SYNC_RESULT" not in result.contents
+
+
 def test_export_as_html_code_hash_consistency(
     session_view: SessionView,
 ) -> None:
@@ -978,6 +1085,182 @@ def test_export_html_replaces_audio_virtual_files(
     assert expected_b64 in html
 
 
+def test_export_html_inlines_public_folder_images(
+    session_view: SessionView, tmp_path: Path
+) -> None:
+    """Test that <img src="public/..."> references are inlined as data URIs.
+
+    Regression test for marimo-team/marimo#9625: a markdown cell like
+    `mo.md("![alt](public/image.png)")` produces HTML output that points at
+    `public/image.png`. The standalone exported HTML must inline those
+    images so the file is self-contained when opened without the sibling
+    `public/` folder.
+    """
+    # Arrange: notebook file with a sibling public/image.png
+    notebook_path = tmp_path / "nb.py"
+    notebook_path.write_text("import marimo\napp = marimo.App()\n")
+    public_dir = tmp_path / "public"
+    public_dir.mkdir()
+    png_bytes = b"\x89PNG\r\n\x1a\nfakeimage"
+    (public_dir / "image.png").write_bytes(png_bytes)
+
+    app = App()
+
+    @app.cell()
+    def cell_md():
+        import marimo as mo
+
+        return mo.md("![alt](public/image.png)")
+
+    file_manager = AppFileManager.from_app(InternalApp(app))
+    cell_ids = list(file_manager.app.cell_manager.cell_ids())
+
+    # Simulate the HTML output that mo.md produces at runtime: the raw
+    # `public/image.png` path is preserved (no inlining at runtime).
+    session_view.cell_notifications[cell_ids[0]] = CellNotification(
+        cell_id=cell_ids[0],
+        status="idle",
+        output=CellOutput(
+            channel=CellChannel.OUTPUT,
+            mimetype="text/html",
+            data=(
+                '<span class="markdown">'
+                '<img alt="alt" src="public/image.png">'
+                "</span>"
+            ),
+        ),
+        console=[],
+        timestamp=0,
+    )
+
+    exporter = Exporter()
+    request = ExportAsHTMLRequest(
+        download=True,
+        files=[],
+        include_code=True,
+    )
+
+    html, _filename = exporter.export_as_html(
+        filename=str(notebook_path),
+        app=file_manager.app,
+        session_view=session_view,
+        display_config=DEFAULT_CONFIG["display"],
+        request=request,
+    )
+
+    # The original path is gone; the image is embedded as a data URI.
+    assert 'src="public/image.png"' not in html
+    assert "data:image/png;base64," in html
+    assert base64.b64encode(png_bytes).decode() in html
+
+
+def test_export_html_does_not_touch_non_html_outputs(
+    session_view: SessionView, tmp_path: Path
+) -> None:
+    """text/plain (and other non-HTML) outputs must NOT be HTML-parsed.
+
+    Regression guard: previously `_iter_html_data_strings` yielded every
+    string mime entry, which meant `text/plain` data containing literal
+    `./@file/...` text was rewritten as if it were HTML.
+    """
+    notebook_path = tmp_path / "nb.py"
+    notebook_path.write_text("import marimo\napp = marimo.App()\n")
+
+    app = App()
+
+    @app.cell()
+    def _():
+        return None
+
+    file_manager = AppFileManager.from_app(InternalApp(app))
+    cell_ids = list(file_manager.app.cell_manager.cell_ids())
+
+    # A plain-text output that happens to contain virtual-file and public/
+    # tokens — these must NOT be rewritten because the mime is text/plain.
+    plain = "see ./@file/100-test.png or public/image.png"
+    session_view.cell_notifications[cell_ids[0]] = CellNotification(
+        cell_id=cell_ids[0],
+        status="idle",
+        output=CellOutput(
+            channel=CellChannel.OUTPUT,
+            mimetype="text/plain",
+            data=plain,
+        ),
+        console=[],
+        timestamp=0,
+    )
+
+    exporter = Exporter()
+    request = ExportAsHTMLRequest(
+        download=True,
+        files=[],
+        include_code=True,
+    )
+
+    html, _ = exporter.export_as_html(
+        filename=str(notebook_path),
+        app=file_manager.app,
+        session_view=session_view,
+        display_config=DEFAULT_CONFIG["display"],
+        request=request,
+    )
+
+    # The plain-text content is preserved verbatim (JSON-escaped in the
+    # session snapshot, hence the substring check rather than equality).
+    assert "./@file/100-test.png" in html
+    assert "public/image.png" in html
+
+
+def test_export_html_public_folder_blocks_path_traversal(
+    session_view: SessionView, tmp_path: Path
+) -> None:
+    """Test that path traversal attempts via public/ paths are rejected."""
+    notebook_path = tmp_path / "nb.py"
+    notebook_path.write_text("import marimo\napp = marimo.App()\n")
+    (tmp_path / "public").mkdir()
+    # File OUTSIDE the public/ folder that an attacker would try to read.
+    (tmp_path / "secret.txt").write_bytes(b"shh")
+
+    app = App()
+
+    @app.cell()
+    def cell_md():
+        return None
+
+    file_manager = AppFileManager.from_app(InternalApp(app))
+    cell_ids = list(file_manager.app.cell_manager.cell_ids())
+
+    session_view.cell_notifications[cell_ids[0]] = CellNotification(
+        cell_id=cell_ids[0],
+        status="idle",
+        output=CellOutput(
+            channel=CellChannel.OUTPUT,
+            mimetype="text/html",
+            data='<img src="public/../secret.txt">',
+        ),
+        console=[],
+        timestamp=0,
+    )
+
+    exporter = Exporter()
+    request = ExportAsHTMLRequest(
+        download=True,
+        files=[],
+        include_code=True,
+    )
+
+    html, _ = exporter.export_as_html(
+        filename=str(notebook_path),
+        app=file_manager.app,
+        session_view=session_view,
+        display_config=DEFAULT_CONFIG["display"],
+        request=request,
+    )
+
+    # The secret file must NOT be inlined.
+    assert base64.b64encode(b"shh").decode() not in html
+
+
 def test_export_html_skips_oversized_virtual_files(
     session_view: SessionView,
 ) -> None:
@@ -1075,6 +1358,262 @@ class TestPDFExport:
                 )
 
             assert "for PDF export" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_run_app_then_export_as_pdf_reports_execute_raster_render(
+        self,
+        temp_marimo_file: str,
+        session_view: SessionView,
+    ) -> None:
+        events: list[PDFExportStatusEvent] = []
+
+        async def fake_run_app_until_completion(
+            *args: Any, **kwargs: Any
+        ) -> tuple[SessionView, bool]:
+            del args, kwargs
+            return session_view, False
+
+        async def fake_collect_pdf_png_fallbacks(
+            *args: Any, **kwargs: Any
+        ) -> dict[str, str]:
+            del args
+            status_callback = kwargs["status_callback"]
+            assert status_callback is not None
+            status_callback(
+                PDFExportStatusEvent(
+                    phase="raster",
+                    message="rasterizing interactive outputs...",
+                    total=2,
+                )
+            )
+            status_callback(
+                PDFExportStatusEvent(
+                    phase="raster",
+                    message="rasterizing interactive outputs...",
+                    current=1,
+                    total=2,
+                )
+            )
+            return {"cell-1": "data:image/png;base64,ZmFrZQ=="}
+
+        def fake_export_as_pdf(
+            self: Exporter, *args: Any, **kwargs: Any
+        ) -> bytes:
+            del self, args
+            status_callback = kwargs["status_callback"]
+            assert status_callback is not None
+            status_callback(
+                PDFExportStatusEvent(
+                    phase="render",
+                    message="rendering PDF via WebPDF...",
+                )
+            )
+            return b"mock_pdf"
+
+        with (
+            patch(
+                "marimo._server.export.run_app_until_completion",
+                side_effect=fake_run_app_until_completion,
+            ),
+            patch(
+                "marimo._server.export._pdf_raster.collect_pdf_png_fallbacks",
+                side_effect=fake_collect_pdf_png_fallbacks,
+            ),
+            patch.object(
+                Exporter,
+                "export_as_pdf",
+                autospec=True,
+                side_effect=fake_export_as_pdf,
+            ),
+        ):
+            pdf_data, did_error = await run_app_then_export_as_pdf(
+                MarimoPath(temp_marimo_file),
+                include_outputs=True,
+                webpdf=True,
+                cli_args={},
+                argv=None,
+                export_as=None,
+                rasterization_options=MagicMock(enabled=True),
+                status_callback=events.append,
+            )
+
+        assert pdf_data == b"mock_pdf"
+        assert did_error is False
+        assert [event.phase for event in events] == [
+            "execute",
+            "execute_complete",
+            "raster",
+            "raster",
+            "prepare",
+            "render",
+            "complete",
+        ]
+        assert [event.message for event in events] == [
+            "executing notebook...",
+            "notebook execution finished.",
+            "rasterizing interactive outputs...",
+            "rasterizing interactive outputs...",
+            "serializing notebook for PDF rendering...",
+            "rendering PDF via WebPDF...",
+            "done.",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_run_app_then_export_as_pdf_reports_render_only_without_outputs(
+        self,
+        temp_marimo_file: str,
+    ) -> None:
+        events: list[PDFExportStatusEvent] = []
+
+        def fake_export_as_pdf(
+            self: Exporter, *args: Any, **kwargs: Any
+        ) -> bytes:
+            del self, args
+            status_callback = kwargs["status_callback"]
+            assert status_callback is not None
+            status_callback(
+                PDFExportStatusEvent(
+                    phase="render",
+                    message="rendering PDF via standard exporter...",
+                )
+            )
+            return b"mock_pdf"
+
+        with (
+            patch(
+                "marimo._server.export.run_app_until_completion",
+                side_effect=AssertionError(
+                    "execution should not run without outputs"
+                ),
+            ),
+            patch(
+                "marimo._server.export._pdf_raster.collect_pdf_png_fallbacks",
+                side_effect=AssertionError(
+                    "rasterization should not run without outputs"
+                ),
+            ),
+            patch.object(
+                Exporter,
+                "export_as_pdf",
+                autospec=True,
+                side_effect=fake_export_as_pdf,
+            ),
+        ):
+            pdf_data, did_error = await run_app_then_export_as_pdf(
+                MarimoPath(temp_marimo_file),
+                include_outputs=False,
+                webpdf=False,
+                cli_args={},
+                argv=None,
+                export_as=None,
+                rasterization_options=MagicMock(enabled=False),
+                status_callback=events.append,
+            )
+
+        assert pdf_data == b"mock_pdf"
+        assert did_error is False
+        assert [(event.phase, event.message) for event in events] == [
+            ("prepare", "serializing notebook for PDF rendering..."),
+            ("render", "rendering PDF via standard exporter..."),
+            ("complete", "done."),
+        ]
+
+    @pytest.mark.skipif(
+        not HAS_NBFORMAT or not DependencyManager.nbconvert.has(),
+        reason="nbformat and nbconvert are required to render ipynb",
+    )
+    def test_hide_code_cells_are_stripped_by_nbconvert(self) -> None:
+        """End-to-end check that `hide_code=True` cells are excluded from
+        rendered nbconvert output (LaTeX/HTML/Slides) via the `remove-input`
+        tag wired up in `Exporter`.
+
+        Regression test for marimo-team/marimo#9523.
+        """
+        import nbformat
+
+        from marimo._convert.ipynb.from_ir import convert_from_ir_to_ipynb
+        from marimo._server.export.exporter import (
+            _nbconvert_tag_remove_config,
+        )
+
+        app = App()
+
+        @app.cell(hide_code=True)
+        def _():
+            shouldnotappear = "hidden"
+            return (shouldnotappear,)
+
+        @app.cell()
+        def _():
+            shouldappear = "visible"
+            return (shouldappear,)
+
+        ipynb = convert_from_ir_to_ipynb(
+            InternalApp(app), sort_mode="top-down"
+        )
+        notebook = nbformat.reads(ipynb, as_version=4)
+        config = _nbconvert_tag_remove_config()
+
+        from nbconvert import HTMLExporter, LatexExporter, SlidesExporter
+
+        for exporter_cls in (LatexExporter, HTMLExporter, SlidesExporter):
+            rendered, _ = exporter_cls(config=config).from_notebook_node(
+                notebook
+            )
+            assert "shouldnotappear" not in rendered, (
+                f"{exporter_cls.__name__} did not strip the hidden cell source"
+            )
+            assert "shouldappear" in rendered, (
+                f"{exporter_cls.__name__} dropped the visible cell source"
+            )
+
+    @pytest.mark.asyncio
+    async def test_run_app_then_export_as_pdf_ignores_status_callback_failures(
+        self,
+        temp_marimo_file: str,
+    ) -> None:
+        def failing_status_callback(event: PDFExportStatusEvent) -> None:
+            raise RuntimeError(f"boom:{event.phase}")
+
+        def fake_export_as_pdf(
+            self: Exporter, *args: Any, **kwargs: Any
+        ) -> bytes:
+            del self, args, kwargs
+            return b"mock_pdf"
+
+        with (
+            patch(
+                "marimo._server.export.run_app_until_completion",
+                side_effect=AssertionError(
+                    "execution should not run without outputs"
+                ),
+            ),
+            patch(
+                "marimo._server.export._pdf_raster.collect_pdf_png_fallbacks",
+                side_effect=AssertionError(
+                    "rasterization should not run without outputs"
+                ),
+            ),
+            patch.object(
+                Exporter,
+                "export_as_pdf",
+                autospec=True,
+                side_effect=fake_export_as_pdf,
+            ),
+        ):
+            pdf_data, did_error = await run_app_then_export_as_pdf(
+                MarimoPath(temp_marimo_file),
+                include_outputs=False,
+                webpdf=False,
+                cli_args={},
+                argv=None,
+                export_as=None,
+                rasterization_options=MagicMock(enabled=False),
+                status_callback=failing_status_callback,
+            )
+
+        assert pdf_data == b"mock_pdf"
+        assert did_error is False
 
     @pytest.mark.skipif(
         not DependencyManager.nbformat.has()
@@ -1411,6 +1950,61 @@ class TestPDFExport:
             mock_webpdf_exporter.assert_called_once()
 
     @pytest.mark.skipif(
+        not DependencyManager.nbformat.has()
+        or not DependencyManager.nbconvert.has(),
+        reason="nbformat or nbconvert not installed",
+    )
+    def test_export_as_pdf_reports_status_during_fallback_to_webpdf(
+        self,
+        session_view: SessionView,
+    ) -> None:
+        app = App()
+
+        @app.cell()
+        def test_cell():
+            return "test"
+
+        file_manager = AppFileManager.from_app(InternalApp(app))
+        exporter = Exporter()
+        events: list[PDFExportStatusEvent] = []
+
+        mock_pdf_exporter_instance = MagicMock()
+        mock_pdf_exporter_instance.from_notebook_node.side_effect = OSError(
+            "xelatex not found"
+        )
+
+        mock_webpdf_exporter_instance = MagicMock()
+        mock_webpdf_exporter_instance.from_notebook_node.return_value = (
+            b"fallback_webpdf_data",
+            {},
+        )
+
+        with (
+            patch.object(DependencyManager, "require_many"),
+            patch("nbconvert.PDFExporter") as mock_pdf_exporter,
+            patch("nbconvert.WebPDFExporter") as mock_webpdf_exporter,
+        ):
+            mock_pdf_exporter.return_value = mock_pdf_exporter_instance
+            mock_webpdf_exporter.return_value = mock_webpdf_exporter_instance
+
+            result = exporter.export_as_pdf(
+                app=file_manager.app,
+                session_view=session_view,
+                webpdf=False,
+                status_callback=events.append,
+            )
+
+        assert result == b"fallback_webpdf_data"
+        assert [(event.phase, event.message) for event in events] == [
+            ("render", "rendering PDF via standard exporter..."),
+            (
+                "render_fallback",
+                "standard PDF export failed; falling back to WebPDF...",
+            ),
+            ("render", "rendering PDF via WebPDF..."),
+        ]
+
+    @pytest.mark.skipif(
         not DependencyManager.nbformat.has(),
         reason="nbformat not installed",
     )
@@ -1472,12 +2066,17 @@ class TestPDFExport:
                     DependencyManager.playwright, "has", return_value=True
                 ),
             ):
+                events: list[PDFExportStatusEvent] = []
                 result = await exporter.export_as_slides_pdf(
                     app=file_manager.app,
                     session_view=session_view,
+                    status_callback=events.append,
                 )
 
             assert result == b"mock_slides_pdf_data"
+            assert [(event.phase, event.message) for event in events] == [
+                ("render", "rendering slides PDF...")
+            ]
             mock_slides_exporter_cls.assert_called_once()
             mock_slides_exporter_instance.from_notebook_node.assert_called_once()
             notebook = (

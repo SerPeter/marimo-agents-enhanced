@@ -6,6 +6,7 @@ from __future__ import annotations
 import collections
 import datetime
 import decimal
+import enum
 import fractions
 import uuid
 from math import isnan
@@ -108,14 +109,15 @@ def enc_hook(obj: Any) -> Any:
         if isinstance(obj, pd.Index):
             return obj.to_list()
 
-        # Catch-all for other pandas objects
-        try:
-            if isinstance(obj, pd.core.base.PandasObject):  # type: ignore
+        # Catch-all for other pandas objects. Only some PandasObject
+        # subclasses (Series/DataFrame, handled above) define `to_json`, so
+        # guard the lookup instead of relying on AttributeError.
+        if isinstance(obj, pd.core.base.PandasObject):  # type: ignore[attr-defined]
+            to_json = getattr(obj, "to_json", None)
+            if callable(to_json):
                 import json
 
-                return json.loads(obj.to_json(date_format="iso"))
-        except AttributeError:
-            pass
+                return json.loads(to_json(date_format="iso"))
 
     # Handle shapely geometry objects from geopandas
     if DependencyManager.geopandas.imported():
@@ -170,6 +172,7 @@ def enc_hook(obj: Any) -> Any:
             if isinstance(obj, matplotlib.figure.Figure):
                 html = as_html(vstack([str(obj), obj]))
                 mimetype, data = html._mime_()
+                return {"mimetype": mimetype, "data": data}
 
             if isinstance(obj, Axes):
                 html = as_html(vstack([str(obj), obj]))
@@ -180,6 +183,12 @@ def enc_hook(obj: Any) -> Any:
                 "Error converting matplotlib figures to HTML",
                 exc_info=True,
             )
+
+    # Encode Enum members as their str form (e.g. "TestEnum.ONE"). Without
+    # this, plain Enum members reach the __dict__ fallback and leak internals
+    # (_value_, _name_, ...).
+    if isinstance(obj, enum.Enum):
+        return str(obj)
 
     # Handle objects with __slots__
     # Check on type(obj) to avoid triggering __getattr__ on objects that
@@ -209,10 +218,10 @@ def enc_hook(obj: Any) -> Any:
 
     # Handle collections types
     if isinstance(obj, (list, tuple, set, frozenset)):
-        return list([enc_hook(item) for item in obj])
+        return [enc_hook(item) for item in obj]
 
     if isinstance(obj, collections.deque):
-        return list([enc_hook(item) for item in obj])
+        return [enc_hook(item) for item in obj]
 
     # Handle dict and dict-like types
     if isinstance(

@@ -2,18 +2,24 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from marimo import _loggers
 from marimo._config.config import SqlOutputType
 from marimo._data.models import DataType
 from marimo._dependencies.dependencies import DependencyManager
+from marimo._runtime._wasm._duckdb import (
+    try_run_duckdb_sql_with_wasm_patch,
+)
 from marimo._runtime.context.types import (
     ContextNotInitializedError,
     get_context,
+    runtime_context_installed,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import duckdb
     import pandas as pd
     import polars as pl
@@ -21,14 +27,78 @@ if TYPE_CHECKING:
 
 LOGGER = _loggers.marimo_logger()
 
-CHEAP_DISCOVERY_DATABASES = ["duckdb", "sqlite", "mysql", "postgresql"]
+CHEAP_DISCOVERY_DATABASES = {
+    "duckdb",
+    "sqlite",
+    "mysql",
+    "mariadb",
+    "postgresql",
+}
+# DuckDB SQL can return None for DDL, so keep "patch did not apply" distinct.
+_NO_WASM_DUCKDB_RESULT = object()
+
+
+def is_cheap_dialect(dialect: str) -> bool:
+    """Whether schema/table discovery is cheap for the given SQL dialect.
+
+    Used as the default heuristic for resolving `"auto"` discovery flags: local
+    or lightweight dialects are cheap to introspect, whereas remote analytical
+    backends (e.g. Snowflake, BigQuery) can be slow and should not be scanned
+    eagerly.
+    """
+    return dialect.lower() in CHEAP_DISCOVERY_DATABASES
+
+
+def get_configured_sql_output_format() -> SqlOutputType:
+    """Read the configured SQL output format from the runtime context.
+
+    Returns "auto" when no runtime context is available (e.g. when `mo.sql(...)`
+    is called outside of a marimo app).
+    """
+    if not runtime_context_installed():
+        return "auto"
+    try:
+        return get_context().app_config.sql_output
+    except ContextNotInitializedError:
+        return "auto"
+
+
+def _try_wasm_duckdb(
+    method_name: str,
+    query: str,
+    connection: Any,
+    glbls: dict[str, Any],
+    *trailing_args: Any,
+) -> object:
+    import duckdb
+
+    if connection is duckdb:
+        original = getattr(duckdb, method_name)
+        args: tuple[Any, ...] = (query, *trailing_args)
+        query_arg_index = 0
+    else:
+        original = getattr(type(connection), method_name)
+        args = (connection, query, *trailing_args)
+        query_arg_index = 1
+
+    result = try_run_duckdb_sql_with_wasm_patch(
+        original,
+        args,
+        {},
+        query_arg_index=query_arg_index,
+        query_kwarg_names=("query",),
+        eval_globals=glbls,
+        eval_locals=glbls,
+    )
+    return _NO_WASM_DUCKDB_RESULT if result is None else result.value
 
 
 def wrapped_sql(
     query: str,
-    connection: Optional[duckdb.DuckDBPyConnection],
+    connection: duckdb.DuckDBPyConnection | None,
 ) -> duckdb.DuckDBPyRelation:
     DependencyManager.duckdb.require("to execute sql")
+    import duckdb
 
     # In Python globals() are scoped to modules; since this function
     # is in a different module than user code, globals() doesn't return
@@ -37,14 +107,17 @@ def wrapped_sql(
     # However, duckdb needs access to the kernel's globals. For this reason,
     # we manually exec duckdb and provide it with the kernel's globals.
     if connection is None:
-        import duckdb
-
         connection = cast(duckdb.DuckDBPyConnection, duckdb)
 
     try:
         ctx = get_context()
     except ContextNotInitializedError:
-        relation = connection.sql(query=query)
+        result = _try_wasm_duckdb("sql", query, connection, globals())
+        if result is _NO_WASM_DUCKDB_RESULT:
+            # No WASM rewrite was needed; use DuckDB's normal SQL path.
+            relation = connection.sql(query=query)
+        else:
+            relation = cast(duckdb.DuckDBPyRelation, result)
     else:
         install_connection = (
             ctx.execution_context.with_connection
@@ -52,11 +125,21 @@ def wrapped_sql(
             else nullcontext
         )
         with install_connection(connection):
-            relation = eval(
-                "connection.sql(query=query)",
+            result = _try_wasm_duckdb(
+                "sql",
+                query,
+                connection,
                 ctx.globals,
-                {"query": query, "connection": connection},
             )
+            if result is _NO_WASM_DUCKDB_RESULT:
+                # Run in kernel globals so DuckDB replacement scans see user data.
+                relation = eval(
+                    "connection.sql(query=query)",
+                    ctx.globals,
+                    {"query": query, "connection": connection},
+                )
+            else:
+                relation = cast(duckdb.DuckDBPyRelation, result)
 
     return relation
 
@@ -64,7 +147,7 @@ def wrapped_sql(
 def execute_duckdb_sql(
     query: str,
     params: list[Any],
-    connection: Optional[duckdb.DuckDBPyConnection] = None,
+    connection: duckdb.DuckDBPyConnection | None = None,
 ) -> duckdb.DuckDBPyConnection:
     """Execute a parameterized DuckDB query with kernel globals context.
 
@@ -72,16 +155,21 @@ def execute_duckdb_sql(
     parameterized queries ($1, $2, ...) for safe value interpolation.
     """
     DependencyManager.duckdb.require("to execute sql")
+    import duckdb
 
     if connection is None:
-        import duckdb
-
         connection = cast(duckdb.DuckDBPyConnection, duckdb)
 
     try:
         ctx = get_context()
     except ContextNotInitializedError:
-        return connection.execute(query, params)
+        result = _try_wasm_duckdb(
+            "execute", query, connection, globals(), params
+        )
+        if result is _NO_WASM_DUCKDB_RESULT:
+            # No WASM rewrite was needed; preserve DuckDB's parameterized path.
+            return connection.execute(query, params)
+        return cast(duckdb.DuckDBPyConnection, result)
     else:
         install_connection = (
             ctx.execution_context.with_connection
@@ -89,16 +177,27 @@ def execute_duckdb_sql(
             else nullcontext
         )
         with install_connection(connection):
-            result: duckdb.DuckDBPyConnection = eval(
-                "connection.execute(query, params)",
+            result = _try_wasm_duckdb(
+                "execute",
+                query,
+                connection,
                 ctx.globals,
-                {
-                    "query": query,
-                    "params": params,
-                    "connection": connection,
-                },
+                params,
             )
-            return result
+            if result is _NO_WASM_DUCKDB_RESULT:
+                # Run in kernel globals so parameterized SQL can scan user data.
+                value = eval(
+                    "connection.execute(query, params)",
+                    ctx.globals,
+                    {
+                        "query": query,
+                        "params": params,
+                        "connection": connection,
+                    },
+                )
+            else:
+                value = result
+            return cast(duckdb.DuckDBPyConnection, value)
 
 
 def try_convert_to_polars(
@@ -106,7 +205,7 @@ def try_convert_to_polars(
     query: str,
     connection: ConnectionOrCursor,
     lazy: bool,
-) -> tuple[Optional[pl.DataFrame | pl.LazyFrame], Optional[Exception]]:
+) -> tuple[pl.DataFrame | pl.LazyFrame | None, Exception | None]:
     """Try to convert the query to a polars dataframe.
 
     Returns:
@@ -128,10 +227,10 @@ def try_convert_to_polars(
 def convert_to_output(
     *,
     sql_output_format: SqlOutputType,
-    to_polars: Callable[[], Union[pl.DataFrame, pl.Series]],
+    to_polars: Callable[[], pl.DataFrame | pl.Series],
     to_pandas: Callable[[], pd.DataFrame],
-    to_native: Optional[Callable[[], Any]] = None,
-    to_lazy_polars: Optional[Callable[[], pl.LazyFrame]] = None,
+    to_native: Callable[[], Any] | None = None,
+    to_lazy_polars: Callable[[], pl.LazyFrame] | None = None,
 ) -> Any:
     """Convert a result to the specified output format.
 
@@ -254,7 +353,7 @@ def is_query_empty(query: str) -> bool:
         return True
 
     # If the query starts with -- or /*, it's likely just comments
-    if stripped.startswith("--") or stripped.startswith("/*"):
+    if stripped.startswith(("--", "/*")):
         import re
 
         # Remove /* */ comments

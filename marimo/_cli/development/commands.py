@@ -32,11 +32,11 @@ def _enrich_branded_types(
     branded types.
 
     msgspec.json.schema_components() strips NewType wrappers, emitting plain
-    ``{type: string}`` for fields like ``CellId_t``. This function:
+    `{type: string}` for fields like `CellId_t`. This function:
 
-    1. Adds named schemas for each branded type (e.g. ``CellId: {type: string}``).
+    1. Adds named schemas for each branded type (e.g. `CellId: {type: string}`).
     2. Walks every model struct's type hints and replaces inline schemas with
-       ``$ref`` pointers wherever a field's annotation is (or contains) a
+       `$ref` pointers wherever a field's annotation is (or contains) a
        registered NewType.
     """
     import types as _types
@@ -77,7 +77,7 @@ def _enrich_branded_types(
         return origin is Union or origin is getattr(_types, "UnionType", None)
 
     def resolve(ty: Any) -> dict[str, Any] | None:
-        """Produce a branded schema for *ty*, or ``None``."""
+        """Produce a branded schema for *ty*, or `None`."""
         if ty in branded:
             return make_ref(branded[ty][0])
 
@@ -220,30 +220,32 @@ def _generate_server_api_schema() -> dict[str, Any]:
     import msgspec.json
     from starlette.schemas import SchemaGenerator
 
-    import marimo._config.config as config
     import marimo._data._external_storage.models as storage
     import marimo._data.models as data
-    import marimo._messaging.errors as errors
     import marimo._messaging.notification as notifications
-    import marimo._metadata.opengraph as opengraph
-    import marimo._runtime.commands as commands
     import marimo._secrets.models as secrets_models
-    import marimo._server.models.completion as completion
-    import marimo._server.models.export as export
-    import marimo._server.models.files as files
-    import marimo._server.models.home as home
-    import marimo._server.models.lsp as lsp
-    import marimo._server.models.models as models
-    import marimo._server.models.packages as packages
-    import marimo._server.models.secrets as secrets
-    import marimo._snippets.snippets as snippets
     from marimo._ai._types import ChatMessage
     from marimo._ast.cell import CellConfig, RuntimeStateType
+    from marimo._config import config
+    from marimo._messaging import errors
     from marimo._messaging.cell_output import CellChannel, CellOutput
     from marimo._messaging.mimetypes import KnownMimeType
+    from marimo._metadata import opengraph
+    from marimo._runtime import commands
     from marimo._runtime.packages.package_manager import PackageDescription
     from marimo._server.ai.tools.types import ToolDefinition
     from marimo._server.api.router import build_routes
+    from marimo._server.models import (
+        completion,
+        export,
+        files,
+        home,
+        lsp,
+        models,
+        packages,
+        secrets,
+    )
+    from marimo._snippets import snippets
 
     MODELS = [
         # Base
@@ -326,6 +328,7 @@ def _generate_server_api_schema() -> dict[str, Any]:
         notifications.QueryParamsDeleteNotification,
         notifications.QueryParamsClearNotification,
         notifications.FocusCellNotification,
+        notifications.ConsumerCapabilitiesNotification,
         notifications.NotificationMessage,
         # ai
         ChatMessage,
@@ -353,6 +356,7 @@ def _generate_server_api_schema() -> dict[str, Any]:
         export.ExportAsIPYNBRequest,
         export.ExportAsPDFRequest,
         export.UpdateCellOutputsRequest,
+        files.FileCreateMultipartRequest,
         files.FileCreateRequest,
         files.FileCreateResponse,
         files.FileDeleteRequest,
@@ -365,6 +369,8 @@ def _generate_server_api_schema() -> dict[str, Any]:
         files.FileSearchResponse,
         files.FileMoveRequest,
         files.FileMoveResponse,
+        files.FileCopyRequest,
+        files.FileCopyResponse,
         files.FileOpenRequest,
         files.FileUpdateRequest,
         files.FileUpdateResponse,
@@ -426,6 +432,7 @@ def _generate_server_api_schema() -> dict[str, Any]:
         models.InvokeAiToolRequest,
         models.InvokeAiToolResponse,
         models.InvokeFunctionRequest,
+        models.KernelStatusResponse,
         models.ListDataSourceConnectionRequest,
         models.ListSecretKeysRequest,
         models.ListSQLTablesRequest,
@@ -636,9 +643,8 @@ def inline_packages(name: Path) -> None:
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     imported_modules.add(alias.name.split(".")[0])
-            elif isinstance(node, ast.ImportFrom):
-                if node.module:
-                    imported_modules.add(node.module.split(".")[0])
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported_modules.add(node.module.split(".")[0])
 
         pypi_names = [
             package_names.get(mod, mod.replace("_", "-"))
@@ -755,20 +761,16 @@ def preview(file_path: Path, port: int, host: str, headless: bool) -> None:
         # Run the notebook to get actual outputs
         click.echo(f"Running notebook {file_path.name}...")
         from marimo._server.export import run_app_until_completion
-        from marimo._server.file_router import AppFileRouter
         from marimo._server.utils import asyncio_run
+        from marimo._session.notebook import load_notebook
         from marimo._session.state.serialize import (
             serialize_notebook,
             serialize_session_view,
         )
         from marimo._utils.code import hash_code
-        from marimo._utils.marimo_path import MarimoPath
 
         # Create file manager for the notebook
-        file_router = AppFileRouter.from_filename(MarimoPath(file_path))
-        file_key = file_router.get_unique_file_key()
-        assert file_key is not None
-        file_manager = file_router.get_file_manager(file_key)
+        file_manager = load_notebook(file_path)
 
         # Run the notebook to completion and get session view
         session_view, did_error = asyncio_run(
@@ -787,6 +789,7 @@ def preview(file_path: Path, port: int, host: str, headless: bool) -> None:
         session_snapshot = serialize_session_view(
             session_view,
             cell_ids=list(file_manager.app.cell_manager.cell_ids()),
+            drop_virtual_file_outputs=False,
         )
 
         # Get notebook snapshot from file manager

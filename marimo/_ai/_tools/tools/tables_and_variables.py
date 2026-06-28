@@ -37,8 +37,8 @@ class DataTableMetadata:
     """
 
     source: str
-    num_rows: Optional[int]
-    num_columns: Optional[int]
+    num_rows: int | None
+    num_columns: int | None
     columns: list[DataTableColumn]
     engine: Optional[str]
     primary_keys: Optional[list[str]]

@@ -3,12 +3,14 @@
 
 import type { RowSelectionState, Table } from "@tanstack/react-table";
 import { useLocale } from "react-aria";
+import { isStaticNotebook } from "@/core/static/static-state";
 import type { GetRowIds } from "@/plugins/impl/DataTablePlugin";
 import { cn } from "@/utils/cn";
 import { Events } from "@/utils/events";
 import { prettyNumber } from "@/utils/numbers";
 import { Button } from "../ui/button";
 import { toast } from "../ui/use-toast";
+import { getColumnCountForDisplay } from "./hooks/use-column-visibility";
 import { DataTablePagination, prettifyRowColumnCount } from "./pagination";
 import { CellSelectionStats } from "./range-focus/cell-selection-stats";
 import type { DataTableSelection } from "./types";
@@ -39,6 +41,8 @@ export const TableBottomBar = <TData,>({
   className,
 }: TableBottomBarProps<TData>) => {
   const { locale } = useLocale();
+  // Pagination fetches each page via a kernel RPC, absent in static exports.
+  const isStatic = isStaticNotebook();
   const handleSelectAllRows = (value: boolean) => {
     if (!onRowSelectionChange) {
       return;
@@ -140,9 +144,19 @@ export const TableBottomBar = <TData,>({
       );
     }
 
+    const { totalColumns: effectiveTotalColumns, hiddenColumns } =
+      getColumnCountForDisplay(table, totalColumns);
+    const { rowsAndColumns, hiddenSuffix } = prettifyRowColumnCount({
+      numRows: table.getRowCount(),
+      totalColumns: effectiveTotalColumns,
+      hiddenColumns,
+      locale,
+    });
+
     return (
-      <span>
-        {prettifyRowColumnCount(table.getRowCount(), totalColumns, locale)}
+      <span className="flex items-center gap-1">
+        <span>{rowsAndColumns}</span>
+        {hiddenSuffix && <span className="text-xs">{hiddenSuffix}</span>}
       </span>
     );
   };
@@ -160,7 +174,7 @@ export const TableBottomBar = <TData,>({
         <CellSelectionStats table={table} className="lg:hidden" />
       </div>
       <div className="ml-auto lg:ml-0 lg:justify-self-center flex items-center shrink-0">
-        {pagination && (
+        {pagination && !isStatic && (
           <DataTablePagination
             table={table}
             tableLoading={tableLoading}

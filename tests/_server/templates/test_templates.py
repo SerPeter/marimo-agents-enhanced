@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Literal
+from unittest.mock import patch
 
 from marimo._ast.app_config import _AppConfig
 from marimo._config.config import (
@@ -120,6 +121,24 @@ class TestNotebookPageTemplate(unittest.TestCase):
         assert '"cwd": ""' in result
         _assert_no_leftover_replacements(result)
 
+    def test_notebook_page_template_with_lsp_workspace(self) -> None:
+        root_uri = "file:///home/marimo/project"
+        document_uri = "file:///home/marimo/project/notebooks/notebook.py"
+        result = templates.notebook_page_template(
+            html=self.html,
+            base_url=self.base_url,
+            user_config=self.user_config,
+            config_overrides=self.config_overrides,
+            server_token=self.server_token,
+            app_config=self.app_config,
+            filename=None,
+            lsp_workspace={"rootUri": root_uri, "documentUri": document_uri},
+            mode=self.mode,
+        )
+        assert f'"rootUri": "{root_uri}"' in result
+        assert f'"documentUri": "{document_uri}"' in result
+        _assert_no_leftover_replacements(result)
+
     def test_notebook_page_template_edit_mode(self) -> None:
         result = templates.notebook_page_template(
             html=self.html,
@@ -157,6 +176,45 @@ class TestNotebookPageTemplate(unittest.TestCase):
         )
 
         assert css in result
+        _assert_no_leftover_replacements(result)
+
+    def test_notebook_page_template_custom_css_escapes_style_breakout(
+        self,
+    ) -> None:
+        # Regression: a notebook-controlled css_file must not be able to
+        # break out of the <style> block and inject script/html. See the
+        # pre-execution XSS originally reported against marimo 0.23.0.
+        payload = "</style><script>window.__xss__ = 1;</script><style>"
+        css_file = self.filename.parent / "custom.css"
+        css_file.write_text(payload)
+
+        result = templates.notebook_page_template(
+            html=self.html,
+            base_url=self.base_url,
+            user_config=self.user_config,
+            config_overrides=self.config_overrides,
+            server_token=self.server_token,
+            app_config=_AppConfig(css_file="custom.css"),
+            filename=str(self.filename),
+            mode=SessionMode.EDIT,
+        )
+
+        # The escaped form must be present — proving the sanitizer ran
+        # rather than the attacker's payload having been silently dropped.
+        assert "<\\/style>" in result
+        # And the raw breakout sequence from the payload must not survive.
+        # The only literal "</style" the HTML parser should see inside our
+        # injected block is the legitimate closer emitted by
+        # _custom_css_block itself.
+        marker = "<style title='marimo-custom'>"
+        assert marker in result
+        body_after_marker = result.split(marker, 1)[1]
+        # Up to the first real closer, the content is our sanitized CSS;
+        # the attacker's payload should be present only in escaped form
+        # (so the browser stays in <style> raw-text mode the whole time).
+        injected = body_after_marker.split("</style>", 1)[0]
+        assert "<\\/style>" in injected
+        assert "</style" not in injected  # case-sensitive: no raw end-tag
         _assert_no_leftover_replacements(result)
 
     def test_notebook_page_template_custom_css_workspace_relative(
@@ -420,6 +478,91 @@ class TestNotebookPageTemplate(unittest.TestCase):
         assert 'crossorigin="anonymous"' in result
         _assert_no_leftover_replacements(result)
 
+    def test_edit_mode_allows_css_file_injection(self) -> None:
+        """In edit mode, css_file is still injected (CSS-only, no scripts)."""
+        css = "/* custom styling */"
+        css_file = self.filename.parent / "style.css"
+        css_file.write_text(css)
+
+        result = templates.notebook_page_template(
+            html=self.html,
+            base_url=self.base_url,
+            user_config=self.user_config,
+            config_overrides=self.config_overrides,
+            server_token=self.server_token,
+            app_config=_AppConfig(css_file="style.css"),
+            filename=str(self.filename),
+            mode=SessionMode.EDIT,
+        )
+
+        head_section = result.split("</head>", 1)[0]
+        assert css in head_section
+        _assert_no_leftover_replacements(result)
+
+    def test_edit_mode_blocks_html_head_file_injection(self) -> None:
+        """In edit mode, html_head_file content must not appear in <head>."""
+        head = '<script src="https://evil.example.com/keylogger.js"></script>'
+        head_file = self.filename.parent / "head.html"
+        head_file.write_text(head)
+
+        result = templates.notebook_page_template(
+            html=self.html,
+            base_url=self.base_url,
+            user_config=self.user_config,
+            config_overrides=self.config_overrides,
+            server_token=self.server_token,
+            app_config=_AppConfig(html_head_file="head.html"),
+            filename=str(self.filename),
+            mode=SessionMode.EDIT,
+        )
+
+        head_section = result.split("</head>", 1)[0]
+        assert head not in head_section
+        _assert_no_leftover_replacements(result)
+
+    def test_run_mode_injects_html_head_file(self) -> None:
+        """In run mode, html_head_file must be injected into <head>."""
+        head = (
+            '<script src="https://analytics.example.com/tracker.js"></script>'
+        )
+        head_file = self.filename.parent / "head.html"
+        head_file.write_text(head)
+
+        result = templates.notebook_page_template(
+            html=self.html,
+            base_url=self.base_url,
+            user_config=self.user_config,
+            config_overrides=self.config_overrides,
+            server_token=self.server_token,
+            app_config=_AppConfig(html_head_file="head.html"),
+            filename=str(self.filename),
+            mode=SessionMode.RUN,
+        )
+
+        head_section = result.split("</head>", 1)[0]
+        assert head in head_section
+        _assert_no_leftover_replacements(result)
+
+    def test_global_html_head_not_blocked_in_edit_mode(self) -> None:
+        """The operator-level html_head param is not blocked in edit mode."""
+        global_head = '<meta name="robots" content="noindex">'
+
+        result = templates.notebook_page_template(
+            html=self.html,
+            base_url=self.base_url,
+            user_config=self.user_config,
+            config_overrides=self.config_overrides,
+            server_token=self.server_token,
+            app_config=self.app_config,
+            filename=str(self.filename),
+            mode=SessionMode.EDIT,
+            html_head=global_head,
+        )
+
+        head_section = result.split("</head>", 1)[0]
+        assert global_head in head_section
+        _assert_no_leftover_replacements(result)
+
 
 class TestHomePageTemplate(unittest.TestCase):
     def setUp(self) -> None:
@@ -588,6 +731,8 @@ class TestStaticNotebookTemplate(unittest.TestCase):
             self.files,
         )
 
+        assert "__MARIMO_EXPORT_CONTEXT__" in result
+        assert '<marimo-code hidden="">' in result
         snapshot("export1.txt", normalize_index_html(result))
         _assert_no_leftover_replacements(result)
 
@@ -606,6 +751,8 @@ class TestStaticNotebookTemplate(unittest.TestCase):
             files=self.files,
         )
 
+        assert "__MARIMO_EXPORT_CONTEXT__" in result
+        assert '<marimo-code hidden="">' in result
         snapshot("export2.txt", normalize_index_html(result))
         _assert_no_leftover_replacements(result)
 
@@ -636,6 +783,8 @@ class TestStaticNotebookTemplate(unittest.TestCase):
             {},
         )
 
+        assert "__MARIMO_EXPORT_CONTEXT__" in result
+        assert '<marimo-code hidden="">' in result
         snapshot("export3.txt", normalize_index_html(result))
         _assert_no_leftover_replacements(result)
 
@@ -672,6 +821,8 @@ class TestStaticNotebookTemplate(unittest.TestCase):
             {},
         )
 
+        assert "__MARIMO_EXPORT_CONTEXT__" in result
+        assert '<marimo-code hidden="">' in result
         snapshot("export4.txt", normalize_index_html(result))
         _assert_no_leftover_replacements(result)
 
@@ -718,6 +869,8 @@ class TestStaticNotebookTemplate(unittest.TestCase):
             {},
         )
 
+        assert "__MARIMO_EXPORT_CONTEXT__" in result
+        assert '<marimo-code hidden="">' in result
         snapshot("export5.txt", normalize_index_html(result))
         _assert_no_leftover_replacements(result)
 
@@ -764,6 +917,8 @@ class TestStaticNotebookTemplate(unittest.TestCase):
         assert css1 in result
         assert css2 in result
         assert "<style title='marimo-custom'>" in result
+        assert "__MARIMO_EXPORT_CONTEXT__" in result
+        assert '<marimo-code hidden="">' in result
         snapshot("export6.txt", normalize_index_html(result))
         _assert_no_leftover_replacements(result)
 
@@ -961,6 +1116,56 @@ mo.md("<img src=x onerror=alert(1)>")
 
         _assert_no_leftover_replacements(result)
 
+    def test_static_notebook_template_dev_version_in_asset_url(self) -> None:
+        # jsdelivr treats `.dev` as a separate path segment, so dev versions
+        # like "0.16.5.dev6+gabc" must be normalized to "0.16.5-dev6+gabc"
+        # for the CDN URL to resolve.
+        with patch.object(templates, "__version__", "0.16.5.dev6+gabc"):
+            result = templates.static_notebook_template(
+                self.html,
+                self.user_config,
+                self.config_overrides,
+                self.server_token,
+                self.app_config,
+                self.filepath,
+                self.code,
+                hash_code(self.code),
+                self.session_snapshot,
+                self.notebook_snapshot,
+                self.files,
+            )
+
+        assert (
+            "https://cdn.jsdelivr.net/npm/@marimo-team/frontend@0.16.5-dev6+gabc/dist"
+            in result
+        )
+        assert "@0.16.5.dev6" not in result
+        _assert_no_leftover_replacements(result)
+
+    def test_static_notebook_template_release_version_in_asset_url(
+        self,
+    ) -> None:
+        with patch.object(templates, "__version__", "0.16.5"):
+            result = templates.static_notebook_template(
+                self.html,
+                self.user_config,
+                self.config_overrides,
+                self.server_token,
+                self.app_config,
+                self.filepath,
+                self.code,
+                hash_code(self.code),
+                self.session_snapshot,
+                self.notebook_snapshot,
+                self.files,
+            )
+
+        assert (
+            "https://cdn.jsdelivr.net/npm/@marimo-team/frontend@0.16.5/dist"
+            in result
+        )
+        _assert_no_leftover_replacements(result)
+
 
 class TestWasmNotebookTemplate(unittest.TestCase):
     def setUp(self) -> None:
@@ -998,6 +1203,7 @@ class TestWasmNotebookTemplate(unittest.TestCase):
         assert self.mode in result
         assert json.dumps(self.user_config, sort_keys=True) in result
         assert '<marimo-wasm hidden="">' in result
+        assert "__MARIMO_EXPORT_CONTEXT__" in result
         assert '<marimo-code hidden="">' in result
         assert '"showAppCode": false' in result
         assert "<title>notebook</title>" in result
@@ -1026,6 +1232,7 @@ class TestWasmNotebookTemplate(unittest.TestCase):
         assert css in result
         assert '<marimo-wasm hidden="">' in result
         assert "https://my.cdn.com/assets/" in result
+        assert "__MARIMO_EXPORT_CONTEXT__" in result
         assert '<marimo-code hidden="">' in result
         assert '"showAppCode": true' in result
         _assert_no_leftover_replacements(result)
@@ -1063,6 +1270,7 @@ class TestWasmNotebookTemplate(unittest.TestCase):
 
         assert head in result
         assert '<marimo-wasm hidden="">' in result
+        assert "__MARIMO_EXPORT_CONTEXT__" in result
         assert '<marimo-code hidden="">' in result
         assert '"showAppCode": false' in result
         assert "#save-button" in result

@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import threading
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, cast
+from urllib.parse import urlparse
 
 import uvicorn
 
@@ -17,13 +17,10 @@ from marimo._config.settings import GLOBAL_SETTINGS
 from marimo._mcp.setup import McpType, setup_mcp_server
 from marimo._messaging.notification import StartupLogsNotification
 from marimo._runtime.commands import SerializedCLIArgs
+from marimo._runtime.parent_poller import start_parent_poller
 from marimo._server.api import lifespans
 from marimo._server.config import (
     StarletteServerStateInit,
-)
-from marimo._server.file_router import (
-    AppFileRouter,
-    LazyListOfFilesAppFileRouter,
 )
 from marimo._server.lsp import CompositeLspServer, NoopLspServer
 from marimo._server.main import create_starlette_app
@@ -35,6 +32,10 @@ from marimo._server.utils import (
     initialize_fd_limit,
 )
 from marimo._server.uvicorn_utils import initialize_signals
+from marimo._server.workspace import (
+    DirectoryWorkspace,
+    NotebookWorkspace,
+)
 from marimo._session.model import SessionMode
 from marimo._tracer import LOGGER
 from marimo._utils.lifespans import Lifespans
@@ -44,7 +45,6 @@ if TYPE_CHECKING:
     from marimo._cli.tips import CliTip
 
 DEFAULT_PORT = 2718
-PROXY_REGEX = re.compile(r"^(.*):(\d+)$")
 
 
 def _execute_startup_command(
@@ -67,9 +67,8 @@ def _execute_startup_command(
                         content="", status="start"
                     )
                 session.notify(content, from_consumer_id=None)
-            else:
-                buffer.content += content.content
-                buffer.status = content.status
+            buffer.content += content.content
+            buffer.status = content.status
 
         try:
             # Broadcast start message to all sessions
@@ -111,7 +110,7 @@ def _execute_startup_command(
 
         except Exception as e:
             # Broadcast error message
-            error_message = f"\nError executing startup command: {str(e)}\n"
+            error_message = f"\nError executing startup command: {e!s}\n"
             write_to_all_sessions(
                 StartupLogsNotification(content=error_message, status="done"),
                 buffer,
@@ -123,9 +122,7 @@ def _execute_startup_command(
     thread.start()
 
 
-def _resolve_proxy(
-    port: int, host: str, proxy: Optional[str]
-) -> tuple[int, str]:
+def _resolve_proxy(port: int, host: str, proxy: str | None) -> tuple[int, str]:
     """Provided that there is a proxy, utilize the host and port of the proxy.
 
     -----------------         Communication has to be consistent
@@ -143,57 +140,99 @@ def _resolve_proxy(
        (uvicorn)  -----------------
 
 
-    If the proxy is provided, it will default to port 80. Otherwise if the
-    proxy has a port specified, it will use that port.
-    e.g. `example.com:8080`
+    If the proxy is provided, it will default to port 80 (443 for https://).
+    Supports bare hostnames, host:port, and full URLs with a scheme.
+    e.g. `example.com:8080`, `https://example.com`, `https://example.com:8443`
     """
     if not proxy:
         return port, host
 
-    match = PROXY_REGEX.match(proxy)
-    # Our proxy has an explicit port defined, so return that.
-    if match:
-        external_host, external_port = match.groups()
-        return int(external_port), external_host
+    # Prefix with "//" so urlparse treats the value as a netloc rather than a
+    # path when no scheme is present — handles "host", "host:port", and full
+    # "scheme://host:port" forms uniformly.
+    parse_target = proxy if "://" in proxy else f"//{proxy}"
 
-    # A default to 80 is reasonable if a proxy is provided.
-    return 80, proxy
+    try:
+        parsed = urlparse(parse_target)
+
+        # parsed.hostname strips brackets from IPv6 addresses
+        # (e.g. [::1] → ::1)
+        external_host = parsed.hostname
+        parsed_port = parsed.port
+    except ValueError:
+        LOGGER.warning(
+            "Ignoring invalid proxy value %r; falling back to host=%r, port=%r",
+            proxy,
+            host,
+            port,
+        )
+        return port, host
+
+    # Bare-port inputs like ":8080" leave parsed.hostname empty (urlparse
+    # sees an empty netloc with an explicit port); fall back to the
+    # original `host` arg rather than using the literal proxy string —
+    # which otherwise becomes the nonsense public hostname ":8080".
+    if not external_host:
+        external_host = host
+
+    if parsed_port is not None:
+        external_port = parsed_port
+    elif parsed.scheme == "https":
+        external_port = 443
+    else:
+        external_port = 80
+
+    return external_port, external_host
 
 
 def start(
     *,
-    file_router: AppFileRouter,
+    workspace: NotebookWorkspace,
     mode: SessionMode,
     development_mode: bool,
     quiet: bool,
     include_code: bool,
-    ttl_seconds: Optional[int],
+    ttl_seconds: int | None,
     headless: bool,
-    port: Optional[int],
+    port: int | None,
     host: str,
-    proxy: Optional[str],
+    proxy: str | None,
     watch: bool,
     cli_args: SerializedCLIArgs,
     argv: list[str],
     base_url: str = "",
-    allow_origins: Optional[tuple[str, ...]] = None,
-    auth_token: Optional[AuthToken],
+    allow_origins: tuple[str, ...] | None = None,
+    auth_token: AuthToken | None,
     redirect_console_to_browser: bool,
     skew_protection: bool,
-    remote_url: Optional[str] = None,
+    remote_url: str | None = None,
     mcp: McpType | None = None,
     mcp_allow_remote: bool = False,
-    server_startup_command: Optional[str] = None,
-    asset_url: Optional[str] = None,
-    timeout: Optional[float] = None,
+    server_startup_command: str | None = None,
+    asset_url: str | None = None,
+    timeout: float | None = None,
     sandbox_mode: SandboxMode | None = None,
     startup_tip: CliTip | None = None,
-    show_tracebacks: Optional[bool] = None,
+    show_tracebacks: bool | None = None,
 ) -> None:
     """
     Start the server.
     """
     import packaging.version
+
+    # In single-file sandbox mode, uv becomes our direct parent. So we
+    # watch the outer CLI's PID, terminating if the CLI terminates.
+    ancestor_pid_env = os.environ.get("MARIMO_ANCESTOR_PID")
+    if ancestor_pid_env:
+        try:
+            start_parent_poller(
+                parent_pid=os.getppid(),
+                ancestor_pid=int(ancestor_pid_env),
+            )
+        except ValueError:
+            LOGGER.warning(
+                "Ignoring invalid MARIMO_ANCESTOR_PID=%r", ancestor_pid_env
+            )
 
     # Defaults when mcp is enabled
     if mcp:
@@ -210,17 +249,17 @@ def start(
     port = port or find_free_port(DEFAULT_PORT, addr=host)
 
     # This is the path that will be used to read the project configuration
-    start_path: Optional[str] = None
-    if (single_file := file_router.maybe_get_single_file()) is not None:
+    start_path: str | None = None
+    if (single_file := workspace.single_file()) is not None:
         start_path = single_file.path
-    elif (directory := file_router.directory) is not None:
+    elif (directory := workspace.directory) is not None:
         start_path = directory
     else:
         start_path = os.getcwd()
 
     config_reader = get_default_config_manager(current_path=start_path)
 
-    lsp_composite_server: Optional[CompositeLspServer] = None
+    lsp_composite_server: CompositeLspServer | None = None
     if mode == SessionMode.EDIT:
         lsp_composite_server = CompositeLspServer(
             config_reader=config_reader,
@@ -233,7 +272,7 @@ def start(
     if (
         mode == SessionMode.RUN
         and watch
-        and isinstance(file_router, LazyListOfFilesAppFileRouter)
+        and isinstance(workspace, DirectoryWorkspace)
     ):
         LOGGER.warning(
             "Using `marimo run <folder> --watch`: gallery files are "
@@ -254,7 +293,7 @@ def start(
             }
         )
 
-    is_multi = file_router.get_unique_file_key() is None
+    is_multi = workspace.get_unique_file_key() is None
     isolate_apps = is_multi and config_reader.experimental.get(
         "isolate_apps", False
     )
@@ -269,7 +308,7 @@ def start(
         )
 
     session_manager = SessionManager(
-        file_router=file_router,
+        workspace=workspace,
         mode=mode,
         quiet=quiet,
         include_code=include_code,
@@ -296,6 +335,7 @@ def start(
         lifespans.open_browser,
         lifespans.tool_manager,
         lifespans.server_registry,
+        lifespans.reap_subprocesses,
         *LIFESPAN_REGISTRY.get_all(),
     ]
 

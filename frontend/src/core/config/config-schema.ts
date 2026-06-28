@@ -45,7 +45,12 @@ export const DEFAULT_AI_MODEL = "openai/gpt-4o";
 const AUTO_DOWNLOAD_FORMATS = ["html", "markdown", "ipynb"] as const;
 
 export type CopilotMode = NonNullable<schemas["AiConfig"]["mode"]>;
-export const COPILOT_MODES: CopilotMode[] = ["manual", "ask", "agent"];
+export const COPILOT_MODES: CopilotMode[] = [
+  "manual",
+  "ask",
+  "agent",
+  "code_mode",
+];
 
 const AiConfigSchema = z
   .object({
@@ -75,6 +80,7 @@ export const UserConfigSchema = z
       .object({
         activate_on_typing: z.boolean().prefault(true),
         signature_hint_on_typing: z.boolean().prefault(false),
+        auto_close_pairs: z.boolean().prefault(true),
         copilot: z
           .union([z.boolean(), z.enum(["github", "codeium", "custom"])])
           .prefault(false)
@@ -157,7 +163,9 @@ export const UserConfigSchema = z
       .prefault({}),
     ai: z
       .looseObject({
+        enabled: z.boolean().prefault(true),
         rules: z.string().prefault(""),
+        max_tokens: z.number().int().positive().nullable().optional(),
         mode: z.enum(COPILOT_MODES).prefault("manual"),
         inline_tooltip: z.boolean().prefault(false),
         open_ai: AiConfigSchema.optional(),
@@ -166,6 +174,7 @@ export const UserConfigSchema = z
         ollama: AiConfigSchema.optional(),
         openrouter: AiConfigSchema.optional(),
         wandb: AiConfigSchema.optional(),
+        opencode_go: AiConfigSchema.optional(),
         open_ai_compatible: AiConfigSchema.optional(),
         azure: AiConfigSchema.optional(),
         bedrock: z
@@ -206,6 +215,7 @@ export const UserConfigSchema = z
       .looseObject({
         html: z.boolean().optional(),
         wasm: z.boolean().optional(),
+        molab: z.boolean().optional(),
       })
       .optional(),
     mcp: z

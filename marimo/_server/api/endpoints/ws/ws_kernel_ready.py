@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from marimo import _loggers
 from marimo._ast.cell import CellConfig
 from marimo._dependencies.dependencies import DependencyManager
 from marimo._messaging.notebook.document import NotebookDocument
 from marimo._messaging.notification import (
+    ConsumerCapabilities,
     KernelCapabilitiesNotification,
     KernelReadyNotification,
 )
@@ -18,14 +19,17 @@ from marimo._session.model import SessionMode
 from marimo._types.ids import CellId_t
 
 if TYPE_CHECKING:
-    from marimo._server.file_router import MarimoFileKey
     from marimo._server.rtc.doc import LoroDocManager
     from marimo._server.session_manager import SessionManager
+    from marimo._server.workspace import MarimoFileKey
     from marimo._session import Session
 
 LOGGER = _loggers.marimo_logger()
 
 LORO_ALLOWED = sys.version_info >= (3, 11)
+
+# Strong refs so fire-and-forget tasks aren't GC'd mid-flight.
+_background_tasks: set[asyncio.Task[Any]] = set()
 
 
 def build_kernel_ready(
@@ -82,6 +86,9 @@ def build_kernel_ready(
         last_execution_time=last_execution_time,
         app_config=session.app_file_manager.app.config,
         kiosk=kiosk,
+        consumer_capabilities=ConsumerCapabilities(
+            edit=not kiosk, interact=not kiosk
+        ),
         capabilities=KernelCapabilitiesNotification(),
         auto_instantiated=auto_instantiated,
     )
@@ -120,7 +127,8 @@ def _extract_cell_data(
                         cell.id,
                     )
                     for cell in document.cells
-                )
+                ),
+                strict=False,
             )
         )
         return codes, names, configs, cell_ids
@@ -131,7 +139,8 @@ def _extract_cell_data(
                 *tuple(
                     ("", cell.name, cell.config, cell.id)
                     for cell in document.cells
-                )
+                ),
+                strict=False,
             )
         )
         return codes, names, configs, cell_ids
@@ -182,4 +191,8 @@ def _try_init_rtc_doc(
             "RTC: Loro is not installed, disabling real-time collaboration"
         )
     else:
-        asyncio.create_task(doc_manager.create_doc(file_key, cell_ids, codes))
+        task = asyncio.create_task(
+            doc_manager.create_doc(file_key, cell_ids, codes)
+        )
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)

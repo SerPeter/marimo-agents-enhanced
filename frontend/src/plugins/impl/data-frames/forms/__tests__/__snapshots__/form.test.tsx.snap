@@ -26,14 +26,15 @@ exports[`renderZodSchema > should render a form aggregate 1`] = `
           aria-describedby="_r_26_-form-item-description"
           aria-invalid="false"
           class="relative"
-          id="_r_26_-form-item"
         >
-          <div
+          <button
             aria-controls="radix-_r_27_"
+            aria-disabled="false"
             aria-expanded="false"
             aria-haspopup="dialog"
-            class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid disabled:cursor-not-allowed disabled:opacity-50 min-w-[180px]"
+            class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid min-w-[180px]"
             data-state="closed"
+            id="_r_26_-form-item"
             type="button"
           >
             <span
@@ -58,7 +59,7 @@ exports[`renderZodSchema > should render a form aggregate 1`] = `
                 d="m6 9 6 6 6-6"
               />
             </svg>
-          </div>
+          </button>
           <div
             class="flex flex-col gap-1 items-start"
           />
@@ -81,14 +82,15 @@ exports[`renderZodSchema > should render a form aggregate 1`] = `
           aria-describedby="_r_28_-form-item-description"
           aria-invalid="false"
           class="relative"
-          id="_r_28_-form-item"
         >
-          <div
+          <button
             aria-controls="radix-_r_29_"
+            aria-disabled="false"
             aria-expanded="false"
             aria-haspopup="dialog"
-            class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid disabled:cursor-not-allowed disabled:opacity-50 min-w-[180px]"
+            class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid min-w-[180px]"
             data-state="closed"
+            id="_r_28_-form-item"
             type="button"
           >
             <span
@@ -113,7 +115,7 @@ exports[`renderZodSchema > should render a form aggregate 1`] = `
                 d="m6 9 6 6 6-6"
               />
             </svg>
-          </div>
+          </button>
           <div
             class="flex flex-col gap-1 items-start"
           />
@@ -398,14 +400,15 @@ exports[`renderZodSchema > should render a form explode_columns 1`] = `
           aria-describedby="_r_2o_-form-item-description"
           aria-invalid="false"
           class="relative"
-          id="_r_2o_-form-item"
         >
-          <div
+          <button
             aria-controls="radix-_r_2p_"
+            aria-disabled="false"
             aria-expanded="false"
             aria-haspopup="dialog"
-            class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid disabled:cursor-not-allowed disabled:opacity-50 min-w-[180px]"
+            class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid min-w-[180px]"
             data-state="closed"
+            id="_r_2o_-form-item"
             type="button"
           >
             <span
@@ -430,7 +433,7 @@ exports[`renderZodSchema > should render a form explode_columns 1`] = `
                 d="m6 9 6 6 6-6"
               />
             </svg>
-          </div>
+          </button>
           <div
             class="flex flex-col gap-1 items-start"
           />
@@ -595,14 +598,15 @@ exports[`renderZodSchema > should render a form group_by 1`] = `
           aria-describedby="_r_1o_-form-item-description"
           aria-invalid="false"
           class="relative"
-          id="_r_1o_-form-item"
         >
-          <div
+          <button
             aria-controls="radix-_r_1p_"
+            aria-disabled="false"
             aria-expanded="false"
             aria-haspopup="dialog"
-            class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid disabled:cursor-not-allowed disabled:opacity-50 min-w-[180px]"
+            class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid min-w-[180px]"
             data-state="closed"
+            id="_r_1o_-form-item"
             type="button"
           >
             <span
@@ -627,7 +631,7 @@ exports[`renderZodSchema > should render a form group_by 1`] = `
                 d="m6 9 6 6 6-6"
               />
             </svg>
-          </div>
+          </button>
           <div
             class="flex flex-col gap-1 items-start"
           />
@@ -650,14 +654,15 @@ exports[`renderZodSchema > should render a form group_by 1`] = `
           aria-describedby="_r_1q_-form-item-description"
           aria-invalid="false"
           class="relative"
-          id="_r_1q_-form-item"
         >
-          <div
+          <button
             aria-controls="radix-_r_1r_"
+            aria-disabled="false"
             aria-expanded="false"
             aria-haspopup="dialog"
-            class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid disabled:cursor-not-allowed disabled:opacity-50 min-w-[180px]"
+            class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid min-w-[180px]"
             data-state="closed"
+            id="_r_1q_-form-item"
             type="button"
           >
             <span
@@ -682,7 +687,7 @@ exports[`renderZodSchema > should render a form group_by 1`] = `
                 d="m6 9 6 6 6-6"
               />
             </svg>
-          </div>
+          </button>
           <div
             class="flex flex-col gap-1 items-start"
           />
@@ -756,7 +761,7 @@ exports[`renderZodSchema > should render a form group_by 1`] = `
             aria-checked="false"
             aria-describedby="_r_1u_-form-item-description"
             aria-invalid="false"
-            class="flex items-center justify-center peer h-4 w-4 shrink-0 rounded-sm border border-primary ring-offset-background focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground"
+            class="flex items-center justify-center peer h-4 w-4 shrink-0 rounded-sm border border-primary ring-offset-background focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground data-[state=indeterminate]:bg-primary data-[state=indeterminate]:text-primary-foreground"
             data-state="unchecked"
             data-testid="marimo-plugin-data-frames-boolean-checkbox"
             id="_r_1u_-form-item"
@@ -797,14 +802,15 @@ exports[`renderZodSchema > should render a form pivot 1`] = `
           aria-describedby="_r_3a_-form-item-description"
           aria-invalid="false"
           class="relative"
-          id="_r_3a_-form-item"
         >
-          <div
+          <button
             aria-controls="radix-_r_3b_"
+            aria-disabled="false"
             aria-expanded="false"
             aria-haspopup="dialog"
-            class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid disabled:cursor-not-allowed disabled:opacity-50 min-w-[180px]"
+            class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid min-w-[180px]"
             data-state="closed"
+            id="_r_3a_-form-item"
             type="button"
           >
             <span
@@ -829,7 +835,7 @@ exports[`renderZodSchema > should render a form pivot 1`] = `
                 d="m6 9 6 6 6-6"
               />
             </svg>
-          </div>
+          </button>
           <div
             class="flex flex-col gap-1 items-start"
           />
@@ -852,14 +858,15 @@ exports[`renderZodSchema > should render a form pivot 1`] = `
           aria-describedby="_r_3c_-form-item-description"
           aria-invalid="false"
           class="relative"
-          id="_r_3c_-form-item"
         >
-          <div
+          <button
             aria-controls="radix-_r_3d_"
+            aria-disabled="false"
             aria-expanded="false"
             aria-haspopup="dialog"
-            class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid disabled:cursor-not-allowed disabled:opacity-50 min-w-[180px]"
+            class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid min-w-[180px]"
             data-state="closed"
+            id="_r_3c_-form-item"
             type="button"
           >
             <span
@@ -884,7 +891,7 @@ exports[`renderZodSchema > should render a form pivot 1`] = `
                 d="m6 9 6 6 6-6"
               />
             </svg>
-          </div>
+          </button>
           <div
             class="flex flex-col gap-1 items-start"
           />
@@ -907,14 +914,15 @@ exports[`renderZodSchema > should render a form pivot 1`] = `
           aria-describedby="_r_3e_-form-item-description"
           aria-invalid="false"
           class="relative"
-          id="_r_3e_-form-item"
         >
-          <div
+          <button
             aria-controls="radix-_r_3f_"
+            aria-disabled="false"
             aria-expanded="false"
             aria-haspopup="dialog"
-            class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid disabled:cursor-not-allowed disabled:opacity-50 min-w-[180px]"
+            class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid min-w-[180px]"
             data-state="closed"
+            id="_r_3e_-form-item"
             type="button"
           >
             <span
@@ -939,7 +947,7 @@ exports[`renderZodSchema > should render a form pivot 1`] = `
                 d="m6 9 6 6 6-6"
               />
             </svg>
-          </div>
+          </button>
           <div
             class="flex flex-col gap-1 items-start"
           />
@@ -1256,7 +1264,7 @@ exports[`renderZodSchema > should render a form sample_rows 1`] = `
             aria-checked="false"
             aria-describedby="_r_2n_-form-item-description"
             aria-invalid="false"
-            class="flex items-center justify-center peer h-4 w-4 shrink-0 rounded-sm border border-primary ring-offset-background focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground"
+            class="flex items-center justify-center peer h-4 w-4 shrink-0 rounded-sm border border-primary ring-offset-background focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground data-[state=indeterminate]:bg-primary data-[state=indeterminate]:text-primary-foreground"
             data-state="unchecked"
             data-testid="marimo-plugin-data-frames-boolean-checkbox"
             id="_r_2n_-form-item"
@@ -1297,14 +1305,15 @@ exports[`renderZodSchema > should render a form select_columns 1`] = `
           aria-describedby="_r_3_-form-item-description"
           aria-invalid="false"
           class="relative"
-          id="_r_3_-form-item"
         >
-          <div
+          <button
             aria-controls="radix-_r_4_"
+            aria-disabled="false"
             aria-expanded="false"
             aria-haspopup="dialog"
-            class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid disabled:cursor-not-allowed disabled:opacity-50 min-w-[180px]"
+            class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid min-w-[180px]"
             data-state="closed"
+            id="_r_3_-form-item"
             type="button"
           >
             <span
@@ -1329,7 +1338,7 @@ exports[`renderZodSchema > should render a form select_columns 1`] = `
                 d="m6 9 6 6 6-6"
               />
             </svg>
-          </div>
+          </button>
           <div
             class="flex flex-col gap-1 items-start"
           />
@@ -1471,7 +1480,7 @@ exports[`renderZodSchema > should render a form sort_column 1`] = `
             aria-checked="false"
             aria-describedby="_r_1f_-form-item-description"
             aria-invalid="false"
-            class="flex items-center justify-center peer h-4 w-4 shrink-0 rounded-sm border border-primary ring-offset-background focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground"
+            class="flex items-center justify-center peer h-4 w-4 shrink-0 rounded-sm border border-primary ring-offset-background focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground data-[state=indeterminate]:bg-primary data-[state=indeterminate]:text-primary-foreground"
             data-state="unchecked"
             data-testid="marimo-plugin-data-frames-boolean-checkbox"
             id="_r_1f_-form-item"
@@ -1580,14 +1589,15 @@ exports[`renderZodSchema > should render a form unique 1`] = `
           aria-describedby="_r_31_-form-item-description"
           aria-invalid="false"
           class="relative"
-          id="_r_31_-form-item"
         >
-          <div
+          <button
             aria-controls="radix-_r_32_"
+            aria-disabled="false"
             aria-expanded="false"
             aria-haspopup="dialog"
-            class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid disabled:cursor-not-allowed disabled:opacity-50 min-w-[180px]"
+            class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid min-w-[180px]"
             data-state="closed"
+            id="_r_31_-form-item"
             type="button"
           >
             <span
@@ -1612,7 +1622,7 @@ exports[`renderZodSchema > should render a form unique 1`] = `
                 d="m6 9 6 6 6-6"
               />
             </svg>
-          </div>
+          </button>
           <div
             class="flex flex-col gap-1 items-start"
           />
@@ -1739,14 +1749,15 @@ exports[`renders custom forms column_id_array 1`] = `
       aria-describedby="_r_40_-form-item-description"
       aria-invalid="false"
       class="relative"
-      id="_r_40_-form-item"
     >
-      <div
+      <button
         aria-controls="radix-_r_41_"
+        aria-disabled="false"
         aria-expanded="false"
         aria-haspopup="dialog"
-        class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid disabled:cursor-not-allowed disabled:opacity-50 min-w-[180px]"
+        class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid min-w-[180px]"
         data-state="closed"
+        id="_r_40_-form-item"
         type="button"
       >
         <span
@@ -1771,7 +1782,7 @@ exports[`renders custom forms column_id_array 1`] = `
             d="m6 9 6 6 6-6"
           />
         </svg>
-      </div>
+      </button>
       <div
         class="flex flex-col gap-1 items-start"
       />
@@ -1789,14 +1800,15 @@ exports[`renders custom forms column_id_dot_array 1`] = `
       aria-describedby="_r_42_-form-item-description"
       aria-invalid="false"
       class="relative"
-      id="_r_42_-form-item"
     >
-      <div
+      <button
         aria-controls="radix-_r_43_"
+        aria-disabled="false"
         aria-expanded="false"
         aria-haspopup="dialog"
-        class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid disabled:cursor-not-allowed disabled:opacity-50 min-w-[180px]"
+        class="flex h-6 w-fit mb-1 shadow-xs-solid items-center justify-between rounded-sm border border-input bg-transparent px-2 text-sm font-prose ring-offset-background placeholder:text-muted-foreground hover:shadow-sm-solid focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-primary focus:shadow-md-solid min-w-[180px]"
         data-state="closed"
+        id="_r_42_-form-item"
         type="button"
       >
         <span
@@ -1821,7 +1833,7 @@ exports[`renders custom forms column_id_dot_array 1`] = `
             d="m6 9 6 6 6-6"
           />
         </svg>
-      </div>
+      </button>
       <div
         class="flex flex-col gap-1 items-start"
       />
