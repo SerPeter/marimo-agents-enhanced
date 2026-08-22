@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 from marimo import _loggers
 from marimo._ai._tools.base import ToolBase
@@ -29,7 +28,7 @@ AVAILABLE_TOPICS = frozenset(
 
 @dataclass
 class GetMarimoRulesArgs:
-    topic: Optional[str] = None
+    topic: str | None = None
 
 
 @dataclass

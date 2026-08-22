@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
 
 # MIME types whose content should be masked when exceeding the size threshold.
 # text/plain and text/markdown are intentionally excluded — they are already
@@ -54,10 +53,10 @@ def mask_visual_output(
 ) -> tuple[str, bool]:
     """Replace large visual outputs with a compact representation.
 
-    For ``text/html``, converts to markdown so agents retain useful
+    For `text/html`, converts to markdown so agents retain useful
     textual content. Other large binary/visual types get a placeholder.
 
-    Returns ``(data, was_masked)`` — the caller can use the flag to
+    Returns `(data, was_masked)` — the caller can use the flag to
     annotate the output for agents.
     """
     if mimetype not in MASKING_MIMETYPES:
@@ -196,7 +195,7 @@ def _table_to_markdown(table: object) -> str:
     return "\n" + "\n".join(lines) + "\n"
 
 
-def _extract_accordion_labels(data: str) -> Optional[str]:
+def _extract_accordion_labels(data: str) -> str | None:
     """Try to extract accordion section labels from HTML output."""
     if "<marimo-accordion" not in data:
         return None

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 from unittest.mock import Mock
 
 import pytest
@@ -36,13 +35,13 @@ class MockCellManager:
     def cell_data(self) -> list[MockCellData]:
         return self._cells
 
-    def get_cell_data_by_name(self, name: str) -> Optional[MockCellData]:
+    def get_cell_data_by_name(self, name: str) -> MockCellData | None:
         for cd in self._cells:
             if cd.name == name:
                 return cd
         return None
 
-    def get_cell_code(self, cell_id: CellId_t) -> Optional[str]:
+    def get_cell_code(self, cell_id: CellId_t) -> str | None:
         for cd in self._cells:
             if cd.cell_id == cell_id:
                 return cd.code
@@ -58,8 +57,8 @@ class MockOutput:
 @dataclass
 class MockCellNotification:
     cell_id: CellId_t = field(default_factory=lambda: CellId_t(""))
-    status: Optional[str] = None
-    output: Optional[MockOutput] = None
+    status: str | None = None
+    output: MockOutput | None = None
     console: object = None
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from marimo._ai._tools.base import ToolBase
 from marimo._ai._tools.types import SuccessResult, ToolGuidelines
@@ -34,10 +34,10 @@ EXECUTION_TIMEOUT = 120.0  # seconds
 class ExecutionListener(SessionEventListener):
     """Listens for a CompletedRunNotification to signal execution is done.
 
-    Modeled on ``ScratchCellListener`` in ``marimo/_server/scratchpad.py``
+    Modeled on `ScratchCellListener` in `marimo/_server/scratchpad.py`
     but simpler: no SSE streaming, no cell-ID filtering.  The kernel
-    broadcasts ``CompletedRunNotification`` exactly once per command
-    completion (see ``runtime.py`` handlers).
+    broadcasts `CompletedRunNotification` exactly once per command
+    completion (see `runtime.py` handlers).
     """
 
     def __init__(self) -> None:
@@ -83,8 +83,8 @@ class ExecutionListener(SessionEventListener):
 
 @dataclass
 class ExecuteCellsArgs:
-    session_id: Optional[SessionId] = None
-    file_path: Optional[str] = None
+    session_id: SessionId | None = None
+    file_path: str | None = None
     scope: str = "stale"
     cell_ids: list[CellId_t] = field(default_factory=list)
     cell_names: list[str] = field(default_factory=list)
@@ -94,7 +94,7 @@ class ExecuteCellsArgs:
 @dataclass
 class CellExecutionStatus:
     cell_id: str
-    status: Optional[str] = None
+    status: str | None = None
     has_errors: bool = False
 
 
@@ -282,7 +282,7 @@ class ExecuteCells(ToolBase[ExecuteCellsArgs, ExecuteCellsOutput]):
         results: list[CellExecutionStatus] = []
         for cid in cell_ids:
             cell_notif = session.session_view.cell_notifications.get(cid)
-            status: Optional[str] = None
+            status: str | None = None
             has_errors = False
             if cell_notif is not None:
                 status = cell_notif.status

@@ -10,7 +10,6 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Generic,
-    Optional,
     TypeVar,
     Union,
     cast,
@@ -127,8 +126,8 @@ class ToolContext:
 
     def resolve_session(
         self,
-        session_id: Optional[SessionId] = None,
-        file_path: Optional[str] = None,
+        session_id: SessionId | None = None,
+        file_path: str | None = None,
     ) -> Session:
         """Resolve a session from session_id or file_path.
 
@@ -147,8 +146,8 @@ class ToolContext:
 
     def resolve_session_and_id(
         self,
-        session_id: Optional[SessionId] = None,
-        file_path: Optional[str] = None,
+        session_id: SessionId | None = None,
+        file_path: str | None = None,
     ) -> tuple[Session, SessionId]:
         """Resolve a session and its ID from session_id or file_path."""
         session = self.resolve_session(session_id, file_path)
@@ -243,7 +242,7 @@ class ToolContext:
         self,
         session_id: SessionId,
         include_stderr: bool,
-        cell_ids: Optional[list[CellId_t]] = None,
+        cell_ids: list[CellId_t] | None = None,
     ) -> list[MarimoCellErrors]:
         """
         Get all errors in the current notebook session, organized by cell.

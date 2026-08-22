@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from marimo import _loggers
 from marimo._cli.sandbox import SandboxMode
@@ -468,9 +468,7 @@ class SessionManager:
         """Get all sessions associated with a file path."""
         return self._repository.get_by_file_path(file_path)
 
-    def get_session_id_for_session(
-        self, session: Session
-    ) -> Optional[SessionId]:
+    def get_session_id_for_session(self, session: Session) -> SessionId | None:
         """Get the session ID for a session object."""
         return self._repository.get_session_id(session)
 

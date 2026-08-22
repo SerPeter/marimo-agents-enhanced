@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 from marimo._ai._tools.base import ToolBase
 from marimo._ai._tools.types import SuccessResult, ToolGuidelines
@@ -16,8 +16,8 @@ _MAX_COLUMNS = 50
 
 @dataclass
 class TablesAndVariablesArgs:
-    session_id: Optional[SessionId] = None
-    file_path: Optional[str] = None
+    session_id: SessionId | None = None
+    file_path: str | None = None
     variable_names: list[str] = field(default_factory=list)
 
 
@@ -40,9 +40,9 @@ class DataTableMetadata:
     num_rows: int | None
     num_columns: int | None
     columns: list[DataTableColumn]
-    engine: Optional[str]
-    primary_keys: Optional[list[str]]
-    indexes: Optional[list[str]]
+    engine: str | None
+    primary_keys: list[str] | None
+    indexes: list[str] | None
     columns_truncated: bool = False
 
 
@@ -52,8 +52,8 @@ class VariableSummary:
 
     name: str
     datatype: str
-    preview: Optional[str] = None
-    meta: Optional[dict[str, Any]] = None
+    preview: str | None = None
+    meta: dict[str, Any] | None = None
 
 
 @dataclass

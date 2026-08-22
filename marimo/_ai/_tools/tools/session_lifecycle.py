@@ -5,15 +5,15 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from marimo._ai._tools.base import ToolBase
 from marimo._ai._tools.types import SuccessResult, ToolGuidelines
 from marimo._ai._tools.utils.exceptions import ToolExecutionError
-from marimo._server.models.models import InstantiateNotebookRequest
 from marimo._session.headless_consumer import HeadlessSessionConsumer
 from marimo._session.model import ConnectionState
+from marimo._session.requests import InstantiateNotebookRequest
 from marimo._types.ids import ConsumerId, SessionId
 
 if TYPE_CHECKING:
@@ -23,14 +23,14 @@ if TYPE_CHECKING:
 @dataclass
 class ManageSessionArgs:
     action: Literal["start", "restart", "stop"]
-    file_path: Optional[str] = None
-    session_id: Optional[SessionId] = None
+    file_path: str | None = None
+    session_id: SessionId | None = None
 
 
 @dataclass
 class ManageSessionOutput(SuccessResult):
-    session_id: Optional[SessionId] = None
-    file_path: Optional[str] = None
+    session_id: SessionId | None = None
+    file_path: str | None = None
     action_taken: str = ""
 
 

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 from marimo._ai._tools.base import ToolBase
 from marimo._ai._tools.types import SuccessResult, ToolGuidelines
@@ -25,8 +24,8 @@ class DiagnosticSummary:
 class LintNotebookArgs:
     """Arguments for linting a notebook."""
 
-    session_id: Optional[SessionId] = None
-    file_path: Optional[str] = None
+    session_id: SessionId | None = None
+    file_path: str | None = None
 
 
 @dataclass

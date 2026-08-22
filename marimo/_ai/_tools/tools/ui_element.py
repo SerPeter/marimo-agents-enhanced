@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 from marimo._ai._tools.base import ToolBase
 from marimo._ai._tools.tools.execution import (
@@ -19,8 +19,8 @@ from marimo._types.ids import ConsumerId, SessionId, UIElementId
 
 @dataclass
 class SetUIElementValueArgs:
-    session_id: Optional[SessionId] = None
-    file_path: Optional[str] = None
+    session_id: SessionId | None = None
+    file_path: str | None = None
     element_id: str = ""
     value: Any = None
     timeout: float = EXECUTION_TIMEOUT
@@ -70,9 +70,9 @@ class SetUIElementValue(
         ],
     )
 
-    async def handle(
+    async def handle(  # type: ignore[override]
         self, args: SetUIElementValueArgs
-    ) -> SetUIElementValueOutput:  # type: ignore[override]
+    ) -> SetUIElementValueOutput:
         session, session_id = self.context.resolve_session_and_id(
             args.session_id, args.file_path
         )

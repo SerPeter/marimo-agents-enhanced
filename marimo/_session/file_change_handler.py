@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from marimo import _loggers
 from marimo._config.manager import MarimoConfigManager
@@ -159,7 +159,7 @@ class FileChangeCoordinator:
     def __init__(
         self,
         reload_strategy: ReloadStrategy,
-        debounce_seconds: Optional[float] = None,
+        debounce_seconds: float | None = None,
     ) -> None:
         """Initialize the file change coordinator.
 

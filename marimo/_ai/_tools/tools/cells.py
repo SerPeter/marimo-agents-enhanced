@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from marimo._ai._tools.base import ToolBase
 from marimo._ai._tools.types import (
@@ -36,8 +36,8 @@ class SupportedCellType(str, Enum):
 
 @dataclass
 class GetLightweightCellMapArgs:
-    session_id: Optional[SessionId] = None
-    file_path: Optional[str] = None
+    session_id: SessionId | None = None
+    file_path: str | None = None
     preview_lines: int = 3  # random default value
 
 
@@ -51,8 +51,8 @@ class LightweightCellInfo:
     has_output: bool = False
     has_console_output: bool = False
     has_errors: bool = False
-    stale_inputs: Optional[bool] = None
-    execution_time: Optional[float] = None
+    stale_inputs: bool | None = None
+    execution_time: float | None = None
     execution_count: int = 0
 
 
@@ -95,8 +95,8 @@ class GetCellRuntimeDataData:
 
 @dataclass
 class GetCellRuntimeDataArgs:
-    session_id: Optional[SessionId] = None
-    file_path: Optional[str] = None
+    session_id: SessionId | None = None
+    file_path: str | None = None
     cell_ids: list[CellId_t] = field(default_factory=list)
 
 
@@ -125,8 +125,8 @@ class CellOutputData:
 
 @dataclass
 class GetCellOutputArgs:
-    session_id: Optional[SessionId] = None
-    file_path: Optional[str] = None
+    session_id: SessionId | None = None
+    file_path: str | None = None
     cell_ids: list[CellId_t] = field(default_factory=list)
 
 
@@ -199,7 +199,7 @@ class GetLightweightCellMap(
             has_output = False
             has_console_output = False
             has_errors = False
-            stale_inputs: Optional[bool] = None
+            stale_inputs: bool | None = None
             cell_notif = session_view.cell_notifications.get(cell_data.cell_id)
             if cell_notif is not None:
                 if cell_notif.status is not None:
@@ -217,7 +217,7 @@ class GetLightweightCellMap(
                 stale_inputs = cell_notif.stale_inputs
 
             # Execution diagnostics
-            execution_time: Optional[float] = None
+            execution_time: float | None = None
             if runtime_state == "idle":
                 execution_time = session_view.last_execution_time.get(
                     cell_data.cell_id
