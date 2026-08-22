@@ -59,6 +59,30 @@ x = 1
     assert result.notebook.filename == str(notebook_path)
 
 
+def test_plain_markdown_status_is_invalid(tmp_path):
+    """Plain markdown (no marimo cells/metadata) is not a marimo notebook."""
+    notebook_path = tmp_path / "README.md"
+    notebook_path.write_text(
+        "# My Project\n\nJust prose with a ```python``` sample.\n",
+        encoding="utf-8",
+    )
+
+    result = load.get_notebook_status(str(notebook_path))
+
+    assert result.status == "invalid"
+
+
+def test_plain_markdown_still_bootstraps_via_load_app(tmp_path):
+    """`marimo edit README.md` must still open the prose, not an empty app."""
+    notebook_path = tmp_path / "README.md"
+    notebook_path.write_text("# My Project\n\nJust prose.\n", encoding="utf-8")
+
+    app = load.load_app(str(notebook_path))
+
+    assert app is not None
+    assert len(list(app._cell_manager.cell_ids())) >= 1
+
+
 @pytest.fixture
 def unified_load():
     """Uses the new unified load_app path with deserialization."""
@@ -427,3 +451,45 @@ class TestGetStatus:
             load.get_notebook_status(get_filepath(filename)).status
             == expected_status
         )
+
+
+def test_extensionless_marimo_notebook(tmp_path):
+    """A marimo notebook without a file extension still parses.
+
+    Slurm executes sbatch scripts from a spooled, extensionless copy of the
+    submitted file.
+    """
+    spool_path = tmp_path / "slurm_script"
+    spool_path.write_text(
+        """import marimo
+
+__generated_with = "0.23.16"
+app = marimo.App()
+
+
+@app.cell
+def _():
+    x = 1
+    return (x,)
+
+
+if __name__ == "__main__":
+    app.run()
+""",
+        encoding="utf-8",
+    )
+
+    result = load.get_notebook_status(str(spool_path))
+
+    assert result.status == "valid"
+    assert result.notebook is not None
+    assert len(result.notebook.cells) == 1
+
+
+def test_extensionless_non_marimo_file_still_rejected(tmp_path):
+    """The extensionless fallback only applies to marimo notebooks."""
+    path = tmp_path / "some_script"
+    path.write_text("print('not a notebook')\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="No notebook serializer"):
+        load.get_notebook_status(str(path))

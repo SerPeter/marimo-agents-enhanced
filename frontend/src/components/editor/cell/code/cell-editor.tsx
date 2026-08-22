@@ -10,9 +10,11 @@ import { Button } from "@/components/ui/button";
 import { DelayMount } from "@/components/utils/delay-mount";
 import { aiCompletionCellAtom } from "@/core/ai/state";
 import { maybeAddMarimoImport } from "@/core/cells/add-missing-import";
-import { useCellActions } from "@/core/cells/cells";
+import { getNotebook, useCellActions } from "@/core/cells/cells";
+import { SETUP_CELL_ID } from "@/core/cells/ids";
 import { usePendingDeleteService } from "@/core/cells/pending-delete-service";
 import type { CellData, CellRuntimeState } from "@/core/cells/types";
+import { notebookCellEditorViews } from "@/core/cells/utils";
 import { setupCodeMirror } from "@/core/codemirror/cm";
 import { acceptCompletionOnEnterAtom } from "@/core/codemirror/completion/accept-on-enter-atom";
 import { editorMountScheduler } from "@/core/codemirror/editor-mount-scheduler";
@@ -22,6 +24,10 @@ import {
   reconfigureLanguageEffect,
   switchLanguage,
 } from "@/core/codemirror/language/extension";
+import {
+  getEditorCodeAsPython,
+  updateEditorCodeFromPython,
+} from "@/core/codemirror/language/utils";
 import { MARKDOWN_INITIAL_HIDE_CODE } from "@/core/codemirror/language/languages/markdown";
 import type { LanguageAdapterType } from "@/core/codemirror/language/types";
 import {
@@ -33,7 +39,7 @@ import type { UserConfig } from "@/core/config/config-schema";
 import { OverridingHotkeyProvider } from "@/core/hotkeys/hotkeys";
 import { connectionAtom } from "@/core/network/connection";
 import { useRequestClient } from "@/core/network/requests";
-import { isRtcEnabled } from "@/core/rtc/state";
+import { canUseRtc, isRtcEnabled } from "@/core/rtc/state";
 import { useSaveNotebook } from "@/core/saving/save-component";
 import { isAppConnecting } from "@/core/websocket/connection-utils";
 import type { Theme } from "@/theme/useTheme";
@@ -214,6 +220,32 @@ const CellEditorInternal = ({
             });
           }
         },
+        addOrAppendSetupCell: (code) => {
+          const notebook = getNotebook();
+          // No setup cell yet: create one with this code at the top.
+          if (!notebook.cellIds.setupCellExists()) {
+            cellActions.addSetupCellIfDoesntExist({ code });
+            return;
+          }
+          // Setup cell exists: append the pasted code to it. Prefer updating
+          // the mounted editor (keeps the view and state in sync, like
+          // formatting does); fall back to a plain state update otherwise.
+          const view = notebookCellEditorViews(notebook)[SETUP_CELL_ID];
+          const existing = view
+            ? getEditorCodeAsPython(view)
+            : notebook.cellData[SETUP_CELL_ID].code;
+          const merged = existing.trim()
+            ? `${existing.trimEnd()}\n\n${code}`
+            : code;
+          if (view) {
+            updateEditorCodeFromPython(view, merged);
+          }
+          cellActions.updateCellCode({
+            cellId: SETUP_CELL_ID,
+            code: merged,
+            formattingChange: false,
+          });
+        },
         splitCell,
         toggleHideCode,
         aiCellCompletion: () => {
@@ -310,7 +342,7 @@ const CellEditorInternal = ({
     saveOrNameNotebook,
   ]);
 
-  const rtcEnabled = isRtcEnabled();
+  const rtcEnabled = isRtcEnabled() && canUseRtc(cellId);
   const handleInitializeEditor = useEvent(() => {
     // If rtc is enabled, use collaborative editing
     if (rtcEnabled) {
@@ -419,6 +451,7 @@ const CellEditorInternal = ({
       setIsEditorMounted(true);
       return;
     }
+    setIsEditorMounted(false);
     if (serializedEditorState !== null) {
       handleDeserializeEditor();
       setIsEditorMounted(true);
@@ -447,11 +480,12 @@ const CellEditorInternal = ({
     handleReconfigureEditor();
   }, [handleReconfigureEditor, extensions, editorViewRef]);
 
-  // Destroy the editor when the component is unmounted
+  // Destroy the editor when the component is unmounted. Read the ref in cleanup
+  // (not setup) so Activity hide/show cycles don't leave a stale destroyed view.
   useEffect(() => {
-    const ev = editorViewRef.current;
     return () => {
-      ev?.destroy();
+      editorViewRef.current?.destroy();
+      editorViewRef.current = null;
     };
   }, [editorViewRef]);
 
@@ -603,14 +637,18 @@ CellCodeMirrorEditor.displayName = "CellCodeMirrorEditor";
 // Wait until the websocket connection is open before rendering the editor
 // This is used for real-time collaboration since the backend needs the connection started
 // before connecting the rtc websockets
-function WithWaitUntilConnected<T extends {}>(
+function WithWaitUntilConnected<T extends Pick<CellEditorProps, "id">>(
   Component: React.ComponentType<T>,
 ) {
   const WaitUntilConnectedComponent = (props: T) => {
     const connection = useAtomValue(connectionAtom);
     const [rtcDoc, setRtcDoc] = useAtom(connectedDocAtom);
 
-    if (isAppConnecting(connection.state) || rtcDoc === undefined) {
+    if (
+      isRtcEnabled() &&
+      canUseRtc(props.id) &&
+      (isAppConnecting(connection.state) || rtcDoc === undefined)
+    ) {
       return (
         <div className="flex h-full w-full items-baseline p-4">
           <DelayMount milliseconds={1000} fallback={null}>

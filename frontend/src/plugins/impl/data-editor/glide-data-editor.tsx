@@ -56,6 +56,7 @@ import {
   removeColumn,
   renameColumn,
 } from "./data-utils";
+import { GlideDataEditorPortal } from "./glide-portal";
 
 interface GlideDataEditorProps<T> {
   data: T[];
@@ -88,6 +89,7 @@ export const GlideDataEditor = <T,>({
 }: GlideDataEditorProps<T>) => {
   const { theme } = useTheme();
   const dataEditorRef = useRef<DataEditorRef>(null);
+  const portalElementRef = useRef<HTMLDivElement>(null);
 
   const [menu, setMenu] = useState<{ col: number; bounds: Rectangle }>();
   const [showSearch, setShowSearch] = useState<boolean>(false);
@@ -388,6 +390,7 @@ export const GlideDataEditor = <T,>({
             // TODO: Handle specific types
             return [column.title, new Date()];
           case "string":
+          case "geometry":
           case "unknown":
             return [column.title, ""];
           default:
@@ -613,9 +616,13 @@ export const GlideDataEditor = <T,>({
 
   return (
     <div className="relative w-full min-w-0">
+      <GlideDataEditorPortal portalRef={portalElementRef} />
       <ErrorBoundary>
         <DataEditor
           ref={dataEditorRef}
+          // Glide types portalElementRef as RefObject<HTMLElement> (non-null); React 19 refs include null.
+          // @ts-expect-error glide-data-grid stale RefObject typing
+          portalElementRef={portalElementRef}
           getCellContent={getCellContent}
           columns={columns}
           gridSelection={selection}

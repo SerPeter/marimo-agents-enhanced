@@ -119,8 +119,17 @@ def enc_hook(obj: Any) -> Any:
 
                 return json.loads(to_json(date_format="iso"))
 
-    # Handle shapely geometry objects from geopandas
-    if DependencyManager.geopandas.imported():
+    # pint dumps as nested dicts/slots via __dict__; stringify for display.
+    if DependencyManager.pint.imported():
+        import pint  # type: ignore[import-untyped,import-not-found]
+
+        if isinstance(
+            obj, (pint.Quantity, pint.Unit, pint.util.UnitsContainer)
+        ):
+            return str(obj)
+
+    # Handle shapely geometry objects
+    if DependencyManager.shapely.imported():
         try:
             # Check if it's a shapely geometry object
             # shapely.geometry.base.BaseGeometry is the base class

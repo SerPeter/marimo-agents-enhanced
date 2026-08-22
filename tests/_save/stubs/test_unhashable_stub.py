@@ -12,11 +12,12 @@ import pickle
 import pytest
 
 from marimo._runtime.exceptions import (
-    MarimoCancelCellError,
+    MarimoRescheduleError,
     MarimoUnhashableCacheError,
 )
 from marimo._save.cache import Cache
-from marimo._save.stubs.lazy_stub import UnhashableStub
+from marimo._save.loaders.lazy import from_item
+from marimo._save.stubs.lazy_stub import Item, UnhashableStub
 
 # ---------------------------------------------------------------------------
 # UnhashableStub: data + tripwire semantics
@@ -45,7 +46,7 @@ class TestUnhashableStub:
         err = MarimoUnhashableCacheError(
             cells_to_rerun=set(), variables=[], error_details=""
         )
-        assert isinstance(err, MarimoCancelCellError)
+        assert isinstance(err, MarimoRescheduleError)
 
     def test_pickle_roundtrip(self) -> None:
         original = UnhashableStub(None, var_name="f", error_msg="oops")
@@ -54,6 +55,22 @@ class TestUnhashableStub:
         assert round_tripped.var_name == "f"
         assert round_tripped.type_name == "builtins.function"
         assert round_tripped.error_msg == "oops"
+
+    def test_type_name_param_overrides_derivation(self) -> None:
+        """An explicit `type_name` (used when rebuilding from a manifest
+        marker, with no original object) wins over `_obj` derivation."""
+        stub = UnhashableStub(var_name="f", type_name="numpy.ndarray")
+        assert stub.type_name == "numpy.ndarray"
+        assert stub.var_name == "f"
+
+    def test_from_item_reconstructs_marker(self) -> None:
+        """`from_item` rebuilds the tripwire in-memory from an Item carrying
+        `unserializable_type` — no blob is read off disk."""
+        item = Item(unserializable_type="builtins.function")
+        stub = from_item(item, "f")
+        assert isinstance(stub, UnhashableStub)
+        assert stub.var_name == "f"
+        assert stub.type_name == "builtins.function"
 
     def test_isinstance_works(self) -> None:
         """Tripwires must not interfere with isinstance — the restore

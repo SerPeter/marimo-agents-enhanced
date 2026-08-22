@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
@@ -1116,12 +1116,14 @@ def test_table_with_frozen_columns() -> None:
     not DependencyManager.pandas.has(), reason="Pandas not installed"
 )
 class TestFrozenRowHeaders:
-    def test_freeze_unnamed_pandas_index_rejected(self) -> None:
+    def test_freeze_unnamed_pandas_index(self) -> None:
         import pandas as pd
 
+        # An unnamed index is exposed as the row header "Index0", so it has a
+        # stable name that can be frozen like any named index.
         df = pd.DataFrame({"a": [1, 2, 3]}, index=["x", "y", "z"])
-        with pytest.raises(ValueError, match="unnamed row index"):
-            ui.table(df, freeze_columns_left=[""])
+        table = ui.table(df, freeze_columns_left=["Index0"])
+        assert table._component_args["freeze-columns-left"] == ["Index0"]
 
     def test_freeze_named_pandas_index(self) -> None:
         import pandas as pd
@@ -1276,6 +1278,31 @@ def test_table_hidden_columns_row_header_raises() -> None:
         ui.table(df, hidden_columns=[name])
 
 
+@pytest.mark.skipif(
+    not DependencyManager.pandas.has(), reason="Pandas not installed"
+)
+def test_get_data_url_includes_named_index() -> None:
+    import pandas as pd
+
+    from marimo._plugins.ui._impl.charts.altair_transformer import (
+        _data_to_csv_string,
+    )
+
+    df = pd.DataFrame(
+        {"v": [1, 2, 3]},
+        index=pd.Index(["a", "b", "c"], name="k"),
+    )
+    table = ui.table(df)
+    response = table._get_data_url(EmptyArgs())
+    assert response.data_url  # produced without error
+
+    # The flattened manager exposes the index as a column.
+    flattened = table._searched_manager.with_index_as_columns()
+    assert "k" in flattened.get_column_names()
+    csv = _data_to_csv_string(flattened.data)
+    assert "k" in csv.splitlines()[0]
+
+
 @pytest.mark.parametrize(
     "df",
     create_dataframes({"a": [1, 2, 3], "b": ["abc", "def", None]}),
@@ -1373,6 +1400,23 @@ def test_show_column_summaries_disabled():
     summaries = table._get_column_summaries(EmptyArgs())
     assert summaries.is_disabled is False
     assert len(summaries.stats) == 0
+
+
+@pytest.mark.skipif(
+    not DependencyManager.polars.has(), reason="Polars is required"
+)
+def test_polars_duration_column_summaries_do_not_warn() -> None:
+    import polars as pl
+
+    data = pl.DataFrame(
+        {"duration": [timedelta(days=day) for day in range(1, 13)]}
+    )
+    table = ui.table(data, show_column_summaries=True)
+
+    with patch("marimo._plugins.ui._impl.table.LOGGER") as logger:
+        table._get_column_summaries(ColumnSummariesArgs())
+
+    logger.warning.assert_not_called()
 
 
 @pytest.mark.skipif(
@@ -2016,7 +2060,7 @@ def test_dataframe_with_int_column_names():
         assert "DataFrame has integer column names" in str(w[0].message)
 
     # Check that the table handles integer column names correctly
-    assert table._manager.get_column_names() == [0, 1, 2]
+    assert table._manager.get_column_names() == ["0", "1", "2"]
     assert table._component_args["total-columns"] == 3
     assert table._component_args["max-columns"] == DEFAULT_MAX_COLUMNS
 
@@ -2396,13 +2440,13 @@ def test_json_multi_col_idx_table() -> None:
     json_data = json.loads(table._component_args["data"])
     assert json_data == [
         {
-            "": "All",
+            "Index0": "All",
             INDEX_COLUMN_NAME: 0,
             "basic_amt,NSW": 1,
             "basic_amt,QLD": 1,
         },
         {
-            "": "Full",
+            "Index0": "Full",
             INDEX_COLUMN_NAME: 1,
             "basic_amt,NSW": 0,
             "basic_amt,QLD": 1,

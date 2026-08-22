@@ -17,7 +17,7 @@ if $cmd; then
   echo "Copying new static files..."
   mkdir -p marimo/_static/
   cp -R frontend/dist/* marimo/_static/
-  rm -rf marimo/_static/files/wasm-intro.py
+  rm -rf marimo/_static/export_demos
   echo "Copying agent rules..."
   cp docs/_static/AGENTS.md marimo/_static/AGENTS.md
   # Legacy alias so older builds that look for CLAUDE.md still find rules

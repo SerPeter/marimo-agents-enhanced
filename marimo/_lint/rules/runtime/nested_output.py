@@ -30,7 +30,7 @@ _NESTING_NODES = (
 
 
 class NestedOutputRule(LintRule):
-    """MR005: Marimo output call nested inside control flow without assignment.
+    """MR006: Marimo output call nested inside control flow without assignment.
 
     Detects `mo.*` output calls (`mo.md()`, `mo.ui.slider()`, etc.)
     that appear as bare expression statements inside `if`, `for`,
@@ -76,7 +76,7 @@ class NestedOutputRule(LintRule):
 
     mo.stop(mo.md("Unauthorized"))  # mo.stop() argument
 
-    mo.md("# Title")  # Top-level (see MR004)
+    mo.md("# Title")  # Top-level (see MR005)
     ```
 
     ## References
@@ -84,7 +84,7 @@ class NestedOutputRule(LintRule):
     - [Outputs Guide](https://docs.marimo.io/guides/outputs/)
     """
 
-    code = "MR005"
+    code = "MR006"
     name = "nested-marimo-output"
     description = "Marimo output call inside control flow is not assigned and will be discarded"
     severity = Severity.RUNTIME

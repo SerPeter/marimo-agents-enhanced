@@ -185,7 +185,7 @@ class TestLintRules:
 
 
 class TestUnusedOutputRule:
-    """Test MR004: unused marimo output calls."""
+    """Test MR005: unused marimo output calls."""
 
     async def test_flags_mo_md_not_last(self):
         notebook = NotebookSerializationV1(
@@ -205,7 +205,7 @@ class TestUnusedOutputRule:
         await rule.check(rule_ctx)
         errors = await ctx.get_diagnostics()
         assert len(errors) == 1
-        assert errors[0].code == "MR004"
+        assert errors[0].code == "MR005"
 
     async def test_flags_mo_ui_not_last(self):
         notebook = NotebookSerializationV1(
@@ -225,7 +225,7 @@ class TestUnusedOutputRule:
         await rule.check(rule_ctx)
         errors = await ctx.get_diagnostics()
         assert len(errors) == 1
-        assert errors[0].code == "MR004"
+        assert errors[0].code == "MR005"
 
     async def test_ok_last_expression(self):
         notebook = NotebookSerializationV1(
@@ -345,7 +345,7 @@ class TestUnusedOutputRule:
 
 
 class TestNestedOutputRule:
-    """Test MR005: nested marimo output calls."""
+    """Test MR006: nested marimo output calls."""
 
     async def test_flags_mo_md_in_if(self):
         notebook = NotebookSerializationV1(
@@ -365,7 +365,7 @@ class TestNestedOutputRule:
         await rule.check(rule_ctx)
         errors = await ctx.get_diagnostics()
         assert len(errors) == 1
-        assert errors[0].code == "MR005"
+        assert errors[0].code == "MR006"
 
     async def test_flags_mo_ui_in_for(self):
         notebook = NotebookSerializationV1(
@@ -482,7 +482,7 @@ class TestNestedOutputRule:
         assert len(errors) == 0
 
     async def test_ok_top_level(self):
-        """Top-level mo.* calls are MR004's domain, not MR005."""
+        """Top-level mo.* calls are MR005's domain, not MR006."""
         notebook = NotebookSerializationV1(
             app=AppInstantiation(),
             cells=[

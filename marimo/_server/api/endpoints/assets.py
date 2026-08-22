@@ -1,6 +1,7 @@
 # Copyright 2026 Marimo. All rights reserved.
 from __future__ import annotations
 
+import hashlib
 import mimetypes
 import re
 from pathlib import Path
@@ -32,13 +33,13 @@ from marimo._server.api.auth import TOKEN_QUERY_PARAM
 from marimo._server.api.deps import AppState
 from marimo._server.files.path_validator import PathValidator
 from marimo._server.router import APIRouter
-from marimo._server.templates.templates import (
+from marimo._session.model import SessionMode
+from marimo._templates import (
     home_page_template,
     inject_script,
     json_script,
     notebook_page_template,
 )
-from marimo._session.model import SessionMode
 from marimo._utils.async_path import AsyncPath
 from marimo._utils.paths import (
     MARIMO_DIR_NAME,
@@ -141,6 +142,33 @@ _HTML_SECURITY_HEADERS: dict[str, str] = {
 }
 
 
+def _html_response(request: Request, html: str) -> Response:
+    """Return rendered HTML with conditional caching headers."""
+    etag = f'"{hashlib.sha256(html.encode("utf-8")).hexdigest()}"'
+    # The document inlines per-server config and a notebook key. Browsers may
+    # store it, but must check that it is still current before reusing it.
+    cache_control = "private, no-cache"
+    headers = {
+        "Cache-Control": cache_control,
+        "ETag": etag,
+        **_HTML_SECURITY_HEADERS,
+    }
+
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match is not None:
+        # If-None-Match may contain multiple validators or weak ETags (`W/`).
+        # See https://www.rfc-editor.org/rfc/rfc9110#section-13.1.2
+        candidates = {
+            candidate.strip().removeprefix("W/")
+            for candidate in if_none_match.split(",")
+        }
+        # Allow caching if things exactly match.
+        if "*" in candidates or etag in candidates:
+            return Response(status_code=304, headers=headers)
+
+    return HTMLResponse(html, headers=headers)
+
+
 def _strip_access_token_redirect(request: Request) -> RedirectResponse:
     """Build a redirect to the current URL with access_token removed.
 
@@ -227,6 +255,9 @@ def og_thumbnail(*, request: Request) -> Response:
             file_key=file_key,
             base_url=app_state.base_url,
             mode=app_state.mode.value,
+        ),
+        execute_generator=(
+            app_state.session_manager.execute_opengraph_generators
         ),
     )
     title = opengraph.title or "marimo"
@@ -407,12 +438,15 @@ async def index(request: Request) -> Response:
             else None,
             asset_url=app_state.asset_url,
             html_head=app_state.html_head,
+            execute_opengraph_generators=(
+                app_state.session_manager.execute_opengraph_generators
+            ),
         )
 
         # Inject service worker registration with the notebook ID
         html = _inject_service_worker(html, file_key)
 
-    return HTMLResponse(html, headers=_HTML_SECURITY_HEADERS)
+    return _html_response(request, html)
 
 
 DEFAULT_NOTEBOOK_NAME = "__marimo_notebook__.py"

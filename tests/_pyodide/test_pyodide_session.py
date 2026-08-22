@@ -13,7 +13,7 @@ import msgspec
 import pytest
 
 from marimo._ast.app_config import _AppConfig
-from marimo._config.config import DEFAULT_CONFIG
+from marimo._config.config import DEFAULT_CONFIG, merge_config
 from marimo._dependencies.dependencies import DependencyManager
 from marimo._messaging.types import KernelMessage
 from marimo._pyodide.pyodide_session import (
@@ -47,6 +47,7 @@ from marimo._runtime.commands import (
     SyncGraphCommand,
     UpdateCellConfigCommand,
     UpdateUIElementCommand,
+    UpdateUserConfigCommand,
     ValidateSQLCommand,
 )
 from marimo._runtime.context.types import teardown_context
@@ -536,9 +537,11 @@ async def test_pyodide_session_put_input(
     [
         # Notebook operations
         (
-            '{"type": "create-notebook", "executionRequests": [{"cellId": "cell-1", "code": "print(1)", "type": "execute-cell"}], '
-            '"cellIds": ["cell-1"], "setUiElementValueRequest": {"objectIds": [], "values": [], "type": "update-ui-element"}, '
-            '"autoRun": true}',
+            (
+                '{"type": "create-notebook", "executionRequests": [{"cellId": "cell-1", "code": "print(1)", "type": "execute-cell"}], '
+                '"cellIds": ["cell-1"], "setUiElementValueRequest": {"objectIds": [], "values": [], "type": "update-ui-element"}, '
+                '"autoRun": true}'
+            ),
             CreateNotebookCommand,
         ),
         (
@@ -605,8 +608,10 @@ async def test_pyodide_session_put_input(
             PreviewDatasetColumnCommand,
         ),
         (
-            '{"type": "preview-sql-table", "requestId": "req-1", "engine": "duckdb", "database": "test.db", '
-            '"schema": "main", "tableName": "users"}',
+            (
+                '{"type": "preview-sql-table", "requestId": "req-1", "engine": "duckdb", "database": "test.db", '
+                '"schema": "main", "tableName": "users"}'
+            ),
             PreviewSQLTableCommand,
         ),
         (
@@ -783,18 +788,23 @@ def test_pyodide_bridge_save(
     pyodide_bridge: PyodideBridge,
     pyodide_app_file: Path,
 ) -> None:
-    """Test saving notebook through the bridge."""
     request_json = json.dumps(
         {
             "cellIds": ["test"],
-            "codes": ["# Updated code"],
+            "codes": ['message = "NEW"'],
             "names": ["_"],
-            "configs": [{}],  # Must match length of cell_ids
+            "configs": [{}],
             "filename": str(pyodide_app_file),
         }
     )
 
     pyodide_bridge.save(request_json)
+
+    request = json.dumps({"download": False})
+    script = json.loads(pyodide_bridge.export_script(request))
+    markdown = json.loads(pyodide_bridge.export_markdown(request))
+    assert 'message = "NEW"' in script["contents"]
+    assert 'message = "NEW"' in markdown["contents"]
 
 
 def test_pyodide_bridge_save_app_config(
@@ -818,19 +828,40 @@ def test_pyodide_bridge_save_app_config(
 def test_pyodide_bridge_save_user_config(
     pyodide_bridge: PyodideBridge,
 ) -> None:
-    """Test saving user config through the bridge."""
+    pyodide_bridge.session._initial_user_config = merge_config(
+        DEFAULT_CONFIG,
+        {
+            "ai": {
+                "open_ai": {"api_key": "configured-key"},
+                "mode": "manual",
+            }
+        },
+    )
     request_json = json.dumps(
         {
             "config": {
-                "completion": {"activate_on_typing": True},
+                "ai": {"models": {"chat_model": "openai/gpt-4o"}},
             }
         }
     )
 
     pyodide_bridge.save_user_config(request_json)
 
-    # Should have put a UpdateUserConfigRequest in the queue
-    assert not pyodide_bridge.session._queue_manager.control_queue.empty()
+    command = pyodide_bridge.session._queue_manager.control_queue.get_nowait()
+    assert isinstance(command, UpdateUserConfigCommand)
+    assert command.config["ai"]["open_ai"]["api_key"] == "configured-key"
+    assert command.config["ai"]["mode"] == "manual"
+    assert command.config["ai"]["models"]["chat_model"] == "openai/gpt-4o"
+
+    pyodide_bridge.save_user_config(
+        json.dumps({"config": {"ai": {"mode": "agent"}}})
+    )
+
+    command = pyodide_bridge.session._queue_manager.control_queue.get_nowait()
+    assert isinstance(command, UpdateUserConfigCommand)
+    assert command.config["ai"]["open_ai"]["api_key"] == "configured-key"
+    assert command.config["ai"]["mode"] == "agent"
+    assert command.config["ai"]["models"]["chat_model"] == "openai/gpt-4o"
 
 
 def test_pyodide_bridge_rename_file(
@@ -877,6 +908,34 @@ def test_pyodide_bridge_file_details(
     assert "file" in response
     assert "contents" in response
     assert response["file"]["path"] == str(test_file)
+
+
+def test_pyodide_bridge_file_details_honors_limit(
+    pyodide_bridge: PyodideBridge,
+    tmp_path: Path,
+) -> None:
+    test_file = tmp_path / "large.txt"
+    test_file.write_bytes(b"12345")
+
+    request_json = json.dumps({"path": str(test_file), "maxBytes": 4})
+    response = json.loads(pyodide_bridge.file_details(request_json))
+
+    assert response["contents"] is None
+    assert response["isTooLarge"] is True
+
+
+def test_pyodide_bridge_file_details_without_limit_is_unrestricted(
+    pyodide_bridge: PyodideBridge,
+    tmp_path: Path,
+) -> None:
+    test_file = tmp_path / "download.bin"
+    test_file.write_bytes(b"12345")
+
+    request_json = json.dumps({"path": str(test_file)})
+    response = json.loads(pyodide_bridge.file_details(request_json))
+
+    assert response["contents"] == "12345"
+    assert response["isTooLarge"] is False
 
 
 def test_pyodide_bridge_create_file(
@@ -1006,22 +1065,65 @@ def test_pyodide_bridge_export_html(
     )
 
     result = pyodide_bridge.export_html(request_json)
-    html = json.loads(result)
+    exported_file = json.loads(result)
 
-    assert isinstance(html, str)
+    assert exported_file["filename"] == "test.html"
+    assert exported_file["mediaType"] == "text/html; charset=utf-8"
     # HTML should contain marimo-related content
-    assert len(html) > 0
+    assert len(exported_file["contents"]) > 0
 
 
+@pytest.mark.parametrize(
+    ("flavor", "expected_filename", "expected_fence"),
+    [
+        (None, "test.md", "```python {.marimo}"),
+        ("qmd", "test.qmd", "```{marimo .python"),
+    ],
+)
 def test_pyodide_bridge_export_markdown(
     pyodide_bridge: PyodideBridge,
+    flavor: str | None,
+    expected_filename: str,
+    expected_fence: str,
 ) -> None:
     """Test exporting markdown through the bridge."""
-    result = pyodide_bridge.export_markdown("{}")
-    markdown = json.loads(result)
+    request = {"download": False}
+    if flavor is not None:
+        request["flavor"] = flavor
 
-    assert isinstance(markdown, str)
-    assert len(markdown) > 0
+    result = pyodide_bridge.export_markdown(json.dumps(request))
+    exported_file = json.loads(result)
+
+    assert exported_file["filename"] == expected_filename
+    assert exported_file["mediaType"] == "text/plain; charset=utf-8"
+    assert expected_fence in exported_file["contents"]
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected_filename"),
+    [
+        ("renamed.py", "renamed.script.py"),
+        (None, "notebook.script.py"),
+    ],
+)
+def test_pyodide_bridge_export_script(
+    pyodide_bridge: PyodideBridge,
+    filename: str | None,
+    expected_filename: str,
+) -> None:
+    pyodide_bridge.session.app_manager.filename = filename
+    result = pyodide_bridge.export_script(
+        json.dumps(
+            {
+                "download": False,
+            }
+        )
+    )
+    exported_file = json.loads(result)
+
+    assert exported_file["filename"] == expected_filename
+    assert exported_file["mediaType"] == "text/plain; charset=utf-8"
+    assert '# %%\n"Hello, world!"' in exported_file["contents"]
 
 
 async def test_pyodide_bridge_read_snippets(

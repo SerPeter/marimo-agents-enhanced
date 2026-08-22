@@ -8,10 +8,10 @@ from dataclasses import dataclass
 from marimo._config.packages import infer_package_manager
 from marimo._config.utils import deep_copy
 
-if sys.version_info < (3, 11):
-    from typing_extensions import NotRequired
-else:
+if sys.version_info >= (3, 11):
     from typing import NotRequired
+else:
+    from typing_extensions import NotRequired
 
 from typing import (
     TYPE_CHECKING,
@@ -212,6 +212,8 @@ class DisplayConfig(TypedDict):
     - `default_table_page_size`: default number of rows to display in tables
     - `default_table_max_columns`: default maximum number of columns to display in tables
     - `reference_highlighting`: if `True`, highlight reactive variable references
+    - `code_lens`: if `True`, show inline icons in cell editors linking
+      datasources, storage buckets, and caches to their panels
     - `locale`: locale for date formatting and internationalization (e.g., "en-US", "en-GB", "de-DE")
     """
 
@@ -224,6 +226,7 @@ class DisplayConfig(TypedDict):
     default_table_page_size: int
     default_table_max_columns: int
     reference_highlighting: NotRequired[bool]
+    code_lens: NotRequired[bool]
     locale: NotRequired[str | None]
 
 
@@ -252,11 +255,20 @@ class ServerConfig(TypedDict):
         inside its static assets directory.
     - `disable_file_downloads`: if true, the file download button will be
         hidden in the file explorer.
+    - `transport`: experimental. The transport used to stream kernel
+        messages to the frontend, typically set with the
+        `MARIMO_SERVER_TRANSPORT` environment variable. `"websocket"`
+        (default) uses the `/ws` WebSocket endpoint; `"sse"` uses
+        server-sent events over HTTP, for deployments behind proxies or
+        services that do not support WebSockets. Terminal, LSP, and
+        real-time collaboration still require WebSockets; RTC is disabled
+        when using `"sse"`.
     """
 
     browser: Literal["default"] | str
     follow_symlink: bool
     disable_file_downloads: NotRequired[bool]
+    transport: NotRequired[Literal["websocket", "sse"]]
 
 
 @dataclass
@@ -328,7 +340,6 @@ class AiConfig(TypedDict, total=False):
     mode: NotRequired[CopilotMode]
     inline_tooltip: NotRequired[bool]
     models: AiModelConfig
-
     # providers
     open_ai: OpenAiConfig
     anthropic: AnthropicConfig
@@ -584,13 +595,41 @@ class SharingConfig(TypedDict):
 
 @dataclass
 class StoreConfig(TypedDict, total=False):
-    """Configuration for cache stores."""
+    """Configuration for a single cache store."""
 
     type: StoreKey
     args: dict[str, Any]
 
 
-CacheConfig = list[StoreConfig] | StoreConfig
+# One store, or a list composed into a TieredStore.
+CacheStoreConfig = list[StoreConfig] | StoreConfig
+
+CacheVerification = Literal["off", "on", "strict"]
+
+
+class CacheConfig(TypedDict, total=False):
+    """Configuration for caching.
+
+    `verification` is the signature-checking posture; `store` is the backing
+    store, or a list of stores composed into a `TieredStore`.
+    """
+
+    verification: CacheVerification
+    store: CacheStoreConfig
+
+
+class SigningConfig(TypedDict, total=False):
+    """Cache-signing trust and identity.
+
+    `trusted_signers` maps a key fingerprint (`"SHA256:<base64>"`) to an
+    advisory label. Trusting a key allows arbitrary code execution from its
+    holder on this machine — a cache restore is `pickle.loads` — so there is no
+    lesser cache-only grant. `private_key_path` is this machine's signing
+    identity; it is never serialized to the frontend.
+    """
+
+    trusted_signers: dict[str, str]
+    private_key_path: str
 
 
 class ExperimentalConfig(TypedDict, total=False):
@@ -604,9 +643,10 @@ class ExperimentalConfig(TypedDict, total=False):
     wasm_layouts: bool  # Used in playground (community cloud)
     rtc_v2: bool
     isolate_apps: bool
+    debugger: bool  # Live frame-watching debugger (gutter breakpoints + pdb)
+    line_timing: bool  # Active-line highlight + per-line timer (sys.settrace)
 
     # Internal features
-    cache: CacheConfig
     execution_type: ExecutionType
 
 
@@ -638,6 +678,8 @@ class MarimoConfig(TypedDict):
     sharing: NotRequired[SharingConfig]
     mcp: NotRequired[MCPConfig]
     venv: NotRequired[VenvConfig]
+    cache: NotRequired[CacheConfig]
+    signing: NotRequired[SigningConfig]
 
 
 @mddoc
@@ -705,6 +747,8 @@ class PartialMarimoConfig(TypedDict, total=False):
     datasources: NotRequired[DatasourcesConfig]
     sharing: NotRequired[SharingConfig]
     venv: NotRequired[VenvConfig]
+    cache: NotRequired[CacheConfig]
+    signing: NotRequired[SigningConfig]
 
 
 DEFAULT_CONFIG: MarimoConfig = {
@@ -723,6 +767,7 @@ DEFAULT_CONFIG: MarimoConfig = {
         "default_table_page_size": 10,
         "default_table_max_columns": 50,
         "reference_highlighting": True,
+        "code_lens": True,
     },
     "formatting": {"line_length": 79},
     "keymap": {"preset": "default", "overrides": {}},
@@ -735,10 +780,10 @@ DEFAULT_CONFIG: MarimoConfig = {
         "on_cell_change": "autorun",
         "watcher_on_save": "lazy",
         "output_max_bytes": int(
-            os.getenv("MARIMO_OUTPUT_MAX_BYTES", 8_000_000)
+            os.getenv("MARIMO_OUTPUT_MAX_BYTES", "8000000")
         ),
         "std_stream_max_bytes": int(
-            os.getenv("MARIMO_STD_STREAM_MAX_BYTES", 1_000_000)
+            os.getenv("MARIMO_STD_STREAM_MAX_BYTES", "1000000")
         ),
         "default_sql_output": "auto",
         "default_csv_encoding": "utf-8",
@@ -819,7 +864,12 @@ def merge_config(
     # Fields that should be replaced instead of merged.
     # These are "record" types where keys can be added/removed,
     # as opposed to config objects where you only set specific fields.
-    replace_paths = frozenset({"ai.custom_providers"})
+    # NB. `signing.trusted_signers` is replaced, not deep-merged. A deep merge
+    # unions the fingerprints from every layer. Then no layer can remove a
+    # signer that a lower-priority one anchored.
+    replace_paths = frozenset(
+        {"ai.custom_providers", "signing.trusted_signers"}
+    )
 
     merged = cast(
         MarimoConfig,

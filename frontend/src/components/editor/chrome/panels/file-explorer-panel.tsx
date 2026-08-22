@@ -1,37 +1,28 @@
 /* Copyright 2026 Marimo. All rights reserved. */
 
 import { useAtom, useAtomValue } from "jotai";
-import { atomWithStorage } from "jotai/utils";
 import { FileIcon, HardDrive } from "lucide-react";
 import React, { useCallback, useMemo } from "react";
 import useResizeObserver from "use-resize-observer";
 import { StorageInspector } from "@/components/storage/storage-inspector";
 import { Accordion } from "@/components/ui/accordion";
 import { storageNamespacesAtom } from "@/core/storage/state";
+import { useDetectedDataSources } from "@/hooks/useDataSourceDiscovery";
 import { cn } from "@/utils/cn";
-import { jotaiJsonStorage } from "@/utils/storage/jotai";
 import { TreeDndProvider } from "../../file-tree/dnd-wrapper";
 import { FileExplorer } from "../../file-tree/file-explorer";
 import { useFileExplorerUpload } from "../../file-tree/upload";
 import {
+  DiscoveredSourcesBadge,
   PanelAccordionContent,
   PanelAccordionItem,
   PanelAccordionTrigger,
   PanelBadge,
 } from "./components";
-
-type OpenSections = "files" | "remote-storage";
-
-interface FileExplorerPanelState {
-  openSections: OpenSections[];
-  hasUserInteracted: boolean;
-}
-
-const fileExplorerPanelAtom = atomWithStorage<FileExplorerPanelState>(
-  "marimo:file-explorer-panel:state",
-  { openSections: ["files"], hasUserInteracted: false },
-  jotaiJsonStorage,
-);
+import {
+  fileExplorerPanelAtom,
+  type FileExplorerPanelSection,
+} from "./panel-accordion-state";
 
 const FileExplorerComponent: React.FC<{ height: number }> = ({ height }) => {
   const { getRootProps, getInputProps, isDragActive } = useFileExplorerUpload({
@@ -69,8 +60,9 @@ const FileExplorerPanel: React.FC = () => {
 
   const storageNamespaces = useAtomValue(storageNamespacesAtom);
   const remoteStorageConnections = storageNamespaces.length;
+  const pendingDataSources = useDetectedDataSources("storage");
 
-  const openSections = useMemo<OpenSections[]>(() => {
+  const openSections = useMemo<FileExplorerPanelSection[]>(() => {
     if (!state.hasUserInteracted && remoteStorageConnections > 0) {
       if (state.openSections.includes("remote-storage")) {
         return state.openSections;
@@ -81,7 +73,7 @@ const FileExplorerPanel: React.FC = () => {
   }, [state.hasUserInteracted, state.openSections, remoteStorageConnections]);
 
   const handleValueChange = useCallback(
-    (value: OpenSections[]) => {
+    (value: FileExplorerPanelSection[]) => {
       setState({
         openSections: value,
         hasUserInteracted: true,
@@ -92,6 +84,7 @@ const FileExplorerPanel: React.FC = () => {
 
   const availableContent = panelHeight - TRIGGER_HEIGHT * 2;
   const storageIsOpen = openSections.includes("remote-storage");
+  const showDiscoveredStorageBadge = pendingDataSources.length > 0;
   const bothOpen = storageIsOpen && openSections.includes("files");
 
   const storageMaxHeight = bothOpen
@@ -114,6 +107,12 @@ const FileExplorerPanel: React.FC = () => {
             <HardDrive className="w-4 h-4" /> Remote storage
             {remoteStorageConnections > 0 && (
               <PanelBadge>{remoteStorageConnections}</PanelBadge>
+            )}
+            {showDiscoveredStorageBadge && (
+              <DiscoveredSourcesBadge
+                count={pendingDataSources.length}
+                type="storage"
+              />
             )}
           </PanelAccordionTrigger>
           <PanelAccordionContent

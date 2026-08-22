@@ -366,6 +366,47 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/datasources/discover": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: {
+      parameters: {
+        query?: never;
+        header: {
+          "Marimo-Session-Id": string;
+        };
+        path?: never;
+        cookie?: never;
+      };
+      requestBody: {
+        content: {
+          "application/json": components["schemas"]["DiscoverDataSourcesRequest"];
+        };
+      };
+      responses: {
+        /** @description Discover datasource connections */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            "application/json": components["schemas"]["SuccessResponse"];
+          };
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/datasources/preview_column": {
     parameters: {
       query?: never;
@@ -649,6 +690,62 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/environment": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description Environment information for issue reporting */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            "application/json": {
+              Binaries: {
+                [key: string]: string;
+              };
+              Dependencies: {
+                [key: string]: string;
+              };
+              "Experimental Flags": {
+                [key: string]: unknown;
+              };
+              Locale: string;
+              OS: string;
+              "OS Version": string;
+              "Optional Dependencies": {
+                [key: string]: string;
+              };
+              Processor: string;
+              "Python Version": string;
+              editable: boolean;
+              location: string;
+              marimo: string;
+            };
+          };
+        };
+      };
+    };
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/export/auto_export/html": {
     parameters: {
       query?: never;
@@ -717,7 +814,7 @@ export interface paths {
       };
       requestBody?: {
         content: {
-          "application/json": components["schemas"]["ExportAsIPYNBRequest"];
+          "application/json": components["schemas"]["AutoExportAsIPYNBRequest"];
         };
       };
       responses: {
@@ -765,7 +862,7 @@ export interface paths {
       };
       requestBody?: {
         content: {
-          "application/json": components["schemas"]["ExportAsMarkdownRequest"];
+          "application/json": components["schemas"]["AutoExportAsMarkdownRequest"];
         };
       };
       responses: {
@@ -787,6 +884,41 @@ export interface paths {
         };
       };
     };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/export/availability": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description Readiness for server-backed exports */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            "application/json": components["schemas"]["ExportAvailabilityResponse"];
+          };
+        };
+      };
+    };
+    put?: never;
+    post?: never;
     delete?: never;
     options?: never;
     head?: never;
@@ -992,6 +1124,47 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/export/requirements/install": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: {
+      parameters: {
+        query?: never;
+        header: {
+          "Marimo-Session-Id": string;
+        };
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: {
+        content: {
+          "application/json": components["schemas"]["InstallExportRequirementsRequest"];
+        };
+      };
+      responses: {
+        /** @description Updated readiness for server-backed exports */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            "application/json": components["schemas"]["ExportAvailabilityResponse"];
+          };
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/export/script": {
     parameters: {
       query?: never;
@@ -1025,7 +1198,7 @@ export interface paths {
             "text/plain": string;
           };
         };
-        /** @description File must be saved before downloading */
+        /** @description Invalid export request */
         400: {
           headers: {
             [name: string]: unknown;
@@ -1199,6 +1372,65 @@ export interface paths {
         };
       };
     };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/files/download": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: {
+      parameters: {
+        query: {
+          /** @description Path of the file to download */
+          path: string;
+        };
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description Stream the file as an attachment */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            "application/octet-stream": string;
+          };
+        };
+        /** @description Path is missing or is a directory */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content?: never;
+        };
+        /** @description File downloads are disabled */
+        403: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content?: never;
+        };
+        /** @description File not found */
+        404: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content?: never;
+        };
+      };
+    };
+    put?: never;
+    post?: never;
     delete?: never;
     options?: never;
     head?: never;
@@ -1973,6 +2205,47 @@ export interface paths {
       requestBody?: never;
       responses: {
         /** @description Interrupt the kernel's execution */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            "application/json": components["schemas"]["SuccessResponse"];
+          };
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/kernel/pdb/breakpoints": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: {
+      parameters: {
+        query?: never;
+        header: {
+          "Marimo-Session-Id": string;
+        };
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: {
+        content: {
+          "application/json": components["schemas"]["SetBreakpointsRequest"];
+        };
+      };
+      responses: {
+        /** @description Set the live debugger's breakpoints for the session. */
         200: {
           headers: {
             [name: string]: unknown;
@@ -3376,6 +3649,25 @@ export type webhooks = Record<string, any>;
 export interface components {
   schemas: {
     /**
+     * ActiveLineNotification
+     * @description Reports the line a cell's frame watcher is currently executing.
+     *
+     *         Emitted on a timed heartbeat while a cell runs (only when the line
+     *         changed), so the editor can highlight the live line. A `None` line
+     *         clears the highlight (e.g. when the cell finishes).
+     *
+     *         Attributes:
+     *             cell_id: Cell whose frame is being watched.
+     *             line: 1-based line within the cell, or `None` to clear.
+     */
+    ActiveLineNotification: {
+      cell_id: components["schemas"]["CellId"];
+      /** @default null */
+      line?: number | null;
+      /** @enum {unknown} */
+      op: "active-line";
+    };
+    /**
      * AddPackageRequest
      * @description This can be a remove package or a local package.
      *
@@ -3530,6 +3822,14 @@ export interface components {
     AnthropicConfig: {
       api_key?: string;
     };
+    /** AutoExportAsIPYNBRequest */
+    AutoExportAsIPYNBRequest: {
+      download: boolean;
+    };
+    /** AutoExportAsMarkdownRequest */
+    AutoExportAsMarkdownRequest: {
+      download: boolean;
+    };
     /**
      * BannerNotification
      * @description Persistent banner message at top of notebook.
@@ -3594,6 +3894,20 @@ export interface components {
       bytes_freed: number;
       /** @enum {unknown} */
       op: "cache-cleared";
+    };
+    /**
+     * CacheConfig
+     * @description Configuration for caching.
+     *
+     *         `verification` is the signature-checking posture; `store` is the backing
+     *         store, or a list of stores composed into a `TieredStore`.
+     */
+    CacheConfig: {
+      store?:
+        | components["schemas"]["StoreConfig"][]
+        | components["schemas"]["StoreConfig"];
+      /** @enum {unknown} */
+      verification?: "off" | "on" | "strict";
     };
     /**
      * CacheInfoNotification
@@ -3775,6 +4089,14 @@ export interface components {
       role: "assistant" | "system" | "user";
     };
     /**
+     * ChatOptions
+     * @description Used to configure capabilities of the AI agent.
+     */
+    ChatOptions: {
+      /** @default false */
+      webSearch?: boolean;
+    };
+    /**
      * ChatRequest
      * @description UIMessages are expected to be AI SDK messages.
      *     See pydantic_ai.ui.vercel_ai.request_types.UIMessage or Vercel AI SDK documentation.
@@ -3783,6 +4105,7 @@ export interface components {
       includeOtherCode: string;
       /** @default null */
       model?: string | null;
+      options?: components["schemas"]["ChatOptions"];
       /** @default null */
       tools?: components["schemas"]["ToolDefinition"][] | null;
       uiMessages: Record<string, any>[];
@@ -3932,13 +4255,16 @@ export interface components {
      * @description Per-consumer access capabilities for a session connection.
      *
      *         - editor: `{edit: True, interact: True}`
-     *         - viewer: `{edit: False, interact: False}`
+     *         - interactor: `{edit: False, interact: True}` (default for a secondary
+     *           connection: drives UI state but cannot edit the notebook)
+     *         - read-only viewer: `{edit: False, interact: False}` (opt-in, set by a
+     *           deployment's capability provider)
      *
-     *         These gate the frontend UI; they are not the server's authority boundary.
-     *         Scopes are granted per session mode (see `@requires`), so in an edit session
-     *         every connection (viewers included) carries the `edit` scope and can issue
-     *         edit requests. A viewer's read-only status is enforced by the client hiding
-     *         edit affordances, not by the server rejecting the request.
+     *         The server enforces these: control requests are gated against the issuing
+     *         consumer's stored capabilities at the control-request chokepoint (the
+     *         authority) and mirrored as an advisory HTTP 403 at the request handlers.
+     *         Commands classified as `read` in `marimo._session.capabilities` (such as
+     *         completions and previews) are always permitted.
      */
     ConsumerCapabilities: {
       edit: boolean;
@@ -4074,6 +4400,20 @@ export interface components {
       op: "data-source-connections";
     };
     /**
+     * DataSourceDiscoveryResultNotification
+     * @description High-confidence datasource connections discovered by the kernel.
+     *
+     *         Attributes:
+     *             request_id: Request ID this responds to.
+     *             sources: Detected datasource connection configurations.
+     */
+    DataSourceDiscoveryResultNotification: {
+      /** @enum {unknown} */
+      op: "data-source-discovery-result";
+      request_id: string;
+      sources: components["schemas"]["DetectedDataSource"][];
+    };
+    /**
      * DataTable
      * @description Represents a data table.
      *
@@ -4130,6 +4470,7 @@ export interface components {
         | "boolean"
         | "date"
         | "datetime"
+        | "geometry"
         | "integer"
         | "number"
         | "string"
@@ -4259,6 +4600,47 @@ export interface components {
       tree: null | components["schemas"]["DependencyTreeNode"];
     };
     /**
+     * DetectedDataSource
+     * @description A secret-free datasource suggestion produced by the kernel.
+     */
+    DetectedDataSource: {
+      /** @enum {unknown} */
+      category: "catalog" | "database" | "object-storage";
+      code: string;
+      /** @enum {unknown} */
+      confidence: "high" | "medium";
+      configuration: components["schemas"]["DetectedDataSourceConfiguration"][];
+      displayName: string;
+      hidesWhen:
+        | components["schemas"]["DialectHidesWhen"]
+        | components["schemas"]["StorageHidesWhen"];
+      id: string;
+      integration: string;
+      origins: components["schemas"]["DetectedDataSourceOrigin"][];
+    };
+    /** DetectedDataSourceConfiguration */
+    DetectedDataSourceConfiguration: {
+      field: string;
+      value:
+        | components["schemas"]["EnvironmentVariableDiscoveryValue"]
+        | components["schemas"]["SafeLiteralDiscoveryValue"];
+    };
+    /** DetectedDataSourceOrigin */
+    DetectedDataSourceOrigin: {
+      label: string;
+      /** @enum {unknown} */
+      type: "configuration" | "environment";
+    };
+    /**
+     * DialectHidesWhen
+     * @description Hide this suggestion when a live SQL engine dialect contains a substring.
+     */
+    DialectHidesWhen: {
+      /** @enum {unknown} */
+      kind: "dialect";
+      substrings: string[];
+    };
+    /**
      * DiagnosticsConfig
      * @description Configuration options for diagnostics.
      *
@@ -4270,6 +4652,22 @@ export interface components {
     DiagnosticsConfig: {
       enabled?: boolean;
       sql_linter?: boolean;
+    };
+    /**
+     * DiscoverDataSourcesCommand
+     * @description Discover datasource connections from the live kernel environment and configuration.
+     *
+     *         Attributes:
+     *             request_id: Unique identifier for this request.
+     */
+    DiscoverDataSourcesCommand: {
+      requestId: components["schemas"]["RequestId"];
+      /** @enum {unknown} */
+      type: "discover-data-sources";
+    };
+    /** DiscoverDataSourcesRequest */
+    DiscoverDataSourcesRequest: {
+      requestId: components["schemas"]["RequestId"];
     };
     /**
      * DisplayConfig
@@ -4285,12 +4683,15 @@ export interface components {
      *         - `default_table_page_size`: default number of rows to display in tables
      *         - `default_table_max_columns`: default maximum number of columns to display in tables
      *         - `reference_highlighting`: if `True`, highlight reactive variable references
+     *         - `code_lens`: if `True`, show inline icons in cell editors linking
+     *           datasources, storage buckets, and caches to their panels
      *         - `locale`: locale for date formatting and internationalization (e.g., "en-US", "en-GB", "de-DE")
      */
     DisplayConfig: {
       /** @enum {unknown} */
       cell_output: "above" | "below";
       code_editor_font_size: number;
+      code_lens?: boolean;
       custom_css?: string[];
       /** @enum {unknown} */
       dataframes: "plain" | "rich";
@@ -4302,6 +4703,33 @@ export interface components {
       reference_highlighting?: boolean;
       /** @enum {unknown} */
       theme: "dark" | "light" | "system";
+    };
+    /**
+     * EnvironmentVariableDiscoveryValue
+     * @description A reference to an environment variable, never its value.
+     */
+    EnvironmentVariableDiscoveryValue: {
+      /** @enum {unknown} */
+      kind: "environment-variable";
+      name: string;
+    };
+    /**
+     * EsmSpec
+     * @description Where the frontend imports a widget's ESM from, and which version.
+     *
+     *         Specs travel only on kernel-authored notifications, never in model
+     *         state: state is client-writable and echoed to peers, so executing
+     *         code from it would let one client run code on another.
+     *
+     *         Attributes:
+     *             url: URL to import the ESM from. A virtual file for inline
+     *                 source; an external URL when `_esm` is itself a URL.
+     *             hash: Hash of the `_esm` string. Keys the frontend module cache
+     *                 and signals code changes (hot reload).
+     */
+    EsmSpec: {
+      hash: string;
+      url: string;
     };
     /**
      * ExecuteCellCommand
@@ -4432,34 +4860,56 @@ export interface components {
     /** ExportAsIPYNBRequest */
     ExportAsIPYNBRequest: {
       download: boolean;
+      /** @default true */
+      includeOutputs?: boolean;
+      /**
+       * @default top-down
+       * @enum {unknown}
+       */
+      sortMode?: "top-down" | "topological";
     };
     /** ExportAsMarkdownRequest */
     ExportAsMarkdownRequest: {
       download: boolean;
+      /** @default null */
+      flavor?: ("mdx" | "mystmd" | "pymdown" | "qmd") | null;
     };
     /** ExportAsPDFRequest */
     ExportAsPDFRequest: {
       /** @default false */
       includeInputs?: boolean;
+      /** @default true */
+      includeOutputs?: boolean;
       /**
        * @default document
        * @enum {unknown}
        */
       preset?: "document" | "slides";
-      /** @default 4 */
-      rasterScale?: number;
-      /**
-       * @default static
-       * @enum {unknown}
-       */
-      rasterServer?: "live" | "static";
-      /** @default true */
-      rasterizeOutputs?: boolean;
       webpdf: boolean;
     };
     /** ExportAsScriptRequest */
     ExportAsScriptRequest: {
       download: boolean;
+    };
+    /** ExportAvailabilityResponse */
+    ExportAvailabilityResponse: {
+      formats: components["schemas"]["ExportFormatAvailability"][];
+      /** @enum {unknown} */
+      source: "server";
+    };
+    /** ExportFormatAvailability */
+    ExportFormatAvailability: {
+      dependenciesAvailable: boolean;
+      /** @enum {unknown} */
+      format: "html" | "ipynb" | "markdown" | "pdf" | "script";
+      missingPackages: string[];
+      missingSetup: components["schemas"]["ExportSetupRequirement"][];
+    };
+    /** ExportSetupRequirement */
+    ExportSetupRequirement: {
+      command: string;
+      /** @enum {unknown} */
+      name: "playwright-chromium";
     };
     /** FileCopyRequest */
     FileCopyRequest: {
@@ -4523,6 +4973,8 @@ export interface components {
     };
     /** FileDetailsRequest */
     FileDetailsRequest: {
+      /** @default null */
+      maxBytes?: number | null;
       path: string;
     };
     /** FileDetailsResponse */
@@ -4532,6 +4984,8 @@ export interface components {
       file: components["schemas"]["FileInfo"];
       /** @default false */
       isBase64?: boolean;
+      /** @default false */
+      isTooLarge?: boolean;
       /** @default null */
       mimeType?: string | null;
     };
@@ -4548,6 +5002,8 @@ export interface components {
       /** @default null */
       opengraph?: null | components["schemas"]["OpenGraphMetadata"];
       path: string;
+      /** @default null */
+      size?: number | null;
     };
     /** FileListRequest */
     FileListRequest: {
@@ -4770,6 +5226,11 @@ export interface components {
       msg: string;
       /** @enum {unknown} */
       type: "import-star";
+    };
+    /** InstallExportRequirementsRequest */
+    InstallExportRequirementsRequest: {
+      /** @enum {unknown} */
+      format: "html" | "ipynb" | "markdown" | "pdf" | "script";
     };
     /**
      * InstallPackagesCommand
@@ -5014,6 +5475,7 @@ export interface components {
         | components["schemas"]["ExecuteScratchpadCommand"]
         | components["schemas"]["ExecuteStaleCellsCommand"]
         | components["schemas"]["DebugCellCommand"]
+        | components["schemas"]["SetBreakpointsCommand"]
         | components["schemas"]["DeleteCellCommand"]
         | components["schemas"]["SyncGraphCommand"]
         | components["schemas"]["UpdateCellConfigCommand"]
@@ -5028,6 +5490,7 @@ export interface components {
         | components["schemas"]["ListSQLSchemasCommand"]
         | components["schemas"]["ValidateSQLCommand"]
         | components["schemas"]["ListDataSourceConnectionCommand"]
+        | components["schemas"]["DiscoverDataSourcesCommand"]
         | components["schemas"]["StorageListEntriesCommand"]
         | components["schemas"]["StorageDownloadCommand"]
         | components["schemas"]["ListSecretKeysCommand"]
@@ -5040,6 +5503,7 @@ export interface components {
         | "boolean"
         | "date"
         | "datetime"
+        | "geometry"
         | "integer"
         | "number"
         | "string"
@@ -5089,6 +5553,7 @@ export interface components {
         | components["schemas"]["SQLTableListPreviewNotification"]
         | components["schemas"]["SQLSchemaListPreviewNotification"]
         | components["schemas"]["DataSourceConnectionsNotification"]
+        | components["schemas"]["DataSourceDiscoveryResultNotification"]
         | components["schemas"]["ValidateSQLResultNotification"]
         | components["schemas"]["StorageNamespacesNotification"]
         | components["schemas"]["StorageEntriesNotification"]
@@ -5097,6 +5562,7 @@ export interface components {
         | components["schemas"]["CacheClearedNotification"]
         | components["schemas"]["CacheInfoNotification"]
         | components["schemas"]["FocusCellNotification"]
+        | components["schemas"]["ActiveLineNotification"]
         | components["schemas"]["NotebookDocumentTransactionNotification"]
         | components["schemas"]["ConsumerCapabilitiesNotification"];
     };
@@ -5357,6 +5823,7 @@ export interface components {
      */
     MarimoConfig: {
       ai?: components["schemas"]["AiConfig"];
+      cache?: components["schemas"]["CacheConfig"];
       completion: components["schemas"]["CompletionConfig"];
       datasources?: components["schemas"]["DatasourcesConfig"];
       diagnostics?: components["schemas"]["DiagnosticsConfig"];
@@ -5372,6 +5839,7 @@ export interface components {
       save: components["schemas"]["SaveConfig"];
       server: components["schemas"]["ServerConfig"];
       sharing?: components["schemas"]["SharingConfig"];
+      signing?: components["schemas"]["SigningConfig"];
       snippets?: components["schemas"]["SnippetsConfig"];
       venv?: components["schemas"]["VenvConfig"];
     };
@@ -5549,10 +6017,23 @@ export interface components {
     /**
      * ModelOpen
      * @description Initial widget state on creation.
+     *
+     *         For anywidgets, the widget's ESM does not travel in `state`: the
+     *         comm strips `_esm` and sends an `EsmSpec` instead. `None` for
+     *         models with no ESM (e.g. traditional ipywidgets).
+     *
+     *         Attributes:
+     *             state: Initial trait values, minus `_esm`.
+     *             buffer_paths: Paths into `state` whose binary values were
+     *                 extracted into `buffers`.
+     *             buffers: Binary payloads, parallel to `buffer_paths`.
+     *             esm_spec: Where to import this widget's ESM from.
      */
     ModelOpen: {
       buffer_paths: (string | number)[][];
       buffers: components["schemas"]["Base64String"][];
+      /** @default null */
+      esm_spec?: null | components["schemas"]["EsmSpec"];
       /** @enum {unknown} */
       method: "open";
       state: Record<string, any>;
@@ -5569,10 +6050,22 @@ export interface components {
     /**
      * ModelUpdate
      * @description State sync - changed traits only.
+     *
+     *         Attributes:
+     *             state: Changed trait values, minus `_esm` (see `ModelOpen`).
+     *             buffer_paths: Paths into `state` whose binary values were
+     *                 extracted into `buffers`.
+     *             buffers: Binary payloads, parallel to `buffer_paths`.
+     *             esm_spec: Present only when the widget's `_esm` changed on a
+     *                 live model (hot reload, edit mode only). A spec whose
+     *                 `hash` differs from the current one tells the frontend the
+     *                 widget's code changed and views must be rebuilt.
      */
     ModelUpdate: {
       buffer_paths: (string | number)[][];
       buffers: components["schemas"]["Base64String"][];
+      /** @default null */
+      esm_spec?: null | components["schemas"]["EsmSpec"];
       /** @enum {unknown} */
       method: "update";
       state: Record<string, any>;
@@ -6136,6 +6629,15 @@ export interface components {
       request_id: components["schemas"]["RequestId"];
       table: null | components["schemas"]["DataTable"];
     };
+    /**
+     * SafeLiteralDiscoveryValue
+     * @description Non-sensitive metadata that is safe to send to the frontend.
+     */
+    SafeLiteralDiscoveryValue: {
+      /** @enum {unknown} */
+      kind: "safe-literal";
+      value: string;
+    };
     /** SaveAppConfigurationRequest */
     SaveAppConfigurationRequest: {
       config: Record<string, any>;
@@ -6242,14 +6744,53 @@ export interface components {
      *             inside its static assets directory.
      *         - `disable_file_downloads`: if true, the file download button will be
      *             hidden in the file explorer.
+     *         - `transport`: experimental. The transport used to stream kernel
+     *             messages to the frontend, typically set with the
+     *             `MARIMO_SERVER_TRANSPORT` environment variable. `"websocket"`
+     *             (default) uses the `/ws` WebSocket endpoint; `"sse"` uses
+     *             server-sent events over HTTP, for deployments behind proxies or
+     *             services that do not support WebSockets. Terminal, LSP, and
+     *             real-time collaboration still require WebSockets; RTC is disabled
+     *             when using `"sse"`.
      */
     ServerConfig: {
       browser: "default" | string;
       disable_file_downloads?: boolean;
       follow_symlink: boolean;
+      /** @enum {unknown} */
+      transport?: "sse" | "websocket";
     };
     /** Format: session-id */
     SessionId: TypedString<"SessionId">;
+    /**
+     * SetBreakpointsCommand
+     * @description Set the live debugger's breakpoints (session-scoped, not persisted).
+     *
+     *         Replaces the full breakpoint set: the frontend always sends the complete
+     *         map of cell id -> 1-based line numbers. Only meaningful when the
+     *         `debugger` experimental feature is enabled.
+     *
+     *         Attributes:
+     *             breakpoints: Map of cell id to lines that have a breakpoint.
+     *             request: HTTP request context if available.
+     */
+    SetBreakpointsCommand: {
+      breakpoints: {
+        [key: string]: number[];
+      };
+      /** @default null */
+      request?: components["schemas"]["HTTPRequest"] | null;
+      /** @enum {unknown} */
+      type: "set-breakpoints";
+    };
+    /** SetBreakpointsRequest */
+    SetBreakpointsRequest: {
+      breakpoints: {
+        [key: string]: number[];
+      };
+      /** @default null */
+      request?: components["schemas"]["HTTPRequest"] | null;
+    };
     /**
      * SetCode
      * @description Replace a cell's source code.
@@ -6306,6 +6847,22 @@ export interface components {
     /** ShutdownSessionRequest */
     ShutdownSessionRequest: {
       sessionId: components["schemas"]["SessionId"];
+    };
+    /**
+     * SigningConfig
+     * @description Cache-signing trust and identity.
+     *
+     *         `trusted_signers` maps a key fingerprint (`"SHA256:<base64>"`) to an
+     *         advisory label. Trusting a key allows arbitrary code execution from its
+     *         holder on this machine — a cache restore is `pickle.loads` — so there is no
+     *         lesser cache-only grant. `private_key_path` is this machine's signing
+     *         identity; it is never serialized to the frontend.
+     */
+    SigningConfig: {
+      private_key_path?: string;
+      trusted_signers?: {
+        [key: string]: string;
+      };
     };
     /** Snippet */
     Snippet: {
@@ -6510,6 +7067,16 @@ export interface components {
       size: number;
     };
     /**
+     * StorageHidesWhen
+     * @description Hide this suggestion when a live storage namespace matches.
+     */
+    StorageHidesWhen: {
+      backendTypes: string[];
+      /** @enum {unknown} */
+      kind: "storage";
+      protocols: string[];
+    };
+    /**
      * StorageListEntriesCommand
      * @description List storage entries at a prefix.
      *
@@ -6558,7 +7125,7 @@ export interface components {
      */
     StorageNamespace: {
       /** @enum {unknown} */
-      backendType: "fsspec" | "obstore";
+      backendType: "fsspec" | "huggingface" | "obstore";
       displayName: string;
       name: components["schemas"]["VariableName"];
       protocol: string;
@@ -6579,7 +7146,7 @@ export interface components {
     };
     /**
      * StoreConfig
-     * @description Configuration for cache stores.
+     * @description Configuration for a single cache store.
      */
     StoreConfig: {
       args?: Record<string, any>;

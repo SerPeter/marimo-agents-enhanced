@@ -11,12 +11,15 @@ import narwhals.stable.v2 as nw
 
 from marimo import _loggers
 from marimo._data.models import ExternalDataType
-from marimo._dependencies.dependencies import DependencyManager
 from marimo._messaging.msgspec_encoder import enc_hook
 from marimo._output.data.data import sanitize_json_bigint
 from marimo._plugins.ui._impl.tables.format import (
     FormatMapping,
     format_value,
+)
+from marimo._plugins.ui._impl.tables.geometry import (
+    GeometryColumnInfo,
+    format_geometry_cell,
 )
 from marimo._plugins.ui._impl.tables.narwhals_table import NarwhalsTableManager
 from marimo._plugins.ui._impl.tables.selection import INDEX_COLUMN_NAME
@@ -30,13 +33,41 @@ from marimo._plugins.ui._impl.tables.table_manager import (
 
 if TYPE_CHECKING:
     import pandas as pd
+    from pandas._typing import DtypeObj
 
     from marimo._plugins.ui._impl.table import SortArgs
 
 LOGGER = _loggers.marimo_logger()
 
-if TYPE_CHECKING:
-    from pandas._typing import DtypeObj
+
+def _dataframe_to_arrow_ipc(df: pd.DataFrame) -> bytes:
+    """Serialize a pandas DataFrame to Arrow IPC bytes."""
+    import pyarrow as pa
+
+    out = io.BytesIO()
+    table = pa.Table.from_pandas(df)
+    with pa.ipc.new_file(out, table.schema) as writer:
+        writer.write_table(table)
+    return out.getvalue()
+
+
+def _format_geometry_columns(
+    df: pd.DataFrame,
+    geometry_columns: dict[str, GeometryColumnInfo],
+) -> None:
+    import pandas as pd
+
+    for col, geometry_info in geometry_columns.items():
+        if col not in df.columns:
+            continue
+        df[col] = pd.Series(
+            [
+                format_geometry_cell(value, geometry_info.encoding)
+                for value in df[col]
+            ],
+            index=df.index,
+            dtype=object,
+        )
 
 
 def _trivial_range_index(index: pd.Index) -> bool:
@@ -46,9 +77,61 @@ def _trivial_range_index(index: pd.Index) -> bool:
     return isinstance(index, pd.RangeIndex) and index.name is None
 
 
-def _resolve_index_name(name: object, columns: set[str]) -> str:
-    """Return a non-conflicting index name by appending '_index' if needed."""
-    return f"{name}_index" if name in columns else str(name)
+def _flatten_non_trivial_index(df: pd.DataFrame) -> pd.DataFrame:
+    """Turn a MultiIndex or named index into regular columns.
+
+    An unnamed default RangeIndex (0, 1, 2, ...) is left untouched. Each level
+    of a MultiIndex or named index becomes its own column, named via
+    `_index_level_names`.
+    """
+    import pandas as pd
+
+    is_multi_index = isinstance(df.index, pd.MultiIndex)
+    is_non_trivial_index = isinstance(
+        df.index, pd.Index
+    ) and not _trivial_range_index(df.index)
+
+    if not is_multi_index and not is_non_trivial_index:
+        return df
+
+    names = _index_level_names(df.index, set(df.columns))
+    return df.rename_axis(names).reset_index()
+
+
+def _rename_index_levels(index: pd.Index, names: list[str]) -> pd.Index:
+    """Return `index` with its levels renamed to `names`, in level order."""
+    import pandas as pd
+
+    if isinstance(index, pd.MultiIndex):
+        return index.set_names(names)
+    return index.rename(names[0])
+
+
+def _resolve_index_name(name: object, used: set[str]) -> str:
+    """Return a name absent from `used`, appending '_index' until unique."""
+    resolved = str(name)
+    while resolved in used:
+        resolved = f"{resolved}_index"
+    return resolved
+
+
+def _index_level_names(index: pd.Index, columns: set[str]) -> list[str]:
+    """Column name for each index level, in level order.
+
+    Unnamed levels are numbered `Index0`, `Index1`, ... Names colliding with
+    `columns` or with an earlier level get an `_index` suffix until unique.
+    """
+    unnamed_count = 0
+    used = set(columns)
+    names: list[str] = []
+    for name in index.names:
+        if name is None:
+            name = f"Index{unnamed_count}"
+            unnamed_count += 1
+        resolved = _resolve_index_name(name, used)
+        used.add(resolved)
+        names.append(resolved)
+    return names
 
 
 def _resolve_index_column_conflicts(df: pd.DataFrame) -> pd.DataFrame:
@@ -57,8 +140,6 @@ def _resolve_index_column_conflicts(df: pd.DataFrame) -> pd.DataFrame:
     Avoids 'ValueError: cannot insert x, already exists' on reset_index().
     Modifies the DataFrame in-place and returns it.
     """
-    import pandas as pd
-
     index_names = df.index.names
     conflicting_names = set(index_names) & set(df.columns)
     if not conflicting_names:
@@ -67,46 +148,48 @@ def _resolve_index_column_conflicts(df: pd.DataFrame) -> pd.DataFrame:
     columns = set(df.columns)
     new_names = [_resolve_index_name(name, columns) for name in index_names]
 
-    if isinstance(df.index, pd.MultiIndex):
-        df.index = df.index.set_names(new_names)
-    else:
-        df.index = df.index.rename(new_names[0])
-
+    df.index = _rename_index_levels(df.index, new_names)
     return df
 
 
-def _extension_column_needs_stringify(series: pd.Series[Any]) -> bool:
-    """Whether an extension-array column should be cast to str for JSON."""
+def _stringify_preserving_nulls(
+    series: pd.Series[Any],
+    notna_mask: pd.Series[bool] | None = None,
+) -> pd.Series[Any]:
+    """Convert values to strings and preserve missing values."""
+    if notna_mask is None:
+        notna_mask = series.notna()
+
+    stringified = series.apply(str)
+    if not notna_mask.all():
+        stringified = stringified.astype(object).where(notna_mask, None)
+    return stringified
+
+
+def _extension_column_needs_stringify(
+    series: pd.Series[Any],
+    notna_mask: pd.Series[bool] | None = None,
+) -> bool:
+    """Whether an extension-array column needs a string cast for JSON."""
     from pandas.api.types import is_extension_array_dtype
 
     try:
         if not is_extension_array_dtype(series.dtype):
             return False
 
-        notna = series.notna()
-        if not notna.any():
+        if notna_mask is None:
+            notna_mask = series.notna()
+        if not notna_mask.any():
             return False
 
         # Position-based sample: avoids dropna() copies and .at on
         # duplicate labels (which can return a Series instead of a scalar).
-        sample = series.iat[int(notna.to_numpy().argmax())]
+        sample = series.iat[int(notna_mask.to_numpy().argmax())]
         serialized = json.loads(json.dumps(sample, default=enc_hook))
         return not isinstance(serialized, (str, int, float, bool, type(None)))
     except Exception:
         # Conservative fallback: stringify if sampling or serialization fails.
         return True
-
-
-def _maybe_convert_geopandas_to_pandas(data: pd.DataFrame) -> pd.DataFrame:
-    # Convert to pandas dataframe since geopandas will fail on
-    # certain operations (like to_json(orient="records"))
-    if DependencyManager.geopandas.imported():
-        import geopandas as gpd  # type: ignore
-        import pandas as pd
-
-        if isinstance(data, gpd.GeoDataFrame):
-            return pd.DataFrame(data)
-    return data
 
 
 class PandasTableManagerFactory(TableManagerFactory):
@@ -123,7 +206,6 @@ class PandasTableManagerFactory(TableManagerFactory):
             type = "pandas"
 
             def __init__(self, data: pd.DataFrame) -> None:
-                data = _maybe_convert_geopandas_to_pandas(data)
                 data = self._handle_multi_col_indexes(data)
                 data = self._handle_non_string_column_names(data)
                 self._original_data = data
@@ -151,32 +233,27 @@ class PandasTableManagerFactory(TableManagerFactory):
                 if not mixed_cols:
                     return super().sort_values(by)
 
-                df = self.data
+                df = self._original_data.copy()
                 temp_cols: list[str] = []
                 sort_cols: list[str] = []
                 for col in columns:
                     if col in mixed_cols:
                         temp = f"__sort_{col}"
-                        # Preserve nulls so nulls_last=True works.
-                        # On pandas <3.0, cast(String) turns None
-                        # into the string "None" instead of null.
-                        df = df.with_columns(
-                            nw.when(nw.col(col).is_null())
-                            .then(None)
-                            .otherwise(nw.col(col).cast(nw.String))
-                            .alias(temp)
+                        series = df[col]
+                        df[temp] = series.where(
+                            series.isna(), series.astype(str)
                         )
                         temp_cols.append(temp)
                         sort_cols.append(temp)
                     else:
                         sort_cols.append(col)
 
-                df = df.sort(
+                df = df.sort_values(
                     sort_cols,
-                    descending=descending,
-                    nulls_last=True,
-                ).drop(temp_cols)
-                return self.with_new_data(df)
+                    ascending=[not value for value in descending],
+                    na_position="last",
+                ).drop(columns=temp_cols)
+                return PandasTableManager(df)
 
             # We override narwhals's to_csv_str to handle pandas
             # headers
@@ -226,82 +303,76 @@ class PandasTableManagerFactory(TableManagerFactory):
 
                 from pandas.api.types import (
                     is_complex_dtype,
+                    is_extension_array_dtype,
                     is_object_dtype,
                     is_timedelta64_dtype,
                     is_timedelta64_ns_dtype,
                 )
 
-                _data = self.apply_formatting(format_mapping)._original_data
-                result = _data.copy()  # to avoid SettingWithCopyWarning
+                formatted = self.apply_formatting(format_mapping)
+                # Copy to avoid SettingWithCopyWarning.
+                geometry_columns = formatted._geometry_columns
+                result = pd.DataFrame(formatted._original_data.copy())
                 try:
+                    _format_geometry_columns(
+                        result,
+                        geometry_columns,
+                    )
                     for col in result.columns:
-                        dtype = result[col].dtype
-                        # Complex dtypes are converted to {'imag': num, 'real': num} by default
-                        # We want to preserve the original display
+                        series = result[col]
+                        dtype = series.dtype
+                        if str(col) in geometry_columns:
+                            continue
+                        # Complex dtypes become {'imag': num, 'real': num} by default.
+                        # Preserve their display values instead.
                         if is_complex_dtype(dtype):
-                            result[col] = result[col].apply(str)
-                        if _extension_column_needs_stringify(result[col]):
-                            # Extension arrays with rich Python values (e.g.
-                            # pint-pandas) serialize to nested dicts via
-                            # to_dict; stringify to preserve display.
-                            result[col] = result[col].astype(str)
+                            result[col] = _stringify_preserving_nulls(series)
+
+                        notna_mask = (
+                            series.notna()
+                            if is_extension_array_dtype(dtype)
+                            else None
+                        )
+                        if _extension_column_needs_stringify(
+                            series, notna_mask
+                        ):
+                            # Extension arrays with rich Python values serialize to nested
+                            # dictionaries through to_dict. Preserve their display values.
+                            result[col] = _stringify_preserving_nulls(
+                                series, notna_mask
+                            )
+
                         if is_timedelta64_dtype(
                             dtype
                         ) or is_timedelta64_ns_dtype(dtype):
-                            result[col] = result[col].apply(str)
+                            result[col] = _stringify_preserving_nulls(series)
                         if is_object_dtype(dtype):
-                            # Check if column contains date objects (not datetime), and convert them to string
-                            # Typically, this will change to YYYY-MM-DD format
+                            # Convert date objects to the YYYY-MM-DD display form.
                             inferred_dtype = self._infer_dtype(col)
                             if inferred_dtype == "date":
-                                result[col] = result[col].apply(str)
+                                result[col] = _stringify_preserving_nulls(
+                                    series
+                                )
                             elif inferred_dtype == "bytes":
-                                # Cast bytes to string to avoid overflow error
-                                result[col] = result[col].apply(str)
+                                # Convert bytes to strings to avoid an overflow error.
+                                result[col] = _stringify_preserving_nulls(
+                                    series
+                                )
 
                 except Exception as e:
                     LOGGER.error(
                         "Error handling complex or timedelta64 dtype",
                         exc_info=e,
                     )
+                    result = _flatten_non_trivial_index(result)
+
                     return sanitize_json_bigint(
                         to_json(result), ensure_ascii=ensure_ascii
                     )
 
-                # Flatten row multi-index
-                # Reset index if it's a MultiIndex or a named Index
-                # (including named RangeIndex, which pandas 3.0 uses for sequential integers)
-                # Only skip reset for unnamed default RangeIndex (0, 1, 2, ...)
-                if isinstance(result.index, pd.MultiIndex) or (
-                    isinstance(result.index, pd.Index)
-                    and not _trivial_range_index(result.index)
-                ):
-                    unnamed_indexes = any(
-                        idx is None for idx in result.index.names
-                    )
-
-                    index_levels = result.index.nlevels
-
-                    _resolve_index_column_conflicts(result)
-                    index_names = result.index.names
-
-                    result = result.reset_index()
-
-                    if unnamed_indexes:
-                        # After reset_index, the index is converted to a column
-                        # We need to rename the new columns to empty strings
-                        # And it must be unique for each column
-                        # TODO: On the frontend this still displays the original index, not the renamed one
-                        empty_name = ""
-                        for i, idx_name in enumerate(index_names):
-                            if idx_name is None:
-                                result.columns.values[i] = empty_name
-                                empty_name += " "
-
-                        if index_levels > 1:
-                            LOGGER.warning(
-                                "Indexes with more than one level are not well supported, call reset_index() or use mo.plain(df)"
-                            )
+                # Flatten row multi-index / named index into columns so it is
+                # serialized alongside the data.
+                result = _flatten_non_trivial_index(result)
 
                 return sanitize_json_bigint(
                     to_json(result), ensure_ascii=ensure_ascii
@@ -313,26 +384,43 @@ class PandasTableManagerFactory(TableManagerFactory):
                 return pd.api.types.infer_dtype(self._original_data[column])
 
             def to_arrow_ipc(self) -> bytes:
-                out = io.BytesIO()
+                import pyarrow as pa
+
+                df = self._original_data
+                if self._geometry_columns:
+                    df = pd.DataFrame(df.copy())
+                    _format_geometry_columns(df, self._geometry_columns)
+
                 try:
-                    self._original_data.to_feather(
-                        out, compression="uncompressed"
-                    )
+                    return _dataframe_to_arrow_ipc(df)
                 except Exception:
                     # Fall back: convert extension-type columns that
                     # PyArrow cannot handle (e.g. pint-pandas) to plain
-                    # values so the feather write can succeed.
-                    import pyarrow as pa
-
-                    out = io.BytesIO()
-                    df = self._original_data.copy()
+                    # values so the IPC write can succeed.
+                    df = pd.DataFrame(
+                        df.copy()
+                    )  # convert to base dataframe from extension dataframe
                     for col in df.columns:
                         try:
                             pa.Array.from_pandas(df[col])
                         except Exception:
-                            df[col] = df[col].astype(object).infer_objects()
-                    df.to_feather(out, compression="uncompressed")
-                return out.getvalue()
+                            converted = df[col].astype(object).infer_objects()
+                            try:
+                                pa.Array.from_pandas(converted)
+                            except Exception:
+                                notna = df[col].notna().to_numpy()
+                                converted = pd.Series(
+                                    [
+                                        str(value) if present else None
+                                        for value, present in zip(
+                                            df[col], notna, strict=True
+                                        )
+                                    ],
+                                    index=df.index,
+                                    dtype=object,
+                                )
+                            df[col] = converted
+                    return _dataframe_to_arrow_ipc(df)
 
             def apply_formatting(
                 self, format_mapping: FormatMapping | None
@@ -392,9 +480,7 @@ class PandasTableManagerFactory(TableManagerFactory):
                 if not isinstance(data.columns, pd.Index):
                     return data
 
-                if len(data.columns) > 0 and not isinstance(
-                    data.columns[0], str
-                ):
+                if any(not isinstance(name, str) for name in data.columns):
                     data_copy = data.copy()
                     data_copy.columns = pd.Index(
                         [str(name) for name in data_copy.columns]
@@ -405,16 +491,15 @@ class PandasTableManagerFactory(TableManagerFactory):
             # We override the default implementation to use pandas
             # headers
             def get_row_headers(self) -> FieldTypes:
-                headers = self._get_row_headers_for_index(
+                return self._get_row_headers_for_index(
                     self._original_data.index
                 )
-                # Rename headers that collide with column names so the
-                # frontend receives names consistent with to_json_str().
-                columns = set(self._original_data.columns)
-                return [
-                    (_resolve_index_name(name, columns), ft)
-                    for name, ft in headers
-                ]
+
+            def with_index_as_columns(self) -> PandasTableManager:
+                flattened = _flatten_non_trivial_index(self._original_data)
+                if flattened is self._original_data:
+                    return self
+                return PandasTableManager(flattened)
 
             def _has_non_trivial_index(self) -> bool:
                 """Check if the DataFrame has a non-trivial index that should be searched."""
@@ -463,24 +548,27 @@ class PandasTableManagerFactory(TableManagerFactory):
                 if _trivial_range_index(index):
                     return []
 
+                # Names are shared with the chart-data flatten path so the
+                # offered fields match the serialized columns exactly.
+                names = _index_level_names(
+                    index, set(self._original_data.columns)
+                )
                 if isinstance(index, pd.MultiIndex):
-                    # recurse
-                    headers: FieldTypes = []
-                    for i in range(index.nlevels):
-                        headers.extend(
-                            self._get_row_headers_for_index(
-                                index.get_level_values(i)
-                            )
+                    return [
+                        (
+                            name,
+                            self._map_dtype_to_field_type(
+                                index.get_level_values(i).dtype
+                            ),
                         )
-                    return headers
+                        for i, name in enumerate(names)
+                    ]
 
-                dtype = index.dtype
-                field_type = self._map_dtype_to_field_type(dtype)
-                return [(str(index.name or ""), field_type)]
+                return [(names[0], self._map_dtype_to_field_type(index.dtype))]
 
-            # We override the default implementation to use pandas's
-            # internal fields since they get displayed in the UI.
-            def get_field_type(
+            # Override the dtype mapper to use pandas's internal fields
+            # since they get displayed in the UI.
+            def _get_field_type_from_dtype(
                 self, column_name: str
             ) -> tuple[FieldType, ExternalDataType]:
                 dtype = self.schema[column_name]
@@ -528,6 +616,8 @@ class PandasTableManagerFactory(TableManagerFactory):
             def get_unique_column_values(
                 self, column: str
             ) -> list[str | int | float]:
+                if column in self._geometry_columns:
+                    return []
                 return self._original_data[column].unique().tolist()  # type: ignore[return-value,no-any-return]
 
         return PandasTableManager

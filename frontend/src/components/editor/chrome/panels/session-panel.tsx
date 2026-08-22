@@ -1,44 +1,34 @@
 /* Copyright 2026 Marimo. All rights reserved. */
 
 import { useAtom, useAtomValue } from "jotai";
-import { atomWithStorage } from "jotai/utils";
 import { DatabaseIcon, VariableIcon } from "lucide-react";
 import React, { useCallback } from "react";
-import {
-  connectionsAtom,
-  DataSources,
-} from "@/components/datasources/datasources";
+import { DataSources } from "@/components/datasources/datasources";
 import { Accordion } from "@/components/ui/accordion";
 import { VariableTable } from "@/components/variables/variables-table";
 import { useCellIds } from "@/core/cells/cells";
+import { connectionsAtom } from "@/core/datasets/data-source-connections";
 import { datasetTablesAtom } from "@/core/datasets/state";
 import { useVariables } from "@/core/variables/state";
-import { jotaiJsonStorage } from "@/utils/storage/jotai";
+import { useDetectedDataSources } from "@/hooks/useDataSourceDiscovery";
 import {
+  DiscoveredSourcesBadge,
   PanelAccordionContent,
   PanelAccordionItem,
   PanelAccordionTrigger,
   PanelBadge,
 } from "./components";
-
-type OpenSections = "variables" | "datasources";
-
-interface SessionPanelState {
-  openSections: OpenSections[];
-  hasUserInteracted: boolean;
-}
-
-const sessionPanelAtom = atomWithStorage<SessionPanelState>(
-  "marimo:session-panel:state",
-  { openSections: ["variables"], hasUserInteracted: false },
-  jotaiJsonStorage,
-);
+import {
+  sessionPanelAtom,
+  type SessionPanelSection,
+} from "./panel-accordion-state";
 
 const SessionPanel: React.FC = () => {
   const variables = useVariables();
   const cellIds = useCellIds();
   const tables = useAtomValue(datasetTablesAtom);
   const dataConnections = useAtomValue(connectionsAtom);
+  const pendingDataSources = useDetectedDataSources("database");
   const [state, setState] = useAtom(sessionPanelAtom);
 
   const datasourcesCount = tables.length + dataConnections.length;
@@ -50,7 +40,7 @@ const SessionPanel: React.FC = () => {
       : state.openSections;
 
   const handleValueChange = useCallback(
-    (value: OpenSections[]) => {
+    (value: SessionPanelSection[]) => {
       setState({
         openSections: value,
         hasUserInteracted: true,
@@ -61,6 +51,7 @@ const SessionPanel: React.FC = () => {
 
   const isDatasourcesOpen = openSections.includes("datasources");
   const showDatasourcesBadge = !isDatasourcesOpen && datasourcesCount > 0;
+  const showDiscoveredDataSourcesBadge = pendingDataSources.length > 0;
 
   return (
     <Accordion
@@ -74,6 +65,12 @@ const SessionPanel: React.FC = () => {
           <DatabaseIcon className="w-4 h-4" />
           Data sources
           {showDatasourcesBadge && <PanelBadge>{datasourcesCount}</PanelBadge>}
+          {showDiscoveredDataSourcesBadge && (
+            <DiscoveredSourcesBadge
+              count={pendingDataSources.length}
+              type="database"
+            />
+          )}
         </PanelAccordionTrigger>
         <PanelAccordionContent>
           <DataSources />

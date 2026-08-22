@@ -16,7 +16,9 @@ import {
   AzureStorageSchema,
   CoreWeaveStorageSchema,
   GCSStorageSchema,
+  GithubStorageSchema,
   GoogleDriveStorageSchema,
+  HuggingfaceStorageSchema,
   S3StorageSchema,
   type StorageConnection,
 } from "./schemas";
@@ -79,6 +81,24 @@ const STORAGE_PROVIDERS = [
       preferred: "fsspec",
     },
   },
+  {
+    name: "Hugging Face Hub",
+    schema: HuggingfaceStorageSchema,
+    protocol: "hf",
+    storageLibraries: {
+      libraries: ["huggingface_hub"],
+      preferred: "huggingface_hub",
+    },
+  },
+  {
+    name: "GitHub",
+    schema: GithubStorageSchema,
+    protocol: "github",
+    storageLibraries: {
+      libraries: ["fsspec"],
+      preferred: "fsspec",
+    },
+  },
 ] satisfies StorageProviderSchema[];
 
 const StorageProviderSelector: React.FC<{
@@ -95,7 +115,7 @@ const StorageProviderSelector: React.FC<{
             <ProtocolIcon
               protocol={protocol as KnownStorageProtocol}
               forceDark={true}
-              className="w-7.5 h-7.5"
+              className="w-7.5 h-7.5 text-white"
             />
           }
           onSelect={() => onSelect(schema)}

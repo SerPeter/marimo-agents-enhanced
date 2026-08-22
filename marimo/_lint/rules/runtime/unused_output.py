@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 
 class UnusedOutputRule(LintRule):
-    """MR004: Marimo output call that is not the last expression in a cell.
+    """MR005: Marimo output call that is not the last expression in a cell.
 
     Detects `mo.*` output calls (like `mo.md()`, `mo.ui.slider()`) that
     appear as bare expression statements but are not the last expression. In
@@ -57,7 +57,7 @@ class UnusedOutputRule(LintRule):
     - [Outputs Guide](https://docs.marimo.io/guides/outputs/)
     """
 
-    code = "MR004"
+    code = "MR005"
     name = "unused-marimo-output"
     description = (
         "Marimo output call is not the last expression and will be discarded"

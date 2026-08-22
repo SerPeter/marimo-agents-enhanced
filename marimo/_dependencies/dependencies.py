@@ -152,6 +152,26 @@ class Dependency:
         )
 
 
+@dataclass(frozen=True)
+class DependencyRequirement:
+    """An installable package backed by one or more import checks."""
+
+    package: str
+    dependencies: tuple[Dependency, ...]
+
+    @property
+    def pkg_name_to_install(self) -> str:
+        return self.package
+
+    def has(self, quiet: bool = False) -> bool:
+        return all(
+            dependency.has(quiet=quiet) for dependency in self.dependencies
+        )
+
+
+DependencyLike = Dependency | DependencyRequirement
+
+
 def _version_check(
     *,
     pkg: str,
@@ -225,6 +245,8 @@ class DependencyManager:
     ruff = Dependency("ruff")
     black = Dependency("black")
     geopandas = Dependency("geopandas")
+    shapely = Dependency("shapely")
+    pint = Dependency("pint")
     opentelemetry = Dependency("opentelemetry")
     anthropic = Dependency("anthropic")
     google_ai = Dependency("google.genai")
@@ -248,22 +270,23 @@ class DependencyManager:
 
     redshift_connector = Dependency("redshift_connector")
     starrocks = Dependency("starrocks")
-    mcp = Dependency("mcp")
+    mcp = Dependency("mcp", min_version="2.0.0", max_version="3.0.0")
     pydantic_ai = Dependency(
         "pydantic_ai", pkg_name_to_install="pydantic-ai-slim"
     )
     pydantic = Dependency("pydantic")
+    duckduckgo_search = Dependency("ddgs")  # For web search
+    markdownify = Dependency("markdownify")  # For web fetch
     zmq = Dependency("zmq")  # pyzmq for sandbox IPC kernels
     torch = Dependency("torch")
+    flax = Dependency("flax")
     weave = Dependency("weave")
     # Storage
     obstore = Dependency("obstore")
     fsspec = Dependency("fsspec")
+    huggingface_hub = Dependency("huggingface_hub")
     cloudpathlib = Dependency("cloudpathlib")
-
-    # Version requirements to properly support the new superfences introduced in
-    # pymdown#2470
-    new_superfences = Dependency("pymdownx", min_version="10.11.0")
+    cryptography = Dependency("cryptography")
 
     @staticmethod
     def has(pkg: str) -> bool:
@@ -286,16 +309,26 @@ class DependencyManager:
         return shutil.which(pkg) is not None
 
     @staticmethod
+    def missing_packages(*dependencies: DependencyLike) -> list[str]:
+        """Return installable package names for missing dependencies."""
+        missing: list[str] = []
+        for dependency in dependencies:
+            package = dependency.pkg_name_to_install
+            if (
+                not dependency.has()
+                and package is not None
+                and package not in missing
+            ):
+                missing.append(package)
+        return missing
+
+    @staticmethod
     def require_many(
         why: str,
-        *dependencies: Dependency,
+        *dependencies: DependencyLike,
         source: Literal["kernel", "server"],
     ) -> None:
-        missing = [
-            dep.pkg_name_to_install
-            for dep in dependencies
-            if not dep.has() and dep.pkg_name_to_install is not None
-        ]
+        missing = DependencyManager.missing_packages(*dependencies)
         if missing:
             raise ManyModulesNotFoundError(
                 missing,

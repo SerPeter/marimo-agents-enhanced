@@ -19,9 +19,12 @@ from marimo._runtime.packages.package_manager import (
     LogCallback,
     PackageDescription,
 )
-from marimo._runtime.packages.utils import split_packages
+from marimo._runtime.packages.utils import (
+    popen_package_command,
+    run_package_command,
+    split_packages,
+)
 from marimo._utils.platform import is_pyodide
-from marimo._utils.subprocess import safe_popen
 from marimo._utils.uv import find_uv_bin
 from marimo._utils.uv_tree import DependencyTreeNode, parse_uv_tree
 from marimo._utils.versions import (
@@ -102,8 +105,11 @@ class PypiPackageManager(CanonicalizingPackageManager):
     ) -> list[PackageDescription]:
         if not self.is_manager_installed():
             return []
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8"
+        proc = run_package_command(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
         )
         if proc.returncode != 0:
             return []
@@ -133,7 +139,7 @@ class PipPackageManager(PypiPackageManager):
         # (python -m pip) rather than relying on PATH pip, which could be
         # a different Python's pip than self._python_exe
         try:
-            proc = subprocess.run(
+            proc = run_package_command(
                 [self._python_exe, "-m", "pip", "--version"],
                 capture_output=True,
                 text=True,
@@ -271,6 +277,14 @@ class UvPackageManager(PypiPackageManager):
     docs_url = "https://docs.astral.sh/uv/"
 
     SCRIPT_METADATA_MARKER = "# /// script"
+    _use_project = True
+
+    @classmethod
+    def for_pip_install(cls, python_exe: str) -> UvPackageManager:
+        """Target an interpreter without changing its uv project."""
+        manager = cls(python_exe=python_exe)
+        manager._use_project = False
+        return manager
 
     @cached_property
     def _uv_bin(self) -> str:
@@ -340,19 +354,30 @@ class UvPackageManager(PypiPackageManager):
                 log_callback=log_callback,
             )
 
-        # For uv pip install, try with output capture to enable fallback
+        import asyncio
+
+        return await asyncio.to_thread(
+            self._install_with_cache_fallback,
+            package,
+            upgrade=upgrade,
+            group=group,
+            log_callback=log_callback,
+        )
+
+    def _install_with_cache_fallback(
+        self,
+        package: str,
+        *,
+        upgrade: bool,
+        group: str | None,
+        log_callback: LogCallback | None,
+    ) -> bool:
         cmd = self.install_command(package, upgrade=upgrade, group=group)
 
         LOGGER.info(f"Running command: {cmd}")
 
         # Run the command and capture output
-        proc = safe_popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=False,
-            bufsize=0,
-        )
+        proc = popen_package_command(cmd)
 
         if proc is None:
             return False
@@ -388,9 +413,10 @@ class UvPackageManager(PypiPackageManager):
                     "\nRetrying with --no-cache due to cache write permission error...\n"
                 )
 
-            # Retry with --no-cache flag
-            cmd_with_no_cache = cmd + ["--no-cache"]
-            return await self.run(cmd_with_no_cache, log_callback=log_callback)
+            return self._run_sync(
+                cmd + ["--no-cache"],
+                log_callback=log_callback,
+            )
 
         return False
 
@@ -592,6 +618,9 @@ class UvPackageManager(PypiPackageManager):
         we are in a temporary virtual environment (e.g. `uvx marimo edit` or `uv --with=marimo run marimo edit`)
         or in the currently activated virtual environment (e.g. `uv venv`).
         """
+        if not self._use_project:
+            return False
+
         # Check we have a virtual environment
         venv_path = os.environ.get("VIRTUAL_ENV", None)
         if not venv_path:
@@ -684,7 +713,7 @@ class UvPackageManager(PypiPackageManager):
             tree_cmd += ["--script", filename]
 
         try:
-            result = subprocess.run(
+            result = run_package_command(
                 tree_cmd,
                 capture_output=True,
                 text=True,
@@ -739,8 +768,10 @@ class PoetryPackageManager(PypiPackageManager):
     docs_url = "https://python-poetry.org/docs/"
 
     def _get_poetry_version(self) -> int:
-        proc = subprocess.run(
-            ["poetry", "--version"], capture_output=True, text=True
+        proc = run_package_command(
+            ["poetry", "--version"],
+            capture_output=True,
+            text=True,
         )
         if proc.returncode != 0:
             return -1  # and raise on the impl side
@@ -774,8 +805,11 @@ class PoetryPackageManager(PypiPackageManager):
         if not self.is_manager_installed():
             return []
 
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8"
+        proc = run_package_command(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
         )
         if proc.returncode != 0:
             return []
@@ -814,8 +848,10 @@ class PoetryPackageManager(PypiPackageManager):
 
         try:
             cmd = ["poetry", "show", "--without", "dev"]
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, check=False
+            result = run_package_command(
+                cmd,
+                capture_output=True,
+                text=True,
             )
 
             # If Poetry 2.x throws "Group(s) not found"

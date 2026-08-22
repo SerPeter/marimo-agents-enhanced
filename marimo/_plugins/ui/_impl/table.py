@@ -313,6 +313,12 @@ def _filter_valid_columns(
         if isinstance(child, FilterCondition):
             if child.column_id not in column_dtypes:
                 continue
+            if column_dtypes[child.column_id] == "geometry":
+                LOGGER.warning(
+                    "Ignoring filter on geometry column '%s'",
+                    child.column_id,
+                )
+                continue
             category = _DATATYPE_TO_CATEGORY.get(
                 column_dtypes[child.column_id], ""
             )
@@ -352,7 +358,8 @@ class table(
 
     1. a list of dicts, with one dict for each row, keyed by column names;
     2. a list of values, representing a table with a single column;
-    3. a dataframe (e.g., Polars, Pandas, PyArrow, Ibis, DuckDB).
+    3. a dict of lists, with one list for each column, keyed by column names;
+    4. a dataframe (e.g., Polars, Pandas, PyArrow, Ibis, DuckDB).
 
     Examples:
         Create a table from a list of dicts, one for each row:
@@ -367,14 +374,23 @@ class table(
         )
         ```
 
-        Create a table from a single column of data:
+        Create a table from a list of values, as a single column:
 
         ```python
         table = mo.ui.table(
-            data=[
-                {"first_name": "Michael", "last_name": "Scott"},
-                {"first_name": "Dwight", "last_name": "Schrute"},
-            ],
+            data=["Michael Scott", "Dwight Schrute"],
+            label="Users",
+        )
+        ```
+
+        Create a table from a dict of lists, one list per column:
+
+        ```python
+        table = mo.ui.table(
+            data={
+                "first_name": ["Michael", "Dwight"],
+                "last_name": ["Scott", "Schrute"],
+            },
             label="Users",
         )
         ```
@@ -1181,8 +1197,9 @@ class table(
                 (column_type, external_type) = self._manager.get_field_type(
                     column
                 )
-                # For boolean columns, we can drop the column since we use stats
-                if column_type == "boolean" or column_type == "unknown":
+                # Boolean columns render from stats; unknown and geometry
+                # columns get no chart.
+                if column_type in ("boolean", "unknown", "geometry"):
                     cols_to_drop.append(column)
 
                 # Handle columns with all nulls first
@@ -1239,8 +1256,16 @@ class table(
                     continue
                 except BaseException as e:
                     bin_aggregation_failed = True
-                    LOGGER.warning(
-                        "Failed to get bin values for column %s: %s", column, e
+                    # Duration/timedelta bins are unsupported by the charting
+                    # path, so this expected failure does not emit a warning.
+                    is_duration = external_type.startswith(
+                        ("duration", "timedelta", "interval")
+                    )
+                    log = LOGGER.debug if is_duration else LOGGER.warning
+                    log(
+                        "Failed to get bin values for column %s: %s",
+                        column,
+                        e,
                     )
 
         should_fallback = show_charts and bin_aggregation_failed
@@ -1355,14 +1380,19 @@ class table(
         """Get the data URL for the entire table. Used for charting."""
         del args
 
+        # Expose a non-trivial row index (e.g. a named datetime index) as a
+        # column so it can be selected as a chart axis. Scoped to the chart
+        # data path; downloads and the displayed table are unaffected.
+        chart_manager = self._searched_manager.with_index_as_columns()
+
         if DependencyManager.altair.has():
-            result = _to_marimo_arrow(self._searched_manager.data)
+            result = _to_marimo_arrow(chart_manager.data)
             return GetDataUrlResponse(
                 data_url=result["url"],
                 format=result["format"]["type"],
             )
 
-        url, data_format = self._to_chart_data_url(self._searched_manager)
+        url, data_format = self._to_chart_data_url(chart_manager)
         return GetDataUrlResponse(
             data_url=url,
             format=data_format,
@@ -1412,7 +1442,18 @@ class table(
 
         if sort:
             existing_columns = set(result.get_column_names())
-            valid_sort = [s for s in sort if s.by in existing_columns]
+            field_types = dict(result.get_field_types())
+            valid_sort: list[SortArgs] = []
+            for sort_arg in sort:
+                if sort_arg.by not in existing_columns:
+                    continue
+                field_type = field_types.get(sort_arg.by)
+                if field_type is not None and field_type[0] == "geometry":
+                    LOGGER.warning(
+                        "Ignoring sort on geometry column '%s'", sort_arg.by
+                    )
+                    continue
+                valid_sort.append(sort_arg)
             if valid_sort:
                 result = result.sort_values(valid_sort)
 
@@ -1839,15 +1880,6 @@ def _validate_frozen_columns(
             raise ValueError("The same column cannot be frozen on both sides.")
 
     if freeze_columns_left_set:
-        # Unnamed row headers (e.g. a default pandas index) have no stable
-        # client-side id, so we can't freeze them. Surface this directly
-        # rather than letting the frontend silently no-op.
-        if "" in freeze_columns_left_set and "" in row_header_names_set:
-            raise ValueError(
-                "Cannot freeze an unnamed row index. "
-                "Set `df.index.name = '...'` (or `df.index.names = [...]` "
-                "for a MultiIndex) and pass that name to freeze_columns_left."
-            )
         invalid = (
             freeze_columns_left_set - column_names_set - row_header_names_set
         )
